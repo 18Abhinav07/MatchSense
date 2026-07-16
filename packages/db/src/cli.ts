@@ -1,4 +1,5 @@
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 import { createPostgresDatabase } from "./postgres.js";
 import type { DatabaseRuntime } from "./runtime.js";
@@ -17,6 +18,21 @@ function validDatabaseUrl(value: string | undefined): value is string {
   }
 
   return ["postgres:", "postgresql:"].includes(new URL(value).protocol);
+}
+
+export function isDirectExecution(
+  moduleUrl: string,
+  entryPath: string | undefined,
+) {
+  if (!entryPath) {
+    return false;
+  }
+
+  try {
+    return realpathSync(fileURLToPath(moduleUrl)) === realpathSync(entryPath);
+  } catch {
+    return false;
+  }
 }
 
 export async function runDatabaseCli(
@@ -81,10 +97,8 @@ export async function runDatabaseCli(
 }
 
 const entryPath = process.argv[1];
-const isDirectExecution =
-  entryPath !== undefined && import.meta.url === pathToFileURL(entryPath).href;
 
-if (isDirectExecution) {
+if (isDirectExecution(import.meta.url, entryPath)) {
   void runDatabaseCli({
     args: process.argv.slice(2),
     createRuntime: createPostgresDatabase,

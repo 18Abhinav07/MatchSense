@@ -11,12 +11,14 @@
     "preflight:db": "corepack pnpm --filter @matchsense/db build",
     "test": "corepack pnpm run preflight:db && node --test scripts/*.test.mjs && vitest run",
     "test:integration": "corepack pnpm --filter @matchsense/db run test:integration",
+    "test:container": "node scripts/container-smoke.mjs",
     "typecheck": "corepack pnpm run preflight:db && corepack pnpm --recursive --if-present run typecheck",
     "build": "corepack pnpm --recursive --if-present run build",
     "format:check": "prettier --check .",
     "install:frozen": "corepack pnpm install --frozen-lockfile",
     "db:migrate": "corepack pnpm --filter @matchsense/db build && node packages/db/dist/cli.js migrate",
-    "db:check": "corepack pnpm --filter @matchsense/db build && node packages/db/dist/cli.js check"
+    "db:check": "corepack pnpm --filter @matchsense/db build && node packages/db/dist/cli.js check",
+    "asset:check": "node scripts/asset-rights.mjs"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

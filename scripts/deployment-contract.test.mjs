@@ -1,0 +1,192 @@
+import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+function read(relativePath) {
+  return readFileSync(path.join(root, relativePath), "utf8");
+}
+
+function readJson(relativePath) {
+  return JSON.parse(read(relativePath));
+}
+
+test("production Dockerfile is immutable, portable, and least privileged", () => {
+  assert.equal(existsSync(path.join(root, "Dockerfile")), true);
+  const dockerfile = read("Dockerfile");
+
+  assert.match(
+    dockerfile,
+    /^FROM node:24\.18\.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS builder$/mu,
+  );
+  assert.match(dockerfile, /corepack prepare pnpm@11\.13\.0 --activate/u);
+  assert.match(dockerfile, /pnpm install --frozen-lockfile/u);
+  assert.match(dockerfile, /pnpm run build/u);
+  assert.match(
+    dockerfile,
+    /pnpm --filter @matchsense\/server deploy --prod --legacy \/opt\/deploy\/server/u,
+  );
+  assert.match(
+    dockerfile,
+    /COPY --from=builder \/opt\/deploy\/server \/app\/server/u,
+  );
+  assert.match(
+    dockerfile,
+    /COPY --from=builder \/workspace\/apps\/web\/dist \/app\/web\/dist/u,
+  );
+  assert.match(dockerfile, /^ENV NODE_ENV=production$/mu);
+  assert.match(dockerfile, /^ENV PORT=8080$/mu);
+  assert.match(dockerfile, /^USER node$/mu);
+  assert.match(dockerfile, /^EXPOSE 8080$/mu);
+  assert.match(dockerfile, /^HEALTHCHECK .*node.*\/health\/live/mu);
+  assert.match(dockerfile, /process\.env\.PORT/u);
+  assert.match(dockerfile, /^CMD \["node", "dist\/main\.js"\]$/mu);
+  assert.doesNotMatch(dockerfile, /ffmpeg/iu);
+});
+
+test("Docker context excludes local, generated, and secret-bearing files", () => {
+  const dockerignore = read(".dockerignore");
+  const ignored = new Set(
+    dockerignore
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => line !== "" && !line.startsWith("#")),
+  );
+
+  for (const expected of [
+    ".git",
+    ".env*",
+    "**/node_modules",
+    "**/dist",
+    "coverage",
+  ]) {
+    assert.equal(ignored.has(expected), true, `${expected} must be ignored`);
+  }
+  assert.doesNotMatch(dockerignore, /^!.*\.env/mu);
+
+  const npmignore = read("apps/server/.npmignore");
+  for (const forbidden of ["src", "*.test.*", "tsconfig*.json"]) {
+    assert.match(
+      npmignore,
+      new RegExp(`^${forbidden.replaceAll("*", "\\*")}$`, "mu"),
+    );
+  }
+});
+
+test("root exposes real deployment verification commands", () => {
+  const manifest = readJson("package.json");
+
+  assert.equal(
+    manifest.scripts?.["test:container"],
+    "node scripts/container-smoke.mjs",
+  );
+  assert.equal(
+    manifest.scripts?.["asset:check"],
+    "node scripts/asset-rights.mjs",
+  );
+});
+
+test("container smoke uses isolated pinned infrastructure and validates the runtime contract", () => {
+  const smoke = read("scripts/container-smoke.mjs");
+
+  assert.match(
+    smoke,
+    /postgres:17\.5-alpine@sha256:6567bca8d7bc8c82c5922425a0baee57be8402df92bae5eacad5f01ae9544daa/u,
+  );
+  assert.match(smoke, /matchsense_container_test/u);
+  assert.match(smoke, /assertDestructiveIntegrationTarget/u);
+  assert.match(smoke, /runLabeledCommand/u);
+  assert.doesNotMatch(smoke, /node:child_process/u);
+  for (const stage of [
+    "build production image",
+    "create smoke network",
+    "start PostgreSQL",
+    "wait for PostgreSQL",
+    "apply database migrations",
+    "verify database migrations",
+    "start application",
+    "inspect application user",
+    "inspect runtime user",
+    "probe production image",
+    "inspect published port",
+    "stop application gracefully",
+    "inspect application exit",
+    "cleanup: stop application",
+    "cleanup: remove application",
+    "cleanup: remove PostgreSQL",
+    "cleanup: remove network",
+    "cleanup: remove image",
+  ]) {
+    assert.equal(
+      smoke.includes(`"${stage}"`),
+      true,
+      `${stage} must be labeled`,
+    );
+  }
+  assert.doesNotMatch(
+    smoke,
+    /\bdocker\(\s*"(?:network|run|exec|inspect|port|stop|rm|image)"/u,
+  );
+  assert.match(smoke, /sensitiveValues/u);
+  assert.match(smoke, /127\.0\.0\.1::8080/u);
+  assert.match(smoke, /health\/live/u);
+  assert.match(smoke, /health\/ready/u);
+  assert.match(smoke, /node_modules\/@matchsense\/db\/dist\/cli\.js/u);
+  assert.match(smoke, /Database migrations applied: 1; current version: 1/u);
+  assert.match(smoke, /Database migrations are current/u);
+  assert.match(smoke, /\/app\/web\/dist\/index\.html/u);
+  assert.match(smoke, /require\.resolve\(['"]vitest['"]\)/u);
+  assert.match(smoke, /\/app\/server\/src/u);
+  assert.match(smoke, /matches\/fixture-1\/moments\/moment-1/u);
+  assert.match(smoke, /api\/not-a-route/u);
+  assert.match(smoke, /cache-control/iu);
+  assert.match(smoke, /"--timeout"/u);
+  assert.doesNotMatch(smoke, /"--time"/u);
+  assert.match(smoke, /finally/u);
+  assert.doesNotMatch(smoke, /console\.(?:log|error).*password/iu);
+});
+
+test("CI pins supply-chain actions and proves quality before container runtime", () => {
+  const workflow = read(".github/workflows/ci.yml");
+
+  assert.match(workflow, /^permissions:\n  contents: read$/mu);
+  assert.match(
+    workflow,
+    /actions\/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0/u,
+  );
+  assert.match(workflow, /fetch-depth: 0/u);
+  assert.match(
+    workflow,
+    /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/u,
+  );
+  assert.match(workflow, /node-version: 24\.18\.0/u);
+  assert.match(
+    workflow,
+    /gitleaks\/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e/u,
+  );
+  assert.match(workflow, /corepack prepare pnpm@11\.13\.0 --activate/u);
+  assert.match(workflow, /pnpm install --frozen-lockfile/u);
+  for (const command of [
+    "pnpm format:check",
+    "pnpm test",
+    "pnpm typecheck",
+    "pnpm build",
+    "pnpm asset:check",
+    "pnpm test:integration",
+  ]) {
+    assert.equal(workflow.includes(command), true, `${command} must run in CI`);
+  }
+  assert.match(
+    workflow,
+    /postgres:17\.5-alpine@sha256:6567bca8d7bc8c82c5922425a0baee57be8402df92bae5eacad5f01ae9544daa/u,
+  );
+  assert.match(workflow, /POSTGRES_DB: matchsense_integration_test/u);
+  assert.match(workflow, /MATCHSENSE_ALLOW_DESTRUCTIVE_DB_TESTS: "true"/u);
+  assert.match(workflow, /TEST_DATABASE_URL:/u);
+  assert.match(workflow, /docker:\n\s+needs: quality/u);
+  assert.match(workflow, /pnpm test:container/u);
+  assert.doesNotMatch(workflow, /redis|bullmq|minio|s3/iu);
+});

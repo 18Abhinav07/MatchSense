@@ -23,5 +23,5 @@ export {
   createPostgresMigrationStore,
 } from "./postgres.js";
 export type { PostgresClient } from "./postgres.js";
-export { runDatabaseCli } from "./cli.js";
+export { isDirectExecution, runDatabaseCli } from "./cli.js";
 export type { DatabaseCliOptions } from "./cli.js";

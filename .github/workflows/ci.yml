@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.5-alpine@sha256:6567bca8d7bc8c82c5922425a0baee57be8402df92bae5eacad5f01ae9544daa
+        env:
+          POSTGRES_DB: matchsense_integration_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready --username postgres --dbname matchsense_integration_test"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      MATCHSENSE_ALLOW_DESTRUCTIVE_DB_TESTS: "true"
+      TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/matchsense_integration_test
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.18.0
+      - name: Activate pinned pnpm
+        run: corepack enable && corepack prepare pnpm@11.13.0 --activate
+      - name: Scan committed secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+      - name: Install frozen dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check formatting
+        run: pnpm format:check
+      - name: Run unit and contract tests
+        run: pnpm test
+      - name: Run PostgreSQL migration integration
+        run: pnpm test:integration
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Build
+        run: pnpm build
+      - name: Check asset rights
+        run: pnpm asset:check
+
+  docker:
+    needs: quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.18.0
+      - name: Activate pinned pnpm
+        run: corepack enable && corepack prepare pnpm@11.13.0 --activate
+      - name: Build production image
+        run: docker build --tag "matchsense-ci:${GITHUB_SHA}" .
+      - name: Run production container smoke
+        env:
+          MATCHSENSE_CONTAINER_IMAGE: matchsense-ci:${{ github.sha }}
+        run: pnpm test:container

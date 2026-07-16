@@ -1,3 +1,8 @@
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
 import { describe, expect, it, vi } from "vitest";
 
 import * as databaseModule from "./index.js";
@@ -15,6 +20,10 @@ interface TestRuntime {
 }
 
 type CliModuleContract = {
+  isDirectExecution?: (
+    moduleUrl: string,
+    entryPath: string | undefined,
+  ) => boolean;
   runDatabaseCli?: (options: {
     args: readonly string[];
     createRuntime: (databaseUrl: string) => TestRuntime;
@@ -66,6 +75,33 @@ function invoke(
 }
 
 describe("database CLI", () => {
+  it("recognizes a symlinked argv entry and safely rejects missing paths", async () => {
+    expect(cli.isDirectExecution).toBeTypeOf("function");
+    const directory = await mkdtemp(path.join(os.tmpdir(), "matchsense-cli-"));
+    const targetPath = path.join(directory, "cli.js");
+    const symlinkPath = path.join(directory, "deployed-cli.js");
+
+    try {
+      await writeFile(targetPath, "export {};\n");
+      await symlink(targetPath, symlinkPath);
+
+      expect(
+        cli.isDirectExecution?.(pathToFileURL(targetPath).href, symlinkPath),
+      ).toBe(true);
+      expect(
+        cli.isDirectExecution?.(
+          pathToFileURL(targetPath).href,
+          path.join(directory, "missing.js"),
+        ),
+      ).toBe(false);
+      expect(
+        cli.isDirectExecution?.(pathToFileURL(targetPath).href, undefined),
+      ).toBe(false);
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
   it("exits zero only when the database is reachable and current", async () => {
     expect(cli.runDatabaseCli).toBeTypeOf("function");
     const runtime = testRuntime();
