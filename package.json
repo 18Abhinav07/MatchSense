@@ -8,7 +8,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test scripts/workspace-contract.test.mjs",
+    "test": "node --test scripts/*.test.mjs",
     "typecheck": "pnpm --recursive --if-present run typecheck",
     "build": "pnpm --recursive --if-present run build",
     "format:check": "prettier --check ."

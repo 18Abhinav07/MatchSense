@@ -4,6 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { forbiddenInfrastructureCategory } from "./workspace-policy.mjs";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const workspaces = [
@@ -205,18 +207,18 @@ test("the production workspace keeps its locked lean-monorepo contract", () => {
         `root script is missing: ${script}`,
       );
     }
+    check(
+      manifest.scripts?.test === "node --test scripts/*.test.mjs",
+      "root test script must run every workspace policy test",
+    );
   }
 
   for (const [manifestPath, manifest] of manifests) {
-    for (const [dependency, version] of dependencyEntries(manifest)) {
-      const dependencyString = `${dependency}@${version}`.toLowerCase();
+    for (const [dependency] of dependencyEntries(manifest)) {
+      const forbiddenCategory = forbiddenInfrastructureCategory(dependency);
       check(
-        !dependencyString.includes("redis"),
-        `${manifestPath} contains a Redis dependency: ${dependency}`,
-      );
-      check(
-        !dependencyString.includes("bullmq"),
-        `${manifestPath} contains a BullMQ dependency: ${dependency}`,
+        forbiddenCategory === null,
+        `${manifestPath} contains a forbidden ${forbiddenCategory} dependency: ${dependency}`,
       );
     }
   }
