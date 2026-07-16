@@ -3,6 +3,15 @@ import { describe, expect, it } from "vitest";
 import { parseServerEnv } from "./config.js";
 
 describe("parseServerEnv", () => {
+  it.each([
+    "postgres://db.example/matchsense",
+    "postgresql://db.example/matchsense",
+  ])("accepts the %s database protocol", (databaseUrl) => {
+    expect(parseServerEnv({ DATABASE_URL: databaseUrl }).databaseUrl).toBe(
+      databaseUrl,
+    );
+  });
+
   it("requires a PostgreSQL URL and applies safe local defaults", () => {
     const config = parseServerEnv({
       DATABASE_URL: "postgresql://db.example/matchsense",
@@ -19,6 +28,7 @@ describe("parseServerEnv", () => {
   it.each([
     [{}, "missing database URL"],
     [{ DATABASE_URL: "not-a-url" }, "invalid database URL"],
+    [{ DATABASE_URL: "https://db.example/matchsense" }, "non-PostgreSQL URL"],
     [
       { DATABASE_URL: "postgresql://localhost/matchsense", PORT: "0" },
       "port below range",

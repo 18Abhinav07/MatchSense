@@ -28,14 +28,47 @@ function readinessPayload(result: ReadinessResult) {
   } as const;
 }
 
-function isProductShellPath(pathname: string) {
-  if (["/", "/today", "/settings", "/diagnostics"].includes(pathname)) {
-    return true;
-  }
+const segment = "[A-Za-z0-9_-]+";
 
-  return /^\/(?:matches|moments|memories|rooms)\/[A-Za-z0-9_-]+(?:\/(?:transcript|memory))?$/u.test(
-    pathname,
-  );
+const canonicalShellRoutes = [
+  { pattern: /^\/$/u, template: "/" },
+  { pattern: /^\/onboarding$/u, template: "/onboarding" },
+  {
+    pattern: new RegExp(`^/matches/${segment}$`, "u"),
+    template: "/matches/:fixtureId",
+  },
+  {
+    pattern: new RegExp(`^/matches/${segment}/live$`, "u"),
+    template: "/matches/:fixtureId/live",
+  },
+  {
+    pattern: new RegExp(`^/matches/${segment}/moments/${segment}$`, "u"),
+    template: "/matches/:fixtureId/moments/:momentId",
+  },
+  {
+    pattern: new RegExp(`^/matches/${segment}/memory$`, "u"),
+    template: "/matches/:fixtureId/memory",
+  },
+  { pattern: /^\/rooms$/u, template: "/rooms" },
+  { pattern: /^\/rooms\/new$/u, template: "/rooms/new" },
+  {
+    pattern: new RegExp(`^/rooms/join/${segment}$`, "u"),
+    template: "/rooms/join/:inviteCode",
+  },
+  {
+    pattern: new RegExp(`^/rooms/${segment}$`, "u"),
+    template: "/rooms/:roomId",
+  },
+  {
+    pattern: new RegExp(`^/you/${segment}(?:/${segment})*$`, "u"),
+    template: "/you/*",
+  },
+  { pattern: /^\/demo$/u, template: "/demo" },
+  { pattern: /^\/offline$/u, template: "/offline" },
+] as const;
+
+export function isCanonicalShellPath(pathname: string) {
+  return canonicalShellRoutes.some(({ pattern }) => pattern.test(pathname));
 }
 
 function notFound(reply: FastifyReply) {
@@ -75,13 +108,11 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
       .type("text/html; charset=utf-8")
       .sendFile("index.html", { immutable: false, maxAge: 0 });
 
-  app.get("/", async (_request, reply) => sendShell(reply));
-
   app.setNotFoundHandler((request, reply) => {
     const pathname = new URL(request.url, "http://matchsense.local").pathname;
     const acceptsShell = request.method === "GET" || request.method === "HEAD";
 
-    if (acceptsShell && isProductShellPath(pathname)) {
+    if (acceptsShell && isCanonicalShellPath(pathname)) {
       return sendShell(reply);
     }
 

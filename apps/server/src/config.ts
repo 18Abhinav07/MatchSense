@@ -1,7 +1,15 @@
 import { z } from "zod";
 
+function hasPostgreSqlProtocol(value: string) {
+  if (!URL.canParse(value)) {
+    return false;
+  }
+
+  return ["postgres:", "postgresql:"].includes(new URL(value).protocol);
+}
+
 const serverEnvironmentSchema = z.object({
-  DATABASE_URL: z.string().url(),
+  DATABASE_URL: z.string().url().refine(hasPostgreSqlProtocol),
   DATA_RIGHTS_MODE: z.literal("synthetic_demo").default("synthetic_demo"),
   HOST: z.string().trim().min(1).default("0.0.0.0"),
   PORT: z.coerce.number().int().min(1).max(65_535).default(8080),

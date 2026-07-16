@@ -95,19 +95,31 @@ describe("same-origin web shell", () => {
     }),
   };
 
-  it.each(["/", "/matches/demo-fixture"])(
-    "serves the SPA shell for %s",
-    async (url) => {
-      const app = appWithProbe(readinessProbe);
-      const response = await app.inject({ url });
+  it.each([
+    "/",
+    "/onboarding",
+    "/matches/fixture-1",
+    "/matches/fixture-1/live",
+    "/matches/fixture-1/moments/moment-9",
+    "/matches/fixture-1/memory",
+    "/rooms",
+    "/rooms/new",
+    "/rooms/join/invite-code",
+    "/rooms/room-1",
+    "/you/profile",
+    "/you/settings/notifications",
+    "/demo",
+    "/offline",
+  ])("serves the SPA shell for %s", async (url) => {
+    const app = appWithProbe(readinessProbe);
+    const response = await app.inject({ url });
 
-      expect(response.statusCode).toBe(200);
-      expect(response.headers["content-type"]).toContain("text/html");
-      expect(response.headers["cache-control"]).toContain("max-age=0");
-      expect(response.body).toBe(indexShell);
-      await app.close();
-    },
-  );
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/html");
+    expect(response.headers["cache-control"]).toContain("max-age=0");
+    expect(response.body).toBe(indexShell);
+    await app.close();
+  });
 
   it("serves fingerprinted assets with MIME and immutable caching", async () => {
     const app = appWithProbe(readinessProbe);
@@ -119,19 +131,32 @@ describe("same-origin web shell", () => {
     await app.close();
   });
 
-  it.each(["/api/v1/missing", "/health/missing", "/missing.png"])(
-    "does not turn %s into the SPA shell",
-    async (url) => {
-      const app = appWithProbe(readinessProbe);
-      const response = await app.inject({ url });
+  it.each([
+    "/today",
+    "/settings",
+    "/diagnostics",
+    "/moments/moment-1",
+    "/memories/memory-1",
+    "/api",
+    "/api/v1/missing",
+    "/health",
+    "/health/missing",
+    "/missing.png",
+    "/you",
+    "/you/",
+    "/matches/fixture-1/unknown",
+    "/matches/fixture-1/memory/extra",
+    "/rooms/join/invite-code/extra",
+  ])("does not turn %s into the SPA shell", async (url) => {
+    const app = appWithProbe(readinessProbe);
+    const response = await app.inject({ url });
 
-      expect(response.statusCode).toBe(404);
-      expect(response.headers["content-type"]).toContain("application/json");
-      expect(response.json()).toEqual({
-        error: { code: "NOT_FOUND", message: "Route not found" },
-      });
-      expect(response.body).not.toContain("MatchSense shell");
-      await app.close();
-    },
-  );
+    expect(response.statusCode).toBe(404);
+    expect(response.headers["content-type"]).toContain("application/json");
+    expect(response.json()).toEqual({
+      error: { code: "NOT_FOUND", message: "Route not found" },
+    });
+    expect(response.body).not.toContain("MatchSense shell");
+    await app.close();
+  });
 });
