@@ -29,9 +29,21 @@ importers:
       '@fastify/static':
         specifier: 10.1.0
         version: 10.1.0
+      '@matchsense/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@matchsense/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@matchsense/event-engine':
+        specifier: workspace:*
+        version: link:../../packages/event-engine
+      '@matchsense/replay':
+        specifier: workspace:*
+        version: link:../../packages/replay
+      '@matchsense/txline-adapter':
+        specifier: workspace:*
+        version: link:../../packages/txline-adapter
       fastify:
         specifier: 5.10.0
         version: 5.10.0
@@ -78,13 +90,29 @@ importers:
         specifier: 3.4.9
         version: 3.4.9
 
-  packages/event-engine: {}
+  packages/event-engine:
+    dependencies:
+      '@matchsense/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+    devDependencies:
+      '@matchsense/txline-adapter':
+        specifier: workspace:*
+        version: link:../txline-adapter
 
   packages/moment-engine: {}
 
-  packages/replay: {}
+  packages/replay:
+    dependencies:
+      '@matchsense/contracts':
+        specifier: workspace:*
+        version: link:../contracts
 
-  packages/txline-adapter: {}
+  packages/txline-adapter:
+    dependencies:
+      '@matchsense/contracts':
+        specifier: workspace:*
+        version: link:../contracts
 
   packages/ui: {}
 

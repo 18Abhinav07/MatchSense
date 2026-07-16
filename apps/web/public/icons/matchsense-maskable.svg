@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">MatchSense maskable icon</title>
+  <rect width="512" height="512" fill="#0b0d0c"/>
+  <circle cx="256" cy="256" r="178" fill="#111411" stroke="#3b443d" stroke-width="10"/>
+  <circle cx="256" cy="256" r="92" fill="none" stroke="#a8c96a" stroke-width="12"/>
+  <path d="M166 318V194l90 74 90-74v124" fill="none" stroke="#f3f1e9" stroke-linecap="square" stroke-linejoin="miter" stroke-width="25"/>
+  <circle cx="256" cy="256" r="14" fill="#a8c96a"/>
+</svg>

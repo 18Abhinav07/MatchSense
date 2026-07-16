@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">MatchSense</title>
+  <rect width="512" height="512" rx="92" fill="#0b0d0c"/>
+  <path d="M90 91h332v330H90z" fill="none" stroke="#3b443d" stroke-width="10"/>
+  <path d="M256 91v330M90 256h332" fill="none" stroke="#2a302b" stroke-width="7"/>
+  <circle cx="256" cy="256" r="78" fill="none" stroke="#a8c96a" stroke-width="11"/>
+  <path d="M164 316V196l92 74 92-74v120" fill="none" stroke="#f3f1e9" stroke-linecap="square" stroke-linejoin="miter" stroke-width="24"/>
+  <circle cx="256" cy="256" r="13" fill="#a8c96a"/>
+</svg>

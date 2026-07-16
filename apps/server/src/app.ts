@@ -2,6 +2,12 @@ import path from "node:path";
 
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import { z } from "zod";
+
+import type { FixtureStreamEvent, TeamCode } from "@matchsense/contracts";
+
+import type { AudioWritable } from "./audio-hub.js";
+import type { ProductRuntime } from "./product-runtime.js";
 
 export interface ReadinessResult {
   databaseReachable: boolean;
@@ -15,6 +21,7 @@ export interface ReadinessProbe {
 export interface BuildAppOptions {
   readinessProbe: ReadinessProbe;
   webDistPath: string;
+  runtime?: ProductRuntime;
 }
 
 function readinessPayload(result: ReadinessResult) {
@@ -109,6 +116,13 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     }
   });
 
+  if (options.runtime) {
+    registerProductRoutes(app, options.runtime);
+    app.addHook("preClose", () => {
+      options.runtime?.close();
+    });
+  }
+
   void app.register(fastifyStatic, {
     cacheControl: false,
     index: false,
@@ -139,4 +153,158 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   });
 
   return app;
+}
+
+const teamCode = z.enum(["ARG", "BRA", "FRA", "JPN"]);
+const replaySessionBody = z
+  .object({ fixtureId: z.string().min(1).max(80) })
+  .strict();
+const replayCommandBody = z
+  .object({
+    listeningSessionId: z.string().min(1).max(120).nullable().optional(),
+    marker: z.literal("goal"),
+    type: z.literal("advance_to_marker"),
+  })
+  .strict();
+const listeningSessionBody = z.object({ perspectiveTeam: teamCode }).strict();
+
+function formatSse(event: FixtureStreamEvent) {
+  return `id: ${event.id}\nevent: ${event.event}\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
+function invalidRequest(reply: FastifyReply) {
+  return reply.code(400).send({
+    error: { code: "INVALID_REQUEST", message: "Request is invalid" },
+  });
+}
+
+function registerProductRoutes(app: FastifyInstance, runtime: ProductRuntime) {
+  app.get("/api/v1/catalog", async (_request, reply) =>
+    reply.header("Cache-Control", "no-store").send(runtime.catalog()),
+  );
+  app.get("/api/v1/fixtures", async (_request, reply) =>
+    reply
+      .header("Cache-Control", "no-store")
+      .send({ fixtures: runtime.fixtures() }),
+  );
+  app.get<{ Params: { fixtureId: string } }>(
+    "/api/v1/fixtures/:fixtureId",
+    async (request, reply) => {
+      const fixture = runtime.fixture(request.params.fixtureId);
+      return fixture ? reply.send(fixture) : notFound(reply);
+    },
+  );
+  app.get<{ Params: { fixtureId: string } }>(
+    "/api/v1/fixtures/:fixtureId/stream",
+    (request, reply) => {
+      const fixture = runtime.fixture(request.params.fixtureId);
+      if (!fixture) return notFound(reply);
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "X-Accel-Buffering": "no",
+        "X-Content-Type-Options": "nosniff",
+      });
+      const unsubscribe = runtime.subscribeFixture(
+        request.params.fixtureId,
+        (event) => reply.raw.write(formatSse(event)),
+      );
+      if (!unsubscribe) {
+        reply.raw.end();
+        return reply;
+      }
+      const heartbeat = setInterval(() => {
+        reply.raw.write(`: heartbeat ${Date.now()}\n\n`);
+      }, 15_000);
+      heartbeat.unref?.();
+      request.raw.once("close", () => {
+        clearInterval(heartbeat);
+        unsubscribe();
+      });
+      return reply;
+    },
+  );
+  app.post("/api/v1/replay/sessions", async (request, reply) => {
+    const body = replaySessionBody.safeParse(request.body);
+    if (!body.success) return invalidRequest(reply);
+    try {
+      return reply
+        .code(201)
+        .send(runtime.createReplaySession(body.data.fixtureId));
+    } catch {
+      return notFound(reply);
+    }
+  });
+  app.post<{ Params: { id: string } }>(
+    "/api/v1/replay/sessions/:id/commands",
+    async (request, reply) => {
+      const body = replayCommandBody.safeParse(request.body);
+      if (!body.success) return invalidRequest(reply);
+      const result = runtime.commandReplay(request.params.id, body.data);
+      if (result.kind === "missing") return notFound(reply);
+      if (result.kind === "invalid_listening_session") {
+        return invalidRequest(reply);
+      }
+      if (result.kind === "duplicate") {
+        return reply.send({ accepted: false, duplicate: true });
+      }
+      return reply.code(result.kind === "replayed" ? 200 : 202).send({
+        accepted: true,
+        duplicate: false,
+        moment: result.moment,
+        replayed: result.kind === "replayed",
+        snapshot: result.snapshot,
+      });
+    },
+  );
+  app.post<{ Params: { fixtureId: string } }>(
+    "/api/v1/fixtures/:fixtureId/listening-sessions",
+    async (request, reply) => {
+      const body = listeningSessionBody.safeParse(request.body);
+      if (!body.success) return invalidRequest(reply);
+      const session = runtime.createListeningSession(
+        request.params.fixtureId,
+        body.data.perspectiveTeam as TeamCode,
+      );
+      return session ? reply.code(201).send(session) : notFound(reply);
+    },
+  );
+  app.get<{ Params: { id: string } }>(
+    "/api/v1/listening-sessions/:id",
+    async (request, reply) => {
+      const session = runtime.listeningSession(request.params.id);
+      return session ? reply.send(session) : notFound(reply);
+    },
+  );
+  app.delete<{ Params: { id: string } }>(
+    "/api/v1/listening-sessions/:id",
+    async (request, reply) =>
+      runtime.deleteListeningSession(request.params.id)
+        ? reply.code(204).send()
+        : notFound(reply),
+  );
+  app.get<{ Params: { id: string } }>(
+    "/api/v1/listening-sessions/:id/stream.mp3",
+    (request, reply) => {
+      if (!runtime.listeningSession(request.params.id)) return notFound(reply);
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        "Cache-Control": "no-store",
+        Connection: "keep-alive",
+        "Content-Type": "audio/mpeg",
+        "X-Content-Type-Options": "nosniff",
+      });
+      if (
+        !runtime.attachListeningClient(
+          request.params.id,
+          reply.raw as AudioWritable,
+        )
+      ) {
+        reply.raw.destroy();
+      }
+      return reply;
+    },
+  );
 }

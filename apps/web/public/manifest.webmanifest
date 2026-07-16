@@ -1,0 +1,26 @@
+{
+  "name": "MatchSense — Ambient Football Companion",
+  "short_name": "MatchSense",
+  "description": "Follow every important football moment through reconciled truth, cinematic Moments, and continuous Listening Mode.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b0d0c",
+  "theme_color": "#0b0d0c",
+  "categories": ["sports", "entertainment"],
+  "icons": [
+    {
+      "src": "/icons/matchsense-icon.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/matchsense-maskable.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

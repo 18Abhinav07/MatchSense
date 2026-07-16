@@ -22,6 +22,8 @@ const runtimeImageProbe = String.raw`
   const fs = require('node:fs');
   assert.equal(fs.existsSync('/app/web/dist/index.html'), true);
   assert.equal(fs.existsSync('/app/server/node_modules/@matchsense/db/dist/cli.js'), true);
+  assert.equal(fs.existsSync('/app/server/assets/silence.mp3'), true);
+  assert.equal(fs.existsSync('/app/server/assets/goal-cue.mp3'), true);
   for (const forbiddenPath of ['/app/server/src', '/app/server/test', '/app/server/tests', '/app/web/src']) {
     assert.equal(fs.existsSync(forbiddenPath), false);
   }

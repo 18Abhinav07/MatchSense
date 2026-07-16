@@ -13,7 +13,11 @@
   },
   "dependencies": {
     "@fastify/static": "10.1.0",
+    "@matchsense/contracts": "workspace:*",
     "@matchsense/db": "workspace:*",
+    "@matchsense/event-engine": "workspace:*",
+    "@matchsense/replay": "workspace:*",
+    "@matchsense/txline-adapter": "workspace:*",
     "fastify": "5.10.0",
     "zod": "4.4.3"
   },

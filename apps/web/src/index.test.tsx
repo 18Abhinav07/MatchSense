@@ -3,21 +3,25 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import * as shell from "./index";
+import type { AppProps } from "./App.js";
 
-describe("MatchSense web shell", () => {
-  it("renders an accessible product entry point", () => {
+describe("MatchSense web product", () => {
+  it("renders the team-first product entry point", () => {
     expect("App" in shell).toBe(true);
 
-    const App = ("App" in shell ? shell.App : () => null) as FunctionComponent;
-    const markup = renderToStaticMarkup(createElement(App));
+    const App = (
+      "App" in shell ? shell.App : () => null
+    ) as FunctionComponent<AppProps>;
+    const markup = renderToStaticMarkup(
+      createElement(App, { initialFavoriteTeam: null, initialPath: "/" }),
+    );
 
     expect(markup).toContain("<main");
     expect(markup).toContain("MatchSense");
-    expect(markup).toContain("Follow every moment");
-    expect(markup).toContain("Simulation shell");
-    expect(markup).not.toContain("Replay ready");
-    expect(markup).not.toContain("LIVE");
-    expect(markup).not.toContain("Live match truth");
-    expect(markup).not.toContain("automatic spoken commentary");
+    expect(markup).toContain("Who do you support?");
+    expect(markup).toContain("Search teams");
+    expect(markup).toContain("SIMULATION · TXLINE-SHAPED DATA");
+    expect(markup).not.toContain("REPLAY · SYNTHETIC TXLINE-SHAPED DATA");
+    expect(markup).not.toContain("LIVE · TXLINE");
   });
 });
