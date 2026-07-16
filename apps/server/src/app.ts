@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 
@@ -77,6 +79,18 @@ function notFound(reply: FastifyReply) {
   });
 }
 
+function cacheControlForStaticFile(root: string, filePath: string) {
+  const relativePath = path.relative(root, filePath).split(path.sep).join("/");
+  const isFingerprintAsset =
+    /^assets\/(?:.+\/)*[^/]+-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$/u.test(
+      relativePath,
+    );
+
+  return isFingerprintAsset
+    ? "public, max-age=31536000, immutable"
+    : "no-cache";
+}
+
 export function buildApp(options: BuildAppOptions): FastifyInstance {
   const app = Fastify({ logger: false });
 
@@ -96,10 +110,15 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   });
 
   void app.register(fastifyStatic, {
-    immutable: true,
+    cacheControl: false,
     index: false,
-    maxAge: "365d",
     root: options.webDistPath,
+    setHeaders: (reply, filePath) => {
+      reply.header(
+        "Cache-Control",
+        cacheControlForStaticFile(options.webDistPath, filePath),
+      );
+    },
     wildcard: false,
   });
 

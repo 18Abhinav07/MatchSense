@@ -3,7 +3,11 @@ import { pathToFileURL } from "node:url";
 
 import { buildApp, type ReadinessProbe } from "./app.js";
 import { parseServerEnv } from "./config.js";
-import { registerShutdownSignals, type ShutdownSignalSource } from "./start.js";
+import {
+  createShutdownFailureReporter,
+  registerShutdownSignals,
+  type ShutdownSignalSource,
+} from "./start.js";
 
 const unavailableReadinessProbe: ReadinessProbe = {
   check: async () => ({
@@ -29,8 +33,15 @@ export async function startServer(options: StartServerOptions = {}) {
   });
 
   await app.listen({ host: config.host, port: config.port });
-  registerShutdownSignals(options.signalSource ?? process, async () =>
-    app.close(),
+  registerShutdownSignals(
+    options.signalSource ?? process,
+    async () => app.close(),
+    createShutdownFailureReporter({
+      setExitCode: (code) => {
+        process.exitCode = code;
+      },
+      writeError: (message) => process.stderr.write(message),
+    }),
   );
   return app;
 }

@@ -12,8 +12,18 @@ let webDistPath: string;
 beforeAll(async () => {
   webDistPath = await mkdtemp(path.join(tmpdir(), "matchsense-web-"));
   await mkdir(path.join(webDistPath, "assets"));
+  await mkdir(path.join(webDistPath, "icons"));
   await writeFile(path.join(webDistPath, "index.html"), indexShell);
-  await writeFile(path.join(webDistPath, "assets", "app.js"), "export {};");
+  await writeFile(
+    path.join(webDistPath, "assets", "index-AbC123xy.js"),
+    "export {};",
+  );
+  await writeFile(
+    path.join(webDistPath, "manifest.webmanifest"),
+    JSON.stringify({ name: "MatchSense" }),
+  );
+  await writeFile(path.join(webDistPath, "sw.js"), "self.addEventListener;");
+  await writeFile(path.join(webDistPath, "icons", "app-icon.png"), "png");
 });
 
 afterAll(async () => {
@@ -116,20 +126,40 @@ describe("same-origin web shell", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain("text/html");
-    expect(response.headers["cache-control"]).toContain("max-age=0");
+    expect(response.headers["cache-control"]).toBe("no-cache");
     expect(response.body).toBe(indexShell);
     await app.close();
   });
 
   it("serves fingerprinted assets with MIME and immutable caching", async () => {
     const app = appWithProbe(readinessProbe);
-    const response = await app.inject({ url: "/assets/app.js" });
+    const response = await app.inject({ url: "/assets/index-AbC123xy.js" });
 
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain("javascript");
-    expect(response.headers["cache-control"]).toContain("immutable");
+    expect(response.headers["cache-control"]).toBe(
+      "public, max-age=31536000, immutable",
+    );
     await app.close();
   });
+
+  it.each([
+    "/index.html",
+    "/manifest.webmanifest",
+    "/sw.js",
+    "/icons/app-icon.png",
+  ])(
+    "never caches stable application resource %s as immutable",
+    async (url) => {
+      const app = appWithProbe(readinessProbe);
+      const response = await app.inject({ url });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["cache-control"]).toBe("no-cache");
+      expect(response.headers["cache-control"]).not.toContain("immutable");
+      await app.close();
+    },
+  );
 
   it.each([
     "/today",
