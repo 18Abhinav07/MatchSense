@@ -1,0 +1,20 @@
+{
+  "name": "matchsense-production",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.13.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test scripts/workspace-contract.test.mjs",
+    "typecheck": "pnpm --recursive --if-present run typecheck",
+    "build": "pnpm --recursive --if-present run build",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "prettier": "3.9.5",
+    "typescript": "7.0.2"
+  }
+}
