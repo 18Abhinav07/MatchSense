@@ -94,4 +94,73 @@ describe("TxLINE canonical source to product runtime", () => {
     expect(runtime.acceptTxlineEvent(canonical.event).kind).toBe("duplicate");
     runtime.close();
   });
+
+  it("publishes every accepted canonical action once for downstream fan products", () => {
+    const runtime = createProductRuntime({
+      cueBytes: Buffer.from("goal-cue"),
+      fixture: {
+        awayTeam: "ESP",
+        fixtureId: "18237038",
+        homeTeam: "FRA",
+        kickoffAt: "2026-07-14T15:00:00.000Z",
+        participant1IsHome: true,
+        provenance: "live_txline",
+      },
+      now: () => "2026-07-16T05:32:09.616Z",
+      silenceBytes: Buffer.from("silence"),
+      writeIntervalMs: 60_000,
+    });
+    const actions: string[] = [];
+    runtime.subscribeCanonicalEvent("18237038", (event) => {
+      actions.push(event.action);
+    });
+    const finalEvent = {
+      action: "game_finalised",
+      actionId: "final-1",
+      clockSeconds: 0,
+      confirmed: true,
+      delivery: "live",
+      fixtureId: "18237038",
+      participant: null,
+      participantScore: { participant1: 2, participant2: 1 },
+      participantStats: {
+        participant1: {
+          corners: 6,
+          goals: 2,
+          redCards: 0,
+          yellowCards: 3,
+        },
+        participant2: {
+          corners: 5,
+          goals: 1,
+          redCards: 1,
+          yellowCards: 2,
+        },
+      },
+      playerId: null,
+      provenance: "live_txline",
+      receivedAt: "2026-07-16T07:30:00.000Z",
+      revision: 9,
+      score: { away: 1, home: 2 },
+      source: {
+        actionId: "final-1",
+        observedSeq: "900",
+        payloadHash: "final-hash",
+        sourceTimestampMs: 1_784_067_000_000,
+        sseEventId: "900",
+      },
+      statusId: 100,
+      supersedesRevision: null,
+      varOutcome: null,
+      varReviewType: null,
+    } as const;
+
+    expect(runtime.acceptTxlineEvent(finalEvent)).toMatchObject({
+      kind: "accepted",
+      moment: null,
+    });
+    expect(runtime.acceptTxlineEvent(finalEvent).kind).toBe("duplicate");
+    expect(actions).toEqual(["game_finalised"]);
+    runtime.close();
+  });
 });

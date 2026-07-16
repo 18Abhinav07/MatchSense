@@ -89,12 +89,52 @@ describe("verified TxLINE payload boundary", () => {
         fixtureId: "18237038",
         participant: 2,
         participantScore: { participant1: 0, participant2: 2 },
+        participantStats: {
+          participant1: {
+            corners: 3,
+            goals: 0,
+            redCards: 0,
+            yellowCards: 1,
+          },
+          participant2: {
+            corners: 1,
+            goals: 2,
+            redCards: 0,
+            yellowCards: 1,
+          },
+        },
         playerId: "907005",
         score: { away: 2, home: 0 },
         source: {
           observedSeq: "620",
           sseEventId: "1784060481148/620",
         },
+      },
+    });
+  });
+
+  it("normalizes the documented VAR decision fields without interpreting free text", () => {
+    const result = normalizeTxlineScoreUpdate(
+      goalUpdate({
+        Action: "var_end",
+        Confirmed: true,
+        Data: { Outcome: "Overturned", ReviewType: "Goal" },
+      }),
+      {
+        delivery: "live",
+        fixtureContext,
+        provenance: "live_txline",
+        receivedAt,
+        sseEventId: "1784060481148/621",
+      },
+    );
+
+    expect(result).toMatchObject({
+      kind: "supported",
+      update: {
+        action: "var_end",
+        varOutcome: "overturned",
+        varReviewType: "goal",
       },
     });
   });

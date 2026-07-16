@@ -44,6 +44,9 @@ importers:
       '@matchsense/replay':
         specifier: workspace:*
         version: link:../../packages/replay
+      '@matchsense/rooms':
+        specifier: workspace:*
+        version: link:../../packages/rooms
       '@matchsense/txline-adapter':
         specifier: workspace:*
         version: link:../../packages/txline-adapter

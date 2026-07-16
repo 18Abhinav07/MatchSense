@@ -12,6 +12,8 @@ import {
   type PushRouteDependencies,
   registerPushRoutes,
 } from "./push-delivery.js";
+import { registerRoomRoutes } from "./room-routes.js";
+import { createRoomService, type RoomService } from "./room-service.js";
 
 export interface ReadinessResult {
   databaseReachable: boolean;
@@ -27,6 +29,7 @@ export interface BuildAppOptions {
   webDistPath: string;
   runtime?: ProductRuntime;
   push?: PushRouteDependencies;
+  rooms?: RoomService;
 }
 
 function readinessPayload(result: ReadinessResult) {
@@ -129,6 +132,34 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   }
   if (options.push) {
     registerPushRoutes(app, options.push);
+  }
+  const rooms =
+    options.rooms ??
+    (options.runtime
+      ? createRoomService({
+          fixture: (fixtureId) => options.runtime?.fixture(fixtureId) ?? null,
+        })
+      : null);
+  if (rooms) {
+    registerRoomRoutes(app, rooms);
+    if (options.runtime) {
+      const unsubscribeRooms: (() => void)[] = [];
+      for (const fixture of options.runtime.fixtures()) {
+        const unsubscribeCanonical = options.runtime.subscribeCanonicalEvent(
+          fixture.fixtureId,
+          (event) => rooms.applyCanonicalEvent(event),
+        );
+        const unsubscribeFixture = options.runtime.subscribeFixture(
+          fixture.fixtureId,
+          (event) => rooms.applyFixtureEvent(event),
+        );
+        if (unsubscribeCanonical) unsubscribeRooms.push(unsubscribeCanonical);
+        if (unsubscribeFixture) unsubscribeRooms.push(unsubscribeFixture);
+      }
+      app.addHook("preClose", () => {
+        for (const unsubscribe of unsubscribeRooms) unsubscribe();
+      });
+    }
   }
 
   void app.register(fastifyStatic, {

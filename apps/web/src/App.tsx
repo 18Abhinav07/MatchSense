@@ -20,6 +20,13 @@ import {
   VarUnderReviewMoment,
 } from "./features/moments/index.js";
 import {
+  RoomExperience,
+  type RoomExperienceRoute,
+  type RoomFixture,
+} from "./features/rooms/index.js";
+import { createRoomApi } from "./features/rooms/room-api.js";
+import { getOrCreateFanIdentity } from "./fan-identity.js";
+import {
   enableMomentPush,
   showLocalMomentNotification,
   triggerTestMomentPush,
@@ -99,6 +106,16 @@ function toMomentScore(snapshot: LiveSnapshot): MomentScore {
   };
 }
 
+function toRoomFixture(snapshot: LiveSnapshot): RoomFixture {
+  return {
+    awayTeam: momentTeams[snapshot.awayTeam],
+    homeTeam: momentTeams[snapshot.homeTeam],
+    id: snapshot.fixtureId,
+    isReplay: snapshot.provenance === "synthetic_txline_shaped",
+    kickoffAt: snapshot.kickoffAt ?? "2026-07-16T18:00:00.000Z",
+  };
+}
+
 function teamName(code: TeamCode) {
   return teams.find((team) => team.code === code)?.name ?? code;
 }
@@ -145,6 +162,11 @@ export function App(props: AppProps = {}) {
 }
 
 function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
+  const [fanId] = useState(() =>
+    typeof window === "undefined"
+      ? "server-preview"
+      : getOrCreateFanIdentity(window.localStorage),
+  );
   const [favoriteTeam, setFavoriteTeam] = useState<TeamCode | null>(() =>
     initialFavoriteTeam === undefined ? storedFavorite() : initialFavoriteTeam,
   );
@@ -214,7 +236,7 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
         onComplete={() => {
           window.localStorage.removeItem("matchsense.alertSetupPending");
           setOnboardingStage("done");
-          navigate("/");
+          if (path === "/onboarding") navigate("/");
         }}
       />
     );
@@ -228,6 +250,38 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
         initialMomentIdentity={decodeURIComponent(momentDeepLink[2])}
         onBack={() => navigate("/")}
         onMomentClose={() => navigate(`/matches/${momentDeepLink[1]}/live`)}
+      />
+    );
+  }
+  if (path === "/rooms" || path === "/rooms/new") {
+    return (
+      <RoomsSurface
+        fanId={fanId}
+        favoriteTeam={favoriteTeam}
+        navigate={navigate}
+        route={{ mode: "create" }}
+      />
+    );
+  }
+  const roomInvite = path.match(/^\/rooms\/join\/([^/]+)$/u);
+  if (roomInvite?.[1]) {
+    return (
+      <RoomsSurface
+        fanId={fanId}
+        favoriteTeam={favoriteTeam}
+        navigate={navigate}
+        route={{ inviteCode: roomInvite[1], mode: "invite" }}
+      />
+    );
+  }
+  const roomRoute = path.match(/^\/rooms\/([^/]+)$/u);
+  if (roomRoute?.[1]) {
+    return (
+      <RoomsSurface
+        fanId={fanId}
+        favoriteTeam={favoriteTeam}
+        navigate={navigate}
+        route={{ mode: "room", roomId: roomRoute[1] }}
       />
     );
   }
@@ -256,8 +310,93 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
   return (
     <Today
       favoriteTeam={favoriteTeam}
+      onCreateRoom={() => navigate("/rooms/new")}
       onOpen={(fixtureId) => navigate(`/matches/${fixtureId}/live`)}
     />
+  );
+}
+
+function RoomsSurface({
+  fanId,
+  favoriteTeam,
+  navigate,
+  route,
+}: {
+  fanId: string;
+  favoriteTeam: TeamCode;
+  navigate(path: string): void;
+  route:
+    | { mode: "create" }
+    | { inviteCode: string; mode: "invite" }
+    | { mode: "room"; roomId: string };
+}) {
+  const [fixture, setFixture] = useState(() =>
+    toRoomFixture(createInitialLiveState().snapshot),
+  );
+  const roomApi = useMemo(
+    () =>
+      createRoomApi({
+        fanId,
+        favoriteTeam,
+        origin:
+          typeof window === "undefined"
+            ? "http://matchsense.local"
+            : window.location.origin,
+      }),
+    [fanId, favoriteTeam],
+  );
+
+  useEffect(() => {
+    if (route.mode !== "create") return;
+    let active = true;
+    fetch("/api/v1/fixtures")
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Fixture unavailable");
+        return (await response.json()) as { fixtures?: LiveSnapshot[] };
+      })
+      .then(({ fixtures }) => {
+        if (active && fixtures?.[0]) setFixture(toRoomFixture(fixtures[0]));
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [route.mode]);
+
+  const experienceRoute = useMemo<RoomExperienceRoute>(() => {
+    const defaultNickname =
+      typeof window === "undefined"
+        ? ""
+        : (window.localStorage.getItem("matchsense.nickname") ?? "");
+    if (route.mode === "create") {
+      return {
+        defaultNickname,
+        defaultRoomName: "Match Night",
+        fixture,
+        mode: "create",
+      };
+    }
+    if (route.mode === "invite") {
+      return {
+        defaultNickname,
+        inviteCode: route.inviteCode,
+        mode: "invite",
+        teamCode: favoriteTeam,
+      };
+    }
+    return { mode: "room", roomId: route.roomId };
+  }, [favoriteTeam, fixture, route]);
+
+  return (
+    <main className="rooms-shell" id="main-content">
+      <RoomExperience
+        api={roomApi}
+        onExit={() => navigate("/")}
+        onOpenMatch={(fixtureId) => navigate(`/matches/${fixtureId}/live`)}
+        onOpenRoom={(roomId) => navigate(`/rooms/${roomId}`)}
+        route={experienceRoute}
+      />
+    </main>
   );
 }
 
@@ -536,9 +675,11 @@ export function SampleMoment({
 
 function Today({
   favoriteTeam,
+  onCreateRoom,
   onOpen,
 }: {
   favoriteTeam: TeamCode;
+  onCreateRoom(): void;
   onOpen(fixtureId: string): void;
 }) {
   const [fixture, setFixture] = useState<LiveSnapshot>(
@@ -614,6 +755,37 @@ function Today({
             Open match companion <ArrowIcon />
           </button>
         </div>
+      </section>
+      <section className="room-ritual-card">
+        <div>
+          <p className="kicker">Call Three · with friends</p>
+          <h2>Make three calls. Settle the group chat.</h2>
+          <p>
+            Goals, cards, corners. Rank each call by confidence, lock at
+            kickoff, and watch friend points move with the match.
+          </p>
+          <span>Friend points only · No money · No prizes</span>
+        </div>
+        <div className="call-three-preview" aria-hidden="true">
+          <span>
+            <small>01</small>
+            <b>Goals</b>
+            <em>3+</em>
+          </span>
+          <span>
+            <small>02</small>
+            <b>Cards</b>
+            <em>5+</em>
+          </span>
+          <span>
+            <small>03</small>
+            <b>Corners</b>
+            <em>10+</em>
+          </span>
+        </div>
+        <button type="button" onClick={onCreateRoom}>
+          Create a room <ArrowIcon />
+        </button>
       </section>
       <section className="today-notes">
         <p>

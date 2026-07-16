@@ -78,6 +78,7 @@ export interface ListeningSessionView {
 }
 
 type FixtureSubscriber = (event: FixtureStreamEvent) => void;
+type CanonicalEventSubscriber = (event: TxlineCanonicalEvent) => void;
 
 function minuteFromTxlineClock(
   statusId: number | null,
@@ -145,6 +146,11 @@ export function createProductRuntime(options: {
   const replaySessions = new Map<string, ReplaySession>();
   const listeningSessions = new Map<string, ListeningSessionView>();
   const fixtureSubscribers = new Map<string, Set<FixtureSubscriber>>();
+  const canonicalEventSubscribers = new Map<
+    string,
+    Set<CanonicalEventSubscriber>
+  >();
+  const appliedCanonicalEvents = new Set<string>();
   const eventLog = new Map<string, FixtureStreamEvent[]>();
   const scoringTeamByMoment = new Map<string, TeamCode>();
   const audioHub: AudioHub = createAudioHub(options);
@@ -427,12 +433,33 @@ export function createProductRuntime(options: {
     if (
       fixtureDefinition.provenance !== "live_txline" ||
       event.provenance !== "live_txline" ||
-      event.fixtureId !== projection.fixtureId ||
+      event.fixtureId !== projection.fixtureId
+    ) {
+      return { kind: "ignored" as const };
+    }
+    const canonicalIdentity = [
+      event.fixtureId,
+      event.revision,
+      event.source.payloadHash,
+    ].join(":");
+    if (appliedCanonicalEvents.has(canonicalIdentity)) {
+      return { kind: "duplicate" as const };
+    }
+    appliedCanonicalEvents.add(canonicalIdentity);
+    for (const subscriber of canonicalEventSubscribers.get(event.fixtureId) ??
+      []) {
+      subscriber(event);
+    }
+    if (
       event.action !== "goal" ||
       event.confirmed !== true ||
       event.score === null
     ) {
-      return { kind: "ignored" as const };
+      return {
+        kind: "accepted" as const,
+        moment: null,
+        snapshot: snapshot(),
+      };
     }
     const previousScore = projection.score;
     const fact: SourceFact = {
@@ -546,6 +573,19 @@ export function createProductRuntime(options: {
         id: `snapshot:${projection.revision}`,
         snapshot: snapshot(),
       });
+      return () => subscribers?.delete(subscriber);
+    },
+    subscribeCanonicalEvent: (
+      fixtureId: string,
+      subscriber: CanonicalEventSubscriber,
+    ) => {
+      if (fixtureId !== projection.fixtureId) return null;
+      let subscribers = canonicalEventSubscribers.get(fixtureId);
+      if (!subscribers) {
+        subscribers = new Set();
+        canonicalEventSubscribers.set(fixtureId, subscribers);
+      }
+      subscribers.add(subscriber);
       return () => subscribers?.delete(subscriber);
     },
   };

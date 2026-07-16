@@ -291,4 +291,31 @@ describe("fan journey state", () => {
     expect(markup).toContain("France take the lead against Argentina.");
     expect(markup).not.toContain("FRA 1—0 FRA");
   });
+
+  it("offers the friends ritual from Today without turning it into wagering", () => {
+    const markup = renderToStaticMarkup(
+      createElement(App as FunctionComponent<AppProps>, {
+        initialFavoriteTeam: "ARG",
+        initialPath: "/",
+      }),
+    );
+
+    expect(markup).toContain("Make three calls. Settle the group chat.");
+    expect(markup).toContain("Create a room");
+    expect(markup).toContain("Friend points only");
+    expect(markup).not.toContain("Place a bet");
+  });
+
+  it("serves the room creation flow as a first-class PWA route", () => {
+    const markup = renderToStaticMarkup(
+      createElement(App as FunctionComponent<AppProps>, {
+        initialFavoriteTeam: "ARG",
+        initialPath: "/rooms/new",
+      }),
+    );
+
+    expect(markup).toContain("Create the match ritual.");
+    expect(markup).toContain("Your nickname");
+    expect(markup).toContain("No money. No prizes.");
+  });
 });

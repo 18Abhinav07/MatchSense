@@ -66,6 +66,23 @@ export interface TxlineSourceReference {
   sourceTimestampMs: number | null;
 }
 
+export interface TxlineParticipantStats {
+  corners: number;
+  goals: number;
+  redCards: number;
+  yellowCards: number;
+}
+
+export type TxlineVarOutcome = "overturned" | "stands";
+export type TxlineVarReviewType =
+  | "corner_kick"
+  | "goal"
+  | "mistaken_identity"
+  | "other"
+  | "penalty"
+  | "red_card"
+  | "second_yellow";
+
 export interface TxlineNormalizedUpdate {
   action: TxlineKnownAction;
   actionId: string | null;
@@ -78,12 +95,18 @@ export interface TxlineNormalizedUpdate {
     participant1: number;
     participant2: number;
   } | null;
+  participantStats: {
+    participant1: TxlineParticipantStats;
+    participant2: TxlineParticipantStats;
+  } | null;
   playerId: string | null;
   provenance: TxlineDataProvenance;
   receivedAt: string;
   score: { away: number; home: number } | null;
   source: TxlineSourceReference;
   statusId: number | null;
+  varOutcome: TxlineVarOutcome | null;
+  varReviewType: TxlineVarReviewType | null;
 }
 
 export interface TxlineCanonicalEvent extends TxlineNormalizedUpdate {
@@ -327,9 +350,22 @@ export function adaptTxlineFixtureMetadata(
   };
 }
 
-function participantScoreOf(
-  record: JsonObject,
-): { participant1: number; participant2: number } | null | "invalid" {
+function optionalStat(
+  total: JsonObject,
+  ...keys: string[]
+): number | "invalid" {
+  const value = pick(total, ...keys);
+  if (value === undefined || value === null) return 0;
+  return asNonNegativeInteger(value) ?? "invalid";
+}
+
+function participantStatsOf(record: JsonObject):
+  | {
+      participant1: TxlineParticipantStats;
+      participant2: TxlineParticipantStats;
+    }
+  | null
+  | "invalid" {
   const score = pick(record, "Score", "score");
   if (score === undefined || score === null) return null;
   if (!isObject(score)) return "invalid";
@@ -341,13 +377,64 @@ function participantScoreOf(
   if (!isObject(participant1Total) || !isObject(participant2Total)) {
     return "invalid";
   }
-  const participant1Goals = pick(participant1Total, "Goals", "goals") ?? 0;
-  const participant2Goals = pick(participant2Total, "Goals", "goals") ?? 0;
-  const first = asNonNegativeInteger(participant1Goals);
-  const second = asNonNegativeInteger(participant2Goals);
-  return first === null || second === null
+  const line = (total: JsonObject): TxlineParticipantStats | "invalid" => {
+    const corners = optionalStat(total, "Corners", "corners");
+    const goals = optionalStat(total, "Goals", "goals");
+    const redCards = optionalStat(total, "RedCards", "redCards");
+    const yellowCards = optionalStat(total, "YellowCards", "yellowCards");
+    if (
+      corners === "invalid" ||
+      goals === "invalid" ||
+      redCards === "invalid" ||
+      yellowCards === "invalid"
+    ) {
+      return "invalid";
+    }
+    return { corners, goals, redCards, yellowCards };
+  };
+  const first = line(participant1Total);
+  const second = line(participant2Total);
+  return first === "invalid" || second === "invalid"
     ? "invalid"
     : { participant1: first, participant2: second };
+}
+
+const VAR_OUTCOMES = new Set<TxlineVarOutcome>(["overturned", "stands"]);
+const VAR_REVIEW_TYPES = new Set<TxlineVarReviewType>([
+  "corner_kick",
+  "goal",
+  "mistaken_identity",
+  "other",
+  "penalty",
+  "red_card",
+  "second_yellow",
+]);
+
+function normalizedEnum(value: unknown): string | null {
+  return typeof value === "string"
+    ? value
+        .trim()
+        .toLowerCase()
+        .replace(/[\s-]+/gu, "_")
+    : null;
+}
+
+function varOutcomeOf(data: unknown): TxlineVarOutcome | null {
+  if (!isObject(data)) return null;
+  const outcome = normalizedEnum(pick(data, "Outcome", "outcome"));
+  return outcome && VAR_OUTCOMES.has(outcome as TxlineVarOutcome)
+    ? (outcome as TxlineVarOutcome)
+    : null;
+}
+
+function varReviewTypeOf(data: unknown): TxlineVarReviewType | null {
+  if (!isObject(data)) return null;
+  const reviewType = normalizedEnum(
+    pick(data, "ReviewType", "reviewType", "review_type"),
+  );
+  return reviewType && VAR_REVIEW_TYPES.has(reviewType as TxlineVarReviewType)
+    ? (reviewType as TxlineVarReviewType)
+    : null;
 }
 
 function knownAction(value: unknown): TxlineKnownAction | null {
@@ -403,11 +490,29 @@ export function normalizeTxlineScoreUpdate(
     };
   }
 
-  const participantScore = participantScoreOf(unwrapped);
-  if (
-    participantScore === "invalid" ||
-    (action === "goal" && participantScore === null)
-  ) {
+  const participantStatsResult = participantStatsOf(unwrapped);
+  if (participantStatsResult === "invalid") {
+    return {
+      kind: "unsupported",
+      warning: warning({
+        code: "invalid_score_shape",
+        fixtureId,
+        message:
+          "TxLINE score update lacks participant totals with valid non-negative counters",
+        observedSeq,
+        sseEventId: metadata.sseEventId,
+      }),
+    };
+  }
+  const participantStats = participantStatsResult;
+  const participantScore =
+    participantStats === null
+      ? null
+      : {
+          participant1: participantStats.participant1.goals,
+          participant2: participantStats.participant2.goals,
+        };
+  if (action === "goal" && participantScore === null) {
     return {
       kind: "unsupported",
       warning: warning({
@@ -457,6 +562,7 @@ export function normalizeTxlineScoreUpdate(
           ? participantValue
           : null,
       participantScore,
+      participantStats,
       playerId: isObject(data)
         ? asIdentifier(pick(data, "PlayerId", "playerId"))
         : null,
@@ -471,6 +577,8 @@ export function normalizeTxlineScoreUpdate(
         sourceTimestampMs,
       },
       statusId,
+      varOutcome: varOutcomeOf(data),
+      varReviewType: varReviewTypeOf(data),
     },
   };
 }
