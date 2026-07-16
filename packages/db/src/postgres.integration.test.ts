@@ -1,6 +1,7 @@
 import postgres from "postgres";
 import {
   afterAll,
+  afterEach,
   beforeAll,
   beforeEach,
   describe,
@@ -10,30 +11,64 @@ import {
 } from "vitest";
 
 import {
+  assertDestructiveIntegrationTarget,
   createPostgresDatabase,
   migrationCatalog,
   runDatabaseCli,
+  type DatabaseRuntime,
 } from "./index.js";
 
-const databaseUrl = process.env.TEST_DATABASE_URL;
-
-if (!databaseUrl) {
-  throw new Error(
-    "TEST_DATABASE_URL is required for PostgreSQL integration tests",
-  );
-}
+const { databaseUrl } = assertDestructiveIntegrationTarget({
+  allowDestructive: process.env.MATCHSENSE_ALLOW_DESTRUCTIVE_DB_TESTS,
+  databaseUrl: process.env.TEST_DATABASE_URL,
+});
 
 const admin = postgres(databaseUrl, { max: 1 });
+const runtimes = new Set<DatabaseRuntime>();
+
+function trackedDatabase(databaseTarget = databaseUrl) {
+  const runtime = createPostgresDatabase(databaseTarget);
+  runtimes.add(runtime);
+  return runtime;
+}
+
+async function resetDatabase() {
+  await admin.unsafe("DROP SCHEMA IF EXISTS matchsense CASCADE;");
+  await admin.unsafe(
+    "DROP TABLE IF EXISTS public.matchsense_schema_migrations;",
+  );
+}
 
 beforeAll(async () => {
   await admin.unsafe("SELECT 1;");
 });
 
 beforeEach(async () => {
-  await admin.unsafe("DROP SCHEMA IF EXISTS matchsense CASCADE;");
-  await admin.unsafe(
-    "DROP TABLE IF EXISTS public.matchsense_schema_migrations;",
+  await resetDatabase();
+});
+
+afterEach(async () => {
+  const closeResults = await Promise.allSettled(
+    [...runtimes].map((runtime) => runtime.close()),
   );
+  runtimes.clear();
+
+  let resetFailure: unknown;
+  try {
+    await resetDatabase();
+  } catch (error) {
+    resetFailure = error;
+  }
+
+  const failures = closeResults
+    .filter((result) => result.status === "rejected")
+    .map((result) => result.reason);
+  if (resetFailure) {
+    failures.push(resetFailure);
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "PostgreSQL integration cleanup failed");
+  }
 });
 
 afterAll(async () => {
@@ -42,18 +77,17 @@ afterAll(async () => {
 
 describe.sequential("real PostgreSQL migration runtime", () => {
   it("reports a fresh database as reachable but pending before migration", async () => {
-    const runtime = createPostgresDatabase(databaseUrl);
+    const runtime = trackedDatabase();
 
     await expect(runtime.check()).resolves.toEqual({
       databaseReachable: true,
       migrationsCurrent: false,
     });
     await expect(runtime.checkMigrationsCurrent()).resolves.toBe(false);
-    await runtime.close();
   });
 
   it("migrates a fresh database transactionally and repeats as a no-op", async () => {
-    const runtime = createPostgresDatabase(databaseUrl);
+    const runtime = trackedDatabase();
 
     await expect(runtime.migrate()).resolves.toEqual({
       appliedVersions: [1],
@@ -83,11 +117,10 @@ describe.sequential("real PostgreSQL migration runtime", () => {
       version: 1,
     });
     expect(ledger[0]?.applied_at).toBeInstanceOf(Date);
-    await runtime.close();
   });
 
   it("rejects checksum drift instead of accepting a changed migration", async () => {
-    const runtime = createPostgresDatabase(databaseUrl);
+    const runtime = trackedDatabase();
     await runtime.migrate();
     await admin.unsafe(
       "UPDATE public.matchsense_schema_migrations SET checksum = repeat('0', 64) WHERE version = 1;",
@@ -100,11 +133,10 @@ describe.sequential("real PostgreSQL migration runtime", () => {
       databaseReachable: true,
       migrationsCurrent: false,
     });
-    await runtime.close();
   });
 
   it("rejects a ledger version absent from the catalog", async () => {
-    const runtime = createPostgresDatabase(databaseUrl);
+    const runtime = trackedDatabase();
     await runtime.migrate();
     await admin.unsafe(
       "INSERT INTO public.matchsense_schema_migrations (version, checksum) VALUES (99, repeat('f', 64));",
@@ -117,7 +149,6 @@ describe.sequential("real PostgreSQL migration runtime", () => {
       databaseReachable: true,
       migrationsCurrent: false,
     });
-    await runtime.close();
   });
 
   it("returns a generic nonzero CLI result for an unreachable database", async () => {
@@ -127,7 +158,7 @@ describe.sequential("real PostgreSQL migration runtime", () => {
     await expect(
       runDatabaseCli({
         args: ["check"],
-        createRuntime: createPostgresDatabase,
+        createRuntime: trackedDatabase,
         environment: {
           DATABASE_URL: "postgresql://127.0.0.1:1/matchsense",
         },

@@ -1,3 +1,5 @@
+export { assertDestructiveIntegrationTarget } from "./integration-guard.js";
+export type { DestructiveIntegrationTargetOptions } from "./integration-guard.js";
 export {
   migrationCatalog,
   MigrationStateError,

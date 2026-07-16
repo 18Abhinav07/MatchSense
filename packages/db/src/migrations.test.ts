@@ -27,6 +27,27 @@ type DatabaseModuleContract = {
 
 const db = databaseModule as DatabaseModuleContract;
 
+const prefixCatalog = [
+  {
+    checksum: "checksum-one",
+    description: "one",
+    sql: "SELECT 1;",
+    version: 1,
+  },
+  {
+    checksum: "checksum-two",
+    description: "two",
+    sql: "SELECT 2;",
+    version: 2,
+  },
+  {
+    checksum: "checksum-three",
+    description: "three",
+    sql: "SELECT 3;",
+    version: 3,
+  },
+] as const;
+
 describe("migration catalog and planning", () => {
   it("publishes a deterministic schema-only baseline migration", () => {
     expect(db.migrationCatalog).toHaveLength(1);
@@ -118,5 +139,67 @@ describe("migration catalog and planning", () => {
     ).toThrowError(
       expect.objectContaining({ code: "UNKNOWN_APPLIED_MIGRATION" }),
     );
+  });
+
+  it("accepts only a valid prefix of the catalog sorted by version", () => {
+    expect(db.planMigrations).toBeTypeOf("function");
+    const unsortedCatalog = [
+      prefixCatalog[2],
+      prefixCatalog[0],
+      prefixCatalog[1],
+    ];
+
+    expect(
+      db.planMigrations?.(unsortedCatalog, [
+        { checksum: "checksum-one", version: 1 },
+        { checksum: "checksum-two", version: 2 },
+      ]),
+    ).toEqual({ current: false, pending: [prefixCatalog[2]] });
+  });
+
+  it.each([
+    {
+      applied: [{ checksum: "checksum-two", version: 2 }],
+      state: "only a later version",
+    },
+    {
+      applied: [
+        { checksum: "checksum-one", version: 1 },
+        { checksum: "checksum-three", version: 3 },
+      ],
+      state: "a gap between applied versions",
+    },
+    {
+      applied: [
+        { checksum: "checksum-one", version: 1 },
+        { checksum: "checksum-one", version: 1 },
+      ],
+      state: "a duplicate applied version",
+    },
+  ])("rejects migration history containing $state", ({ applied }) => {
+    expect(db.planMigrations).toBeTypeOf("function");
+
+    expect(() => db.planMigrations?.(prefixCatalog, applied)).toThrowError(
+      expect.objectContaining({ code: "MIGRATION_HISTORY_NOT_PREFIX" }),
+    );
+  });
+
+  it("reports unknown versions before checksum or prefix errors", () => {
+    expect(db.planMigrations).toBeTypeOf("function");
+
+    for (const applied of [
+      [
+        { checksum: "tampered-checksum", version: 1 },
+        { checksum: "unknown-checksum", version: 99 },
+      ],
+      [
+        { checksum: "unknown-checksum", version: 99 },
+        { checksum: "tampered-checksum", version: 1 },
+      ],
+    ]) {
+      expect(() => db.planMigrations?.(prefixCatalog, applied)).toThrowError(
+        expect.objectContaining({ code: "UNKNOWN_APPLIED_MIGRATION" }),
+      );
+    }
   });
 });

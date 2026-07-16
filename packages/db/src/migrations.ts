@@ -13,7 +13,9 @@ export interface AppliedMigration {
 }
 
 export type MigrationStateErrorCode =
-  "MIGRATION_CHECKSUM_DRIFT" | "UNKNOWN_APPLIED_MIGRATION";
+  | "MIGRATION_CHECKSUM_DRIFT"
+  | "MIGRATION_HISTORY_NOT_PREFIX"
+  | "UNKNOWN_APPLIED_MIGRATION";
 
 export class MigrationStateError extends Error {
   readonly code: MigrationStateErrorCode;
@@ -50,28 +52,36 @@ export function planMigrations(
   catalog: readonly MigrationDefinition[],
   applied: readonly AppliedMigration[],
 ) {
-  const catalogByVersion = new Map(
-    catalog.map((migration) => [migration.version, migration]),
+  const sortedCatalog = catalog.toSorted(
+    (left, right) => left.version - right.version,
   );
-  const appliedVersions = new Set<number>();
+  const catalogByVersion = new Map(
+    sortedCatalog.map((migration) => [migration.version, migration]),
+  );
 
-  for (const ledgerEntry of applied) {
-    const expectedMigration = catalogByVersion.get(ledgerEntry.version);
-
-    if (!expectedMigration) {
-      throw new MigrationStateError("UNKNOWN_APPLIED_MIGRATION");
-    }
-
-    if (expectedMigration.checksum !== ledgerEntry.checksum) {
-      throw new MigrationStateError("MIGRATION_CHECKSUM_DRIFT");
-    }
-
-    appliedVersions.add(ledgerEntry.version);
+  if (applied.some((entry) => !catalogByVersion.has(entry.version))) {
+    throw new MigrationStateError("UNKNOWN_APPLIED_MIGRATION");
   }
 
-  const pending = catalog
-    .filter((migration) => !appliedVersions.has(migration.version))
-    .toSorted((left, right) => left.version - right.version);
+  if (
+    applied.some(
+      (entry) =>
+        catalogByVersion.get(entry.version)?.checksum !== entry.checksum,
+    )
+  ) {
+    throw new MigrationStateError("MIGRATION_CHECKSUM_DRIFT");
+  }
+
+  if (
+    applied.length > sortedCatalog.length ||
+    applied.some(
+      (entry, index) => sortedCatalog[index]?.version !== entry.version,
+    )
+  ) {
+    throw new MigrationStateError("MIGRATION_HISTORY_NOT_PREFIX");
+  }
+
+  const pending = sortedCatalog.slice(applied.length);
 
   return { current: pending.length === 0, pending };
 }
