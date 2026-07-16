@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { scanCommittedSecrets } from "./secret-scan.mjs";
 import { forbiddenInfrastructureCategory } from "./workspace-policy.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -28,6 +29,7 @@ const requiredRootFiles = [
   "ASSET-LICENSES.md",
   "README.md",
   "package.json",
+  "pnpm-lock.yaml",
   "pnpm-workspace.yaml",
   "tsconfig.base.json",
 ];
@@ -125,6 +127,7 @@ test("the production workspace keeps its locked lean-monorepo contract", () => {
 
   const manifests = [];
   for (const [directory, expectedName] of workspaces) {
+    const isApplication = directory.startsWith("apps/");
     const manifestPath = path.join(directory, "package.json");
     const tsconfigPath = path.join(directory, "tsconfig.json");
     const entryPath = path.join(directory, "src/index.ts");
@@ -152,18 +155,30 @@ test("the production workspace keeps its locked lean-monorepo contract", () => {
       check(manifest.private === true, `${manifestPath} must remain private`);
       check(manifest.type === "module", `${manifestPath} must use ESM`);
       check(
-        manifest.scripts?.build === "tsc -p tsconfig.json",
+        manifest.scripts?.build ===
+          (isApplication
+            ? "tsc --noEmit -p tsconfig.json"
+            : "tsc -p tsconfig.json"),
         `${manifestPath} needs the standard build script`,
       );
       check(
         manifest.scripts?.typecheck === "tsc --noEmit -p tsconfig.json",
         `${manifestPath} needs the standard typecheck script`,
       );
-      check(
-        manifest.exports?.["."]?.types === "./dist/index.d.ts" &&
-          manifest.exports?.["."]?.import === "./dist/index.js",
-        `${manifestPath} must export its ESM entry and declarations coherently`,
-      );
+      if (isApplication) {
+        for (const libraryField of ["main", "types", "exports", "files"]) {
+          check(
+            !Object.hasOwn(manifest, libraryField),
+            `${manifestPath} application must not publish ${libraryField}`,
+          );
+        }
+      } else {
+        check(
+          manifest.exports?.["."]?.types === "./dist/index.d.ts" &&
+            manifest.exports?.["."]?.import === "./dist/index.js",
+          `${manifestPath} must export its ESM entry and declarations coherently`,
+        );
+      }
     }
 
     if (existsSync(path.join(root, tsconfigPath))) {
@@ -172,14 +187,25 @@ test("the production workspace keeps its locked lean-monorepo contract", () => {
         tsconfig.extends === "../../tsconfig.base.json",
         `${tsconfigPath} must extend the root compiler config`,
       );
-      check(
-        tsconfig.compilerOptions?.rootDir === "src",
-        `${tsconfigPath} must compile from src`,
-      );
-      check(
-        tsconfig.compilerOptions?.outDir === "dist",
-        `${tsconfigPath} must emit to dist`,
-      );
+      if (isApplication) {
+        check(
+          tsconfig.compilerOptions?.noEmit === true,
+          `${tsconfigPath} application must not emit without its app bundler`,
+        );
+        check(
+          tsconfig.compilerOptions?.outDir === undefined,
+          `${tsconfigPath} application must not target a library dist directory`,
+        );
+      } else {
+        check(
+          tsconfig.compilerOptions?.rootDir === "src",
+          `${tsconfigPath} must compile from src`,
+        );
+        check(
+          tsconfig.compilerOptions?.outDir === "dist",
+          `${tsconfigPath} must emit to dist`,
+        );
+      }
       check(
         Array.isArray(tsconfig.include) &&
           tsconfig.include.includes("src/**/*.ts"),
@@ -201,7 +227,13 @@ test("the production workspace keeps its locked lean-monorepo contract", () => {
       manifest.engines?.node === ">=24",
       "root Node engine must target >=24",
     );
-    for (const script of ["test", "typecheck", "build", "format:check"]) {
+    for (const script of [
+      "test",
+      "typecheck",
+      "build",
+      "format:check",
+      "install:frozen",
+    ]) {
       check(
         typeof manifest.scripts?.[script] === "string",
         `root script is missing: ${script}`,
@@ -210,6 +242,10 @@ test("the production workspace keeps its locked lean-monorepo contract", () => {
     check(
       manifest.scripts?.test === "node --test scripts/*.test.mjs",
       "root test script must run every workspace policy test",
+    );
+    check(
+      manifest.scripts?.["install:frozen"] === "pnpm install --frozen-lockfile",
+      "root install:frozen script must enforce the committed lockfile",
     );
   }
 
@@ -302,20 +338,13 @@ test("the production workspace keeps its locked lean-monorepo contract", () => {
     `unexpected environment files: ${unexpectedEnvFiles.join(", ")}`,
   );
 
-  const privateKeyMarker = ["-----BEGIN", "PRIVATE KEY-----"].join(" ");
-  const secretAssignment =
-    /^\s*(?:export\s+)?[A-Z0-9_]*(?:API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY)[A-Z0-9_]*\s*=\s*(\S.*)$/gmu;
   for (const file of files) {
-    const contents = readText(file);
-    check(
-      !contents.includes(privateKeyMarker),
-      `${file} contains private key material`,
-    );
-    check(
-      !secretAssignment.test(contents),
-      `${file} contains a non-empty secret assignment`,
-    );
-    secretAssignment.lastIndex = 0;
+    for (const finding of scanCommittedSecrets(file, readText(file))) {
+      check(
+        false,
+        `${file}:${finding.line} contains ${finding.kind}${finding.key ? ` for ${finding.key}` : ""}`,
+      );
+    }
   }
 
   assert.deepEqual(

@@ -11,7 +11,8 @@
     "test": "node --test scripts/*.test.mjs",
     "typecheck": "pnpm --recursive --if-present run typecheck",
     "build": "pnpm --recursive --if-present run build",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "install:frozen": "pnpm install --frozen-lockfile"
   },
   "devDependencies": {
     "prettier": "3.9.5",

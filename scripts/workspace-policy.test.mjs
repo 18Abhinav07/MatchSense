@@ -21,11 +21,16 @@ test("rejects dependencies that add Redis, BullMQ, or object storage", async () 
     ["redis", "redis"],
     ["ioredis", "redis"],
     ["@redis/client", "redis"],
+    ["@upstash/redis", "redis"],
     ["bullmq", "bullmq"],
+    ["aws-sdk", "object-store"],
     ["@aws-sdk/client-s3", "object-store"],
+    ["@aws-sdk/lib-storage", "object-store"],
     ["minio", "object-store"],
     ["@google-cloud/storage", "object-store"],
     ["@azure/storage-blob", "object-store"],
+    ["multer-s3", "object-store"],
+    ["s3rver", "object-store"],
   ];
 
   for (const [dependency, expectedCategory] of forbiddenDependencies) {
@@ -46,6 +51,8 @@ test("allows dependency names outside the exact infrastructure policy", async ()
     "@aws-sdk/client-sqs",
     "@google-cloud/pubsub",
     "@azure/service-bus",
+    "@upstash/vector",
+    "multer",
     "@matchsense/storage-types",
   ];
 
