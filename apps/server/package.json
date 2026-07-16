@@ -5,7 +5,19 @@
   "description": "MatchSense production server shell.",
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit -p tsconfig.json",
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@fastify/static": "10.1.0",
+    "fastify": "5.10.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "tsx": "4.23.1"
   }
 }

@@ -18,13 +18,14 @@ function assertApplicationManifest(manifest) {
       `application manifest must not define ${libraryField}`,
     );
   }
-
-  assert.equal(manifest.scripts.build, "tsc --noEmit -p tsconfig.json");
   assert.equal(manifest.scripts.typecheck, "tsc --noEmit -p tsconfig.json");
+  assert.equal(manifest.scripts.test, "vitest run");
 }
 
 test("web uses an application manifest instead of library exports", () => {
-  assertApplicationManifest(readJson("apps/web/package.json"));
+  const manifest = readJson("apps/web/package.json");
+  assertApplicationManifest(manifest);
+  assert.equal(manifest.scripts.build, "vite build");
 });
 
 test("web compiler accepts browser TypeScript and TSX", () => {
@@ -41,7 +42,10 @@ test("web compiler accepts browser TypeScript and TSX", () => {
 });
 
 test("server uses an application manifest instead of library exports", () => {
-  assertApplicationManifest(readJson("apps/server/package.json"));
+  const manifest = readJson("apps/server/package.json");
+  assertApplicationManifest(manifest);
+  assert.equal(manifest.scripts.build, "tsc -p tsconfig.build.json");
+  assert.equal(manifest.scripts.start, "node dist/main.js");
 });
 
 test("server compiler uses Node runtime module resolution", () => {
@@ -50,4 +54,39 @@ test("server compiler uses Node runtime module resolution", () => {
   assert.equal(tsconfig.compilerOptions.module, "NodeNext");
   assert.equal(tsconfig.compilerOptions.moduleResolution, "NodeNext");
   assert.equal(tsconfig.compilerOptions.noEmit, true);
+});
+
+test("server has a production emit configuration", () => {
+  const tsconfig = readJson("apps/server/tsconfig.build.json");
+
+  assert.equal(tsconfig.extends, "./tsconfig.json");
+  assert.equal(tsconfig.compilerOptions.noEmit, false);
+  assert.equal(tsconfig.compilerOptions.rootDir, "src");
+  assert.equal(tsconfig.compilerOptions.outDir, "dist");
+  assert.deepEqual(tsconfig.exclude, ["src/**/*.test.ts"]);
+});
+
+test("runtime type definitions stay on the locked Node 24 major", () => {
+  const rootManifest = readJson("package.json");
+  const serverManifest = readJson("apps/server/package.json");
+
+  assert.equal(rootManifest.devDependencies["@types/node"], "24.13.3");
+  assert.equal(serverManifest.devDependencies["@types/node"], "24.13.3");
+});
+
+test("root orchestration runs the pinned package manager through Corepack", () => {
+  const manifest = readJson("package.json");
+
+  assert.equal(
+    manifest.scripts.typecheck,
+    "corepack pnpm --recursive --if-present run typecheck",
+  );
+  assert.equal(
+    manifest.scripts.build,
+    "corepack pnpm --recursive --if-present run build",
+  );
+  assert.equal(
+    manifest.scripts["install:frozen"],
+    "corepack pnpm install --frozen-lockfile",
+  );
 });

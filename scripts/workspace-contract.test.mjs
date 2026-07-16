@@ -154,17 +154,26 @@ test("the production workspace keeps its locked lean-monorepo contract", () => {
       );
       check(manifest.private === true, `${manifestPath} must remain private`);
       check(manifest.type === "module", `${manifestPath} must use ESM`);
+      const expectedBuildScript =
+        directory === "apps/web"
+          ? "vite build"
+          : directory === "apps/server"
+            ? "tsc -p tsconfig.build.json"
+            : "tsc -p tsconfig.json";
       check(
-        manifest.scripts?.build ===
-          (isApplication
-            ? "tsc --noEmit -p tsconfig.json"
-            : "tsc -p tsconfig.json"),
+        manifest.scripts?.build === expectedBuildScript,
         `${manifestPath} needs the standard build script`,
       );
       check(
         manifest.scripts?.typecheck === "tsc --noEmit -p tsconfig.json",
         `${manifestPath} needs the standard typecheck script`,
       );
+      if (isApplication) {
+        check(
+          manifest.scripts?.test === "vitest run",
+          `${manifestPath} needs the standard application test script`,
+        );
+      }
       if (isApplication) {
         for (const libraryField of ["main", "types", "exports", "files"]) {
           check(
@@ -240,11 +249,12 @@ test("the production workspace keeps its locked lean-monorepo contract", () => {
       );
     }
     check(
-      manifest.scripts?.test === "node --test scripts/*.test.mjs",
+      manifest.scripts?.test === "node --test scripts/*.test.mjs && vitest run",
       "root test script must run every workspace policy test",
     );
     check(
-      manifest.scripts?.["install:frozen"] === "pnpm install --frozen-lockfile",
+      manifest.scripts?.["install:frozen"] ===
+        "corepack pnpm install --frozen-lockfile",
       "root install:frozen script must enforce the committed lockfile",
     );
   }

@@ -1,1 +1,1 @@
-export const webWorkspace = "@matchsense/web" as const;
+export { App } from "./App";

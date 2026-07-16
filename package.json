@@ -8,14 +8,17 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test scripts/*.test.mjs",
-    "typecheck": "pnpm --recursive --if-present run typecheck",
-    "build": "pnpm --recursive --if-present run build",
+    "test": "node --test scripts/*.test.mjs && vitest run",
+    "typecheck": "corepack pnpm --recursive --if-present run typecheck",
+    "build": "corepack pnpm --recursive --if-present run build",
     "format:check": "prettier --check .",
-    "install:frozen": "pnpm install --frozen-lockfile"
+    "install:frozen": "corepack pnpm install --frozen-lockfile"
   },
   "devDependencies": {
+    "@types/node": "24.13.3",
     "prettier": "3.9.5",
-    "typescript": "7.0.2"
+    "tsx": "4.23.1",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
   }
 }
