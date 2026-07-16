@@ -249,7 +249,8 @@ test("the production workspace keeps its locked lean-monorepo contract", () => {
       );
     }
     check(
-      manifest.scripts?.test === "node --test scripts/*.test.mjs && vitest run",
+      manifest.scripts?.test ===
+        "corepack pnpm run preflight:db && node --test scripts/*.test.mjs && vitest run",
       "root test script must run every workspace policy test",
     );
     check(

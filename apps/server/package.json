@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@fastify/static": "10.1.0",
+    "@matchsense/db": "workspace:*",
     "fastify": "5.10.0",
     "zod": "4.4.3"
   },

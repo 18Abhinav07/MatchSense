@@ -1,6 +1,8 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { createPostgresDatabase } from "@matchsense/db";
+
 import { buildApp, type ReadinessProbe } from "./app.js";
 import { parseServerEnv } from "./config.js";
 import {
@@ -9,15 +11,15 @@ import {
   type ShutdownSignalSource,
 } from "./start.js";
 
-const unavailableReadinessProbe: ReadinessProbe = {
-  check: async () => ({
-    databaseReachable: false,
-    migrationsCurrent: false,
-  }),
-};
+interface ServerDatabaseRuntime extends ReadinessProbe {
+  close(): Promise<void>;
+}
 
 export interface StartServerOptions {
+  databaseFactory?: (databaseUrl: string) => ServerDatabaseRuntime;
+  databaseRuntime?: ServerDatabaseRuntime;
   environment?: Record<string, string | undefined>;
+  listen?: boolean;
   readinessProbe?: ReadinessProbe;
   signalSource?: ShutdownSignalSource;
   webDistPath?: string;
@@ -27,13 +29,34 @@ export async function startServer(options: StartServerOptions = {}) {
   const config = parseServerEnv(options.environment ?? process.env);
   const webDistPath =
     options.webDistPath ?? path.resolve(import.meta.dirname, "../../web/dist");
+  const databaseRuntime =
+    options.databaseRuntime ??
+    (options.readinessProbe
+      ? undefined
+      : (options.databaseFactory ?? createPostgresDatabase)(
+          config.databaseUrl,
+        ));
   const app = buildApp({
-    readinessProbe: options.readinessProbe ?? unavailableReadinessProbe,
+    readinessProbe: options.readinessProbe ?? databaseRuntime!,
     webDistPath,
   });
 
-  await app.listen({ host: config.host, port: config.port });
-  registerShutdownSignals(
+  let unregisterSignals: () => void = () => undefined;
+  app.addHook("onClose", async () => {
+    unregisterSignals();
+    await databaseRuntime?.close();
+  });
+
+  try {
+    if (options.listen !== false) {
+      await app.listen({ host: config.host, port: config.port });
+    }
+  } catch (error) {
+    await app.close();
+    throw error;
+  }
+
+  unregisterSignals = registerShutdownSignals(
     options.signalSource ?? process,
     async () => app.close(),
     createShutdownFailureReporter({

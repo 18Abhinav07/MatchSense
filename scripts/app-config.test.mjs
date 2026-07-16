@@ -79,7 +79,7 @@ test("root orchestration runs the pinned package manager through Corepack", () =
 
   assert.equal(
     manifest.scripts.typecheck,
-    "corepack pnpm --recursive --if-present run typecheck",
+    "corepack pnpm run preflight:db && corepack pnpm --recursive --if-present run typecheck",
   );
   assert.equal(
     manifest.scripts.build,
@@ -88,5 +88,18 @@ test("root orchestration runs the pinned package manager through Corepack", () =
   assert.equal(
     manifest.scripts["install:frozen"],
     "corepack pnpm install --frozen-lockfile",
+  );
+});
+
+test("Corepack-only shells skip pnpm's implicit bare-pnpm install check", () => {
+  const workspace = readFileSync(
+    path.join(root, "pnpm-workspace.yaml"),
+    "utf8",
+  );
+
+  assert.match(
+    workspace,
+    /^verifyDepsBeforeRun: false$/mu,
+    "frozen installation is an explicit gate, so lifecycle scripts must not spawn an unavailable bare pnpm binary",
   );
 });
