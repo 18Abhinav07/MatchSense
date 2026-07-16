@@ -1,8 +1,10 @@
-export const TEAM_CODES = ["ARG", "BRA", "FRA", "JPN"] as const;
+export const TEAM_CODES = ["ARG", "BRA", "ESP", "FRA", "JPN"] as const;
 export const SIMULATION_SOURCE_LABEL =
   "SIMULATION · TXLINE-SHAPED DATA" as const;
+export const TXLINE_DEVNET_SOURCE_LABEL = "TXLINE · DEVNET SOURCE" as const;
 
 export type TeamCode = (typeof TEAM_CODES)[number];
+export type DataProvenance = "synthetic_txline_shaped" | "live_txline";
 
 export interface TeamSummary {
   code: TeamCode;
@@ -36,7 +38,7 @@ export interface ScoreSnapshotFact {
   sourceEnvelopeId: string;
   fixtureId: string;
   receivedAt: string;
-  provenance: "synthetic_txline_shaped";
+  provenance: DataProvenance;
   score: Score;
   minute: string;
 }
@@ -44,6 +46,7 @@ export interface ScoreSnapshotFact {
 export type SourceFact = ScoreSnapshotFact;
 
 export interface CanonicalMoment {
+  eventTeam: TeamCode;
   id: string;
   identity: string;
   fixtureId: string;
@@ -53,7 +56,7 @@ export interface CanonicalMoment {
   score: Score;
   sourceEnvelopeId: string;
   status: "confirmed";
-  provenance: "synthetic_txline_shaped";
+  provenance: DataProvenance;
 }
 
 export interface FixtureSnapshot {
@@ -64,8 +67,9 @@ export interface FixtureSnapshot {
   minute: string;
   phase: "scheduled" | "first_half";
   score: Score;
-  provenance: "synthetic_txline_shaped";
-  sourceLabel: typeof SIMULATION_SOURCE_LABEL;
+  provenance: DataProvenance;
+  sourceLabel:
+    typeof SIMULATION_SOURCE_LABEL | typeof TXLINE_DEVNET_SOURCE_LABEL;
   lastEvent: CanonicalMoment | null;
   revision: number;
   updatedAt: string;
@@ -75,10 +79,25 @@ export interface FixtureProjection extends FixtureSnapshot {
   appliedSourceEnvelopeIds: readonly string[];
 }
 
+export interface CommentaryReady {
+  generatedAt: string;
+  language: "en";
+  momentIdentity: string;
+  provider: "gemini" | "deterministic";
+  text: string;
+  usedFallback: boolean;
+}
+
 export interface FixtureStreamEvent {
-  event: "snapshot" | "moment.created" | "moment.revised" | "heartbeat";
+  event:
+    | "snapshot"
+    | "moment.created"
+    | "moment.revised"
+    | "commentary.ready"
+    | "heartbeat";
   id: string;
   moment?: CanonicalMoment;
+  commentary?: CommentaryReady;
   snapshot: FixtureSnapshot;
 }
 

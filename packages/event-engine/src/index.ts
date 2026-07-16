@@ -1,11 +1,15 @@
 import type {
   CanonicalMoment,
+  DataProvenance,
   FixtureProjection,
   FixtureSnapshot,
   SourceFact,
   TeamCode,
 } from "@matchsense/contracts";
-import { SIMULATION_SOURCE_LABEL } from "@matchsense/contracts";
+import {
+  SIMULATION_SOURCE_LABEL,
+  TXLINE_DEVNET_SOURCE_LABEL,
+} from "@matchsense/contracts";
 
 export function toFixtureSnapshot(
   projection: FixtureProjection,
@@ -20,7 +24,9 @@ export function createFixtureProjection(input: {
   awayTeam: TeamCode;
   kickoffAt: string;
   observedAt: string;
+  provenance?: DataProvenance;
 }): FixtureProjection {
+  const provenance = input.provenance ?? "synthetic_txline_shaped";
   return {
     awayTeam: input.awayTeam,
     appliedSourceEnvelopeIds: [],
@@ -30,10 +36,13 @@ export function createFixtureProjection(input: {
     lastEvent: null,
     minute: "—",
     phase: "scheduled",
-    provenance: "synthetic_txline_shaped",
+    provenance,
     revision: 0,
     score: { away: 0, home: 0 },
-    sourceLabel: SIMULATION_SOURCE_LABEL,
+    sourceLabel:
+      provenance === "live_txline"
+        ? TXLINE_DEVNET_SOURCE_LABEL
+        : SIMULATION_SOURCE_LABEL,
     updatedAt: input.observedAt,
   };
 }
@@ -62,6 +71,10 @@ export function reduceSourceFact(
   const momentId = `${current.fixtureId}:score:${fact.score.home}-${fact.score.away}`;
   const moment: CanonicalMoment | null = scoreChanged
     ? {
+        eventTeam:
+          fact.score.home > current.score.home
+            ? current.homeTeam
+            : current.awayTeam,
         fixtureId: current.fixtureId,
         id: momentId,
         identity: `${momentId}:${revision}`,

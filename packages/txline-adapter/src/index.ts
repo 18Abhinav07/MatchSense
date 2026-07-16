@@ -3,6 +3,8 @@ import type {
   SyntheticSourceEnvelope,
 } from "@matchsense/contracts";
 
+export * from "./live.js";
+
 function assertNonNegativeInteger(value: number, label: string) {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error(`${label} must be a non-negative integer`);

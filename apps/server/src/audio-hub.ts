@@ -139,10 +139,14 @@ export function createAudioHub(options: {
     return true;
   };
 
-  const inject = (eventId: string, sessionIds: readonly string[]) => {
+  const inject = (
+    eventId: string,
+    sessionIds: readonly string[],
+    bytes = options.cueBytes,
+  ) => {
     if (acceptedEventIds.has(eventId)) return false;
     acceptedEventIds.add(eventId);
-    for (const sessionId of sessionIds) write(sessionId, options.cueBytes);
+    for (const sessionId of sessionIds) write(sessionId, bytes);
     return true;
   };
 

@@ -27,9 +27,12 @@ export type ListeningPreparationState =
   "idle" | "preparing" | "ready" | "failed";
 
 interface PreparedListeningSession {
+  awayTeam: TeamCode;
   fixtureId: string;
+  homeTeam: TeamCode;
   id: string;
   perspectiveTeam: TeamCode;
+  sourceLabel: string;
   streamUrl: string;
 }
 
@@ -215,11 +218,19 @@ export function ListeningProvider({ children }: { children: ReactNode }) {
           },
         );
         if (!response.ok) throw new Error("Listening preparation failed");
-        const session = (await response.json()) as { id: string };
+        const session = (await response.json()) as {
+          awayTeam: TeamCode;
+          homeTeam: TeamCode;
+          id: string;
+          sourceLabel: string;
+        };
         const next: PreparedListeningSession = {
+          awayTeam: session.awayTeam,
           fixtureId: nextFixtureId,
+          homeTeam: session.homeTeam,
           id: session.id,
           perspectiveTeam,
+          sourceLabel: session.sourceLabel,
           streamUrl: `/api/v1/listening-sessions/${session.id}/stream.mp3`,
         };
         if (
@@ -348,9 +359,12 @@ export function ListeningProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
+    const active = activeRef.current;
     navigator.mediaSession.metadata = new MediaMetadata({
-      album: "Argentina v France",
-      artist: "Synthetic replay commentary",
+      album: active
+        ? `${active.homeTeam} v ${active.awayTeam}`
+        : "World Cup match companion",
+      artist: active?.sourceLabel ?? "MatchSense commentary",
       artwork: [
         {
           src: "/icons/matchsense-icon.svg",
@@ -368,7 +382,7 @@ export function ListeningProvider({ children }: { children: ReactNode }) {
         navigator.mediaSession.setActionHandler(action, null);
       }
     };
-  }, [pause, resume, stop]);
+  }, [pause, resume, sessionId, stop]);
 
   const value = useMemo(
     () => ({

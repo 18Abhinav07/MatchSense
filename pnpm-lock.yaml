@@ -29,6 +29,9 @@ importers:
       '@fastify/static':
         specifier: 10.1.0
         version: 10.1.0
+      '@matchsense/commentary':
+        specifier: workspace:*
+        version: link:../../packages/commentary
       '@matchsense/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts

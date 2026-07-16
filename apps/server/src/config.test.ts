@@ -25,6 +25,25 @@ describe("parseServerEnv", () => {
     });
   });
 
+  it("enables the explicit hackathon TxLINE source only with its backend token", () => {
+    expect(
+      parseServerEnv({
+        DATABASE_URL: "postgresql://db.example/matchsense",
+        DATA_RIGHTS_MODE: "txline_hackathon",
+        TXLINE_API_TOKEN: "server-only-token",
+      }),
+    ).toMatchObject({
+      dataRightsMode: "txline_hackathon",
+      txlineApiToken: "server-only-token",
+    });
+    expect(() =>
+      parseServerEnv({
+        DATABASE_URL: "postgresql://db.example/matchsense",
+        DATA_RIGHTS_MODE: "txline_hackathon",
+      }),
+    ).toThrow("Invalid MatchSense server configuration");
+  });
+
   it.each([
     [{}, "missing database URL"],
     [{ DATABASE_URL: "not-a-url" }, "invalid database URL"],

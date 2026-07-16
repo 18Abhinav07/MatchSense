@@ -2,10 +2,14 @@ import path from "node:path";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
+import { createCommentaryPipeline } from "@matchsense/commentary";
 import { createPostgresDatabase } from "@matchsense/db";
+import { createTxlineLiveScoreSource } from "@matchsense/txline-adapter";
 
 import { buildApp, type ReadinessProbe } from "./app.js";
+import { transcodeWavToStreamMp3 } from "./audio-transcoder.js";
 import { parseServerEnv } from "./config.js";
+import { inspectMp3 } from "./mp3.js";
 import {
   createProductRuntime,
   type ProductRuntime,
@@ -19,6 +23,13 @@ import {
 interface ServerDatabaseRuntime extends ReadinessProbe {
   close(): Promise<void>;
 }
+
+const VERIFIED_HACKATHON_FIXTURE = {
+  fixtureId: "18237038",
+  participant1: { id: "1999", name: "France" },
+  participant1IsHome: true,
+  participant2: { id: "3021", name: "Spain" },
+} as const;
 
 export interface StartServerOptions {
   databaseFactory?: (databaseUrl: string) => ServerDatabaseRuntime;
@@ -42,17 +53,50 @@ export async function startServer(options: StartServerOptions = {}) {
       : (options.databaseFactory ?? createPostgresDatabase)(
           config.databaseUrl,
         ));
-  const productRuntime =
-    options.productRuntime ??
-    createProductRuntime({
-      cueBytes: await readFile(
-        path.resolve(import.meta.dirname, "../assets/goal-cue.mp3"),
-      ),
+  let productRuntime = options.productRuntime;
+  if (!productRuntime) {
+    const cueBytes = await readFile(
+      path.resolve(import.meta.dirname, "../assets/goal-cue.mp3"),
+    );
+    const streamContract = inspectMp3(cueBytes);
+    productRuntime = createProductRuntime({
+      commentaryPipeline: createCommentaryPipeline({
+        env: options.environment ?? process.env,
+      }),
+      cueBytes,
+      ...(config.dataRightsMode === "txline_hackathon"
+        ? {
+            fixture: {
+              awayTeam: "ESP" as const,
+              fixtureId: VERIFIED_HACKATHON_FIXTURE.fixtureId,
+              homeTeam: "FRA" as const,
+              kickoffAt: "2026-07-14T15:00:00.000Z",
+              participant1IsHome: true,
+              provenance: "live_txline" as const,
+            },
+          }
+        : {}),
       silenceBytes: await readFile(
         path.resolve(import.meta.dirname, "../assets/silence.mp3"),
       ),
+      transcodeCommentary: (wavBytes) =>
+        transcodeWavToStreamMp3(wavBytes, { expected: streamContract }),
       writeIntervalMs: 940,
     });
+  }
+  let txlineAbort: AbortController | null = null;
+  let txlineTask: Promise<void> | null = null;
+  if (config.dataRightsMode === "txline_hackathon") {
+    txlineAbort = new AbortController();
+    const source = createTxlineLiveScoreSource({
+      apiToken: config.txlineApiToken!,
+      fixtures: [VERIFIED_HACKATHON_FIXTURE],
+      onEvent: (event) => {
+        productRuntime.acceptTxlineEvent(event);
+      },
+    });
+    txlineTask = source.run(txlineAbort.signal).catch(() => undefined);
+  }
   const app = buildApp({
     readinessProbe: options.readinessProbe ?? databaseRuntime!,
     runtime: productRuntime,
@@ -62,6 +106,8 @@ export async function startServer(options: StartServerOptions = {}) {
   let unregisterSignals: () => void = () => undefined;
   app.addHook("onClose", async () => {
     unregisterSignals();
+    txlineAbort?.abort();
+    await txlineTask;
     productRuntime.close();
     await databaseRuntime?.close();
   });

@@ -10,8 +10,10 @@ import {
 import { ListeningProvider, useListening } from "./ListeningProvider.js";
 import {
   type CanonicalEventPayload,
+  type CommentaryEventPayload,
   createInitialLiveState,
   formatFreshness,
+  type LiveCommentary,
   type LiveMoment,
   type LiveSnapshot,
   liveViewReducer,
@@ -22,6 +24,7 @@ import {
 const teams: Array<{ code: TeamCode; name: string; note: string }> = [
   { code: "ARG", name: "Argentina", note: "Sky, paper, and match-night blue" },
   { code: "BRA", name: "Brazil", note: "Canopy green and tournament gold" },
+  { code: "ESP", name: "Spain", note: "Signal red and tournament gold" },
   { code: "FRA", name: "France", note: "Deep blue and signal red" },
   { code: "JPN", name: "Japan", note: "Paper white and rising sun red" },
 ];
@@ -29,6 +32,7 @@ const teams: Array<{ code: TeamCode; name: string; note: string }> = [
 const opponents: Record<TeamCode, TeamCode> = {
   ARG: "FRA",
   BRA: "JPN",
+  ESP: "FRA",
   FRA: "ARG",
   JPN: "BRA",
 };
@@ -125,7 +129,7 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
   return (
     <Today
       favoriteTeam={favoriteTeam}
-      onOpen={() => navigate("/matches/arg-fra-demo/live")}
+      onOpen={(fixtureId) => navigate(`/matches/${fixtureId}/live`)}
     />
   );
 }
@@ -254,11 +258,35 @@ function Today({
   onOpen,
 }: {
   favoriteTeam: TeamCode;
-  onOpen(): void;
+  onOpen(fixtureId: string): void;
 }) {
+  const [fixture, setFixture] = useState<LiveSnapshot>(
+    () => createInitialLiveState().snapshot,
+  );
+  useEffect(() => {
+    let active = true;
+    fetch("/api/v1/fixtures")
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Fixture catalog unavailable");
+        return (await response.json()) as { fixtures: LiveSnapshot[] };
+      })
+      .then(({ fixtures }) => {
+        if (active && fixtures[0]) setFixture(fixtures[0]);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+  const kickoff = fixture.kickoffAt
+    ? new Date(fixture.kickoffAt).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "Matchday";
   return (
     <main className="app-canvas" id="main-content">
-      <Masthead end="Demo feed ready" />
+      <Masthead end={fixture.sourceLabel ?? "Match feed ready"} />
       <section className="today-hero">
         <div>
           <p className="kicker">Thursday · Your matchday</p>
@@ -272,32 +300,36 @@ function Today({
       </section>
       <section className="fixture-programme" aria-labelledby="today-fixture">
         <div className="fixture-meta">
-          <span>18:00 · Synthetic replay</span>
-          <span>Group stage · Fixture 01</span>
+          <span>
+            {kickoff} · {fixture.sourceLabel ?? "MatchSense source"}
+          </span>
+          <span>World Cup · {fixture.fixtureId}</span>
         </div>
         <div className="fixture-teams">
           <div>
-            <Flag code="ARG" large />
+            <Flag code={fixture.homeTeam} large />
             <span>
-              <small>ARG</small>
-              <b>Argentina</b>
+              <small>{fixture.homeTeam}</small>
+              <b>{teamName(fixture.homeTeam)}</b>
             </span>
           </div>
           <span className="fixture-versus">V</span>
           <div>
             <span>
-              <small>FRA</small>
-              <b>France</b>
+              <small>{fixture.awayTeam}</small>
+              <b>{teamName(fixture.awayTeam)}</b>
             </span>
-            <Flag code="FRA" large />
+            <Flag code={fixture.awayTeam} large />
           </div>
         </div>
         <div className="fixture-action">
           <span>
             <i />
-            Replay environment · ready
+            {fixture.provenance === "live_txline"
+              ? "TxLINE source · reconciled"
+              : "Replay environment · ready"}
           </span>
-          <button type="button" onClick={onOpen}>
+          <button type="button" onClick={() => onOpen(fixture.fixtureId)}>
             Open match companion <ArrowIcon />
           </button>
         </div>
@@ -312,7 +344,7 @@ function Today({
           revision-linked event.
         </p>
       </section>
-      <Provenance />
+      <Provenance label={fixture.sourceLabel} />
     </main>
   );
 }
@@ -380,9 +412,14 @@ function LiveCompanion({
         60,
       );
     };
+    const onCommentary = (event: MessageEvent<string>) => {
+      const payload = JSON.parse(event.data) as CommentaryEventPayload;
+      dispatch({ payload, type: "commentary_ready" });
+    };
     stream.addEventListener("snapshot", onSnapshot as EventListener);
     stream.addEventListener("moment.created", onMoment as EventListener);
     stream.addEventListener("moment.revised", onMoment as EventListener);
+    stream.addEventListener("commentary.ready", onCommentary as EventListener);
     stream.onopen = () =>
       dispatch({ transportHealth: "reconciled", type: "transport" });
     stream.onerror = () =>
@@ -444,7 +481,8 @@ function LiveCompanion({
     }
   };
 
-  const relation = favoriteTeam === state.snapshot.homeTeam ? "for" : "neutral";
+  const relation =
+    state.openMoment?.eventTeam === favoriteTeam ? "for" : "neutral";
   const sourceFreshness = formatFreshness(
     state.snapshot.updatedAt,
     freshnessNow,
@@ -485,8 +523,8 @@ function LiveCompanion({
           <div>
             <Flag code={state.snapshot.homeTeam} large />
             <span>
-              <small>ARG</small>
-              <b>Argentina</b>
+              <small>{state.snapshot.homeTeam}</small>
+              <b>{teamName(state.snapshot.homeTeam)}</b>
             </span>
           </div>
           <div className="score-lockup">
@@ -499,8 +537,8 @@ function LiveCompanion({
           </div>
           <div>
             <span>
-              <small>FRA</small>
-              <b>France</b>
+              <small>{state.snapshot.awayTeam}</small>
+              <b>{teamName(state.snapshot.awayTeam)}</b>
             </span>
             <Flag code={state.snapshot.awayTeam} large />
           </div>
@@ -509,7 +547,7 @@ function LiveCompanion({
           <span>Last event</span>
           <b>
             {state.snapshot.lastEvent
-              ? `Goal · ${state.snapshot.lastEvent.minute}`
+              ? `Goal · ${teamName(state.snapshot.lastEvent.eventTeam)} · ${state.snapshot.lastEvent.minute}`
               : "Awaiting kickoff event"}
           </b>
           <small>
@@ -545,13 +583,19 @@ function LiveCompanion({
             <b>{state.timeline.length} events</b>
           </div>
           {state.timeline.length ? (
-            state.timeline.map((moment) => (
-              <div className="timeline-row" key={moment.identity}>
-                <span>{moment.minute}</span>
-                <b>Goal · Argentina</b>
-                <small>{moment.identity}</small>
-              </div>
-            ))
+            state.timeline.map((moment) => {
+              const commentary = state.commentaryByMoment[moment.identity];
+              return (
+                <div className="timeline-row" key={moment.identity}>
+                  <span>{moment.minute}</span>
+                  <b>Goal · {teamName(moment.eventTeam)}</b>
+                  <small>{moment.identity}</small>
+                  <p className="timeline-commentary">
+                    {commentary?.text ?? "Commentary is warming up…"}
+                  </p>
+                </div>
+              );
+            })
           ) : (
             <p className="timeline-empty">
               The wire is calm. Use Demo Lab to send the first real canonical
@@ -559,31 +603,45 @@ function LiveCompanion({
             </p>
           )}
         </div>
-        <div className="demo-panel">
-          <p className="kicker">Demo Lab</p>
-          <h2>Prove the whole loop.</h2>
-          <p>
-            Replay → adapter → reducer → SSE → score → Moment → every active
-            listener.
-          </p>
-          <button
-            type="button"
-            onClick={() => void playGoal()}
-            disabled={isPlayingDemo}
-          >
-            {isPlayingDemo ? "Advancing replay" : "Play goal"}
-            <ArrowIcon />
-          </button>
-          {error ? (
-            <p className="inline-error" role="alert">
-              {error}
+        {state.dataMode === "simulation" ? (
+          <div className="demo-panel">
+            <p className="kicker">Demo Lab</p>
+            <h2>Prove the whole loop.</h2>
+            <p>
+              Replay → adapter → reducer → SSE → score → Moment → every active
+              listener.
             </p>
-          ) : null}
-        </div>
+            <button
+              type="button"
+              onClick={() => void playGoal()}
+              disabled={isPlayingDemo}
+            >
+              {isPlayingDemo ? "Advancing replay" : "Play goal"}
+              <ArrowIcon />
+            </button>
+            {error ? (
+              <p className="inline-error" role="alert">
+                {error}
+              </p>
+            ) : null}
+          </div>
+        ) : (
+          <div className="demo-panel">
+            <p className="kicker">TxLINE source</p>
+            <h2>The match wire is automatic.</h2>
+            <p>
+              Reconciled TxLINE updates now drive the score, Moment, transcript,
+              and every active listening stream without a demo button.
+            </p>
+          </div>
+        )}
       </section>
-      <Provenance />
+      <Provenance label={state.snapshot.sourceLabel} />
       {state.openMoment ? (
         <GoalMoment
+          commentary={state.commentaryByMoment[state.openMoment.identity]}
+          homeTeam={state.snapshot.homeTeam}
+          awayTeam={state.snapshot.awayTeam}
           moment={state.openMoment}
           relation={relation}
           onClose={() => dispatch({ type: "close_moment" })}
@@ -594,10 +652,16 @@ function LiveCompanion({
 }
 
 function GoalMoment({
+  commentary,
+  homeTeam,
+  awayTeam,
   moment,
   relation,
   onClose,
 }: {
+  commentary?: LiveCommentary | undefined;
+  homeTeam: TeamCode;
+  awayTeam: TeamCode;
   moment: LiveMoment;
   relation: "for" | "neutral";
   onClose(): void;
@@ -616,7 +680,7 @@ function GoalMoment({
       <div className="moment-truth-rail">
         <span>Goal · confirmed</span>
         <b>
-          ARG {moment.score.home}—{moment.score.away} FRA
+          {homeTeam} {moment.score.home}—{moment.score.away} {awayTeam}
         </b>
         <span>
           {moment.minute} · revision {moment.revision}
@@ -625,13 +689,16 @@ function GoalMoment({
       <div className="goal-pitch" aria-hidden="true">
         <i />
         <i />
-        <Flag code="ARG" large />
+        <Flag code={moment.eventTeam} large />
       </div>
       <p className="goal-word">GOAL</p>
       <div className="goal-consequence">
         <p className="kicker">Current canonical moment</p>
-        <h2>Argentina take the lead.</h2>
+        <h2>{teamName(moment.eventTeam)} change the match.</h2>
         <p>The score was already current before this celebration opened.</p>
+        <p className="moment-commentary">
+          {commentary?.text ?? "Live commentary is being prepared."}
+        </p>
         <small>{moment.identity}</small>
       </div>
       <button className="moment-close" type="button" onClick={onClose}>
@@ -641,10 +708,10 @@ function GoalMoment({
   );
 }
 
-function Provenance() {
+function Provenance({ label }: { label?: string | undefined }) {
   return (
     <footer className="provenance">
-      SIMULATION · TXLINE-SHAPED DATA{" "}
+      {label ?? "SIMULATION · TXLINE-SHAPED DATA"}{" "}
       <span>Facts stay fixed · presentation adapts</span>
     </footer>
   );

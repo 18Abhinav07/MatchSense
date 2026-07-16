@@ -38,6 +38,7 @@ describe("fan journey state", () => {
       event: "moment.created" as const,
       id: "arg-fra-demo:score:1-0:1",
       moment: {
+        eventTeam: "ARG" as const,
         id: "arg-fra-demo:score:1-0",
         identity: "arg-fra-demo:score:1-0:1",
         kind: "goal" as const,
@@ -197,6 +198,7 @@ describe("fan journey state", () => {
         event: "moment.created",
         id: "arg-fra-demo:score:1-0:1",
         moment: {
+          eventTeam: "ARG",
           id: "arg-fra-demo:score:1-0",
           identity: "arg-fra-demo:score:1-0:1",
           kind: "goal",
@@ -228,6 +230,56 @@ describe("fan journey state", () => {
     expect(delayed).toBe(current);
     expect(delayed.snapshot.score).toEqual({ away: 0, home: 1 });
     expect(delayed.currentRevision).toBe(1);
+  });
+
+  it("attaches one shared commentary transcript to its canonical Moment", () => {
+    const initial = createInitialLiveState();
+    const withGoal = liveViewReducer(initial, {
+      payload: {
+        event: "moment.created",
+        id: "arg-fra-demo:score:1-0:1",
+        moment: {
+          eventTeam: "ARG",
+          id: "arg-fra-demo:score:1-0",
+          identity: "arg-fra-demo:score:1-0:1",
+          kind: "goal",
+          minute: "23'",
+          revision: 1,
+          score: { away: 0, home: 1 },
+          status: "confirmed",
+        },
+        snapshot: {
+          ...initial.snapshot,
+          minute: "23'",
+          revision: 1,
+          score: { away: 0, home: 1 },
+        },
+      },
+      type: "canonical_event",
+    });
+
+    const spoken = liveViewReducer(withGoal, {
+      payload: {
+        commentary: {
+          generatedAt: "2026-07-16T12:00:03.000Z",
+          language: "en",
+          momentIdentity: "arg-fra-demo:score:1-0:1",
+          provider: "gemini",
+          text: "Goal! Argentina score. Argentina lead France one nil.",
+          usedFallback: false,
+        },
+        event: "commentary.ready",
+        id: "commentary:arg-fra-demo:score:1-0:1:en",
+        snapshot: withGoal.snapshot,
+      },
+      type: "commentary_ready",
+    });
+
+    expect(spoken.commentaryByMoment["arg-fra-demo:score:1-0:1"]?.text).toBe(
+      "Goal! Argentina score. Argentina lead France one nil.",
+    );
+    expect(spoken.timeline).toHaveLength(1);
+    expect(spoken.currentRevision).toBe(1);
   });
 
   it("renders a France replay sample against a different mapped opponent", () => {

@@ -1,7 +1,8 @@
-export type TeamCode = "ARG" | "BRA" | "FRA" | "JPN";
+export type TeamCode = "ARG" | "BRA" | "ESP" | "FRA" | "JPN";
 
 export interface LiveSnapshot {
   fixtureId: string;
+  kickoffAt?: string;
   homeTeam: TeamCode;
   awayTeam: TeamCode;
   minute: string;
@@ -15,6 +16,7 @@ export interface LiveSnapshot {
 }
 
 export interface LiveMoment {
+  eventTeam: TeamCode;
   id: string;
   identity: string;
   kind: "goal";
@@ -31,8 +33,24 @@ export interface CanonicalEventPayload {
   snapshot: LiveSnapshot;
 }
 
+export interface LiveCommentary {
+  generatedAt: string;
+  language: "en";
+  momentIdentity: string;
+  provider: "gemini" | "deterministic";
+  text: string;
+  usedFallback: boolean;
+}
+
+export interface CommentaryEventPayload {
+  event: "commentary.ready";
+  id: string;
+  commentary: LiveCommentary;
+  snapshot: LiveSnapshot;
+}
+
 export interface LiveViewState {
-  dataMode: "simulation";
+  dataMode: "simulation" | "txline";
   snapshot: LiveSnapshot;
   currentRevision: number;
   timeline: LiveMoment[];
@@ -40,11 +58,13 @@ export interface LiveViewState {
   openMoment: LiveMoment | null;
   transportHealth: "connecting" | "reconciled" | "stale" | "offline";
   lastEventId: string | null;
+  commentaryByMoment: Record<string, LiveCommentary>;
 }
 
 export type LiveViewAction =
   | { type: "snapshot"; snapshot: LiveSnapshot }
   | { type: "canonical_event"; payload: CanonicalEventPayload }
+  | { type: "commentary_ready"; payload: CommentaryEventPayload }
   | { type: "open_moment"; identity: string }
   | { type: "close_moment" }
   | {
@@ -56,6 +76,7 @@ export function createInitialLiveState(): LiveViewState {
   return {
     dataMode: "simulation",
     currentRevision: 0,
+    commentaryByMoment: {},
     lastEventId: null,
     openMoment: null,
     pendingMoment: null,
@@ -83,6 +104,8 @@ export function liveViewReducer(
     return {
       ...state,
       currentRevision: snapshotRevision,
+      dataMode:
+        action.snapshot.provenance === "live_txline" ? "txline" : "simulation",
       snapshot: action.snapshot,
       transportHealth: "reconciled",
     };
@@ -97,11 +120,25 @@ export function liveViewReducer(
     return {
       ...state,
       currentRevision: action.payload.moment.revision,
+      dataMode:
+        action.payload.snapshot.provenance === "live_txline"
+          ? "txline"
+          : "simulation",
       lastEventId: action.payload.id,
       openMoment: null,
       pendingMoment: action.payload.moment,
       snapshot: action.payload.snapshot,
       timeline,
+      transportHealth: "reconciled",
+    };
+  }
+  if (action.type === "commentary_ready") {
+    return {
+      ...state,
+      commentaryByMoment: {
+        ...state.commentaryByMoment,
+        [action.payload.commentary.momentIdentity]: action.payload.commentary,
+      },
       transportHealth: "reconciled",
     };
   }

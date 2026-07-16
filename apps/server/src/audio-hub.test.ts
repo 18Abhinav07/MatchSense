@@ -38,6 +38,22 @@ describe("continuous listening audio hub", () => {
     expect(hub.status()).toMatchObject({ eventCount: 1, listenerCount: 1 });
   });
 
+  it("injects generated commentary bytes into the existing listener stream", () => {
+    const hub = createAudioHub({
+      cueBytes: Buffer.from("cue"),
+      silenceBytes: Buffer.from("silence"),
+      writeIntervalMs: 1_000,
+    });
+    const client = new WritableClient();
+    hub.addClient("session-1", client);
+
+    expect(
+      hub.inject("moment-1:commentary", ["session-1"], Buffer.from("voice")),
+    ).toBe(true);
+
+    expect(Buffer.concat(client.chunks).toString()).toBe("silencevoice");
+  });
+
   it("drops a blocked client before backlog can grow without bound", () => {
     const hub = createAudioHub({
       cueBytes: Buffer.from("12345678"),
