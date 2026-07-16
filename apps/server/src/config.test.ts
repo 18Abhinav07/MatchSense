@@ -44,6 +44,27 @@ describe("parseServerEnv", () => {
     ).toThrow("Invalid MatchSense server configuration");
   });
 
+  it("enables Web Push only with a complete VAPID key set", () => {
+    expect(
+      parseServerEnv({
+        DATABASE_URL: "postgresql://db.example/matchsense",
+        VAPID_PRIVATE_KEY: "private-key",
+        VAPID_PUBLIC_KEY: "public-key",
+        VAPID_SUBJECT: "mailto:team@matchsense.app",
+      }).vapid,
+    ).toEqual({
+      privateKey: "private-key",
+      publicKey: "public-key",
+      subject: "mailto:team@matchsense.app",
+    });
+    expect(() =>
+      parseServerEnv({
+        DATABASE_URL: "postgresql://db.example/matchsense",
+        VAPID_PUBLIC_KEY: "public-key-only",
+      }),
+    ).toThrow("Invalid MatchSense server configuration");
+  });
+
   it.each([
     [{}, "missing database URL"],
     [{ DATABASE_URL: "not-a-url" }, "invalid database URL"],

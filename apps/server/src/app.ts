@@ -8,6 +8,10 @@ import type { FixtureStreamEvent, TeamCode } from "@matchsense/contracts";
 
 import type { AudioWritable } from "./audio-hub.js";
 import type { ProductRuntime } from "./product-runtime.js";
+import {
+  type PushRouteDependencies,
+  registerPushRoutes,
+} from "./push-delivery.js";
 
 export interface ReadinessResult {
   databaseReachable: boolean;
@@ -22,6 +26,7 @@ export interface BuildAppOptions {
   readinessProbe: ReadinessProbe;
   webDistPath: string;
   runtime?: ProductRuntime;
+  push?: PushRouteDependencies;
 }
 
 function readinessPayload(result: ReadinessResult) {
@@ -37,7 +42,7 @@ function readinessPayload(result: ReadinessResult) {
   } as const;
 }
 
-const segment = "[A-Za-z0-9_-]+";
+const segment = "[A-Za-z0-9_:%-]+";
 
 const canonicalShellRoutes = [
   { pattern: /^\/$/u, template: "/" },
@@ -121,6 +126,9 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     app.addHook("preClose", () => {
       options.runtime?.close();
     });
+  }
+  if (options.push) {
+    registerPushRoutes(app, options.push);
   }
 
   void app.register(fastifyStatic, {
@@ -207,6 +215,26 @@ function registerProductRoutes(app: FastifyInstance, runtime: ProductRuntime) {
         "X-Accel-Buffering": "no",
         "X-Content-Type-Options": "nosniff",
       });
+      const lastEventIdHeader = request.headers["last-event-id"];
+      const lastEventId =
+        typeof lastEventIdHeader === "string" ? lastEventIdHeader : null;
+      if (lastEventId) {
+        const history = runtime.fixtureEvents(request.params.fixtureId);
+        const cursor = history.findIndex((event) => event.id === lastEventId);
+        const missedMoments = (cursor >= 0 ? history.slice(cursor + 1) : [])
+          .map((event) => event.moment)
+          .filter((moment) => moment !== undefined);
+        if (missedMoments.length > 0) {
+          reply.raw.write(
+            formatSse({
+              catchup: { fromEventId: lastEventId, moments: missedMoments },
+              event: "catchup.ready",
+              id: `catchup:${missedMoments.at(-1)?.identity ?? lastEventId}`,
+              snapshot: fixture,
+            }),
+          );
+        }
+      }
       const unsubscribe = runtime.subscribeFixture(
         request.params.fixtureId,
         (event) => reply.raw.write(formatSse(event)),

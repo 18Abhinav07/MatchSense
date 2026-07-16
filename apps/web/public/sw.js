@@ -1,9 +1,12 @@
-const CACHE = "matchsense-shell-v1";
+importScripts("/push-notification.js");
+
+const CACHE = "matchsense-shell-v2";
 const SHELL = [
   "/",
   "/manifest.webmanifest",
   "/icons/matchsense-icon.svg",
   "/icons/matchsense-maskable.svg",
+  "/push-notification.js",
 ];
 
 self.addEventListener("install", (event) => {
@@ -57,5 +60,55 @@ self.addEventListener("fetch", (event) => {
         return response;
       });
     }),
+  );
+});
+
+self.addEventListener("push", (event) => {
+  let payload = null;
+  try {
+    payload = event.data ? event.data.json() : null;
+  } catch {
+    payload = null;
+  }
+  const presentation = self.MatchSensePush.notificationFor(payload);
+  event.waitUntil(
+    self.registration.showNotification(
+      presentation.title,
+      presentation.options,
+    ),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const route = self.MatchSensePush.routeFromNotificationData(
+    event.notification.data,
+  );
+  const target = new URL(route.url, self.location.origin).href;
+  event.waitUntil(
+    self.clients
+      .matchAll({ includeUncontrolled: true, type: "window" })
+      .then(async (windows) => {
+        const existing = windows.find(
+          (client) => new URL(client.url).origin === self.location.origin,
+        );
+        if (!existing) {
+          return self.clients.openWindow(route.url);
+        }
+        const navigated = existing.navigate
+          ? await existing.navigate(target)
+          : existing;
+        const client = navigated || existing;
+        if (route.momentIdentity) {
+          client.postMessage({
+            fixtureId: route.fixtureId,
+            momentId: route.momentId,
+            momentIdentity: route.momentIdentity,
+            revision: route.revision,
+            type: "matchsense:open-moment",
+          });
+        }
+        return client.focus();
+      }),
   );
 });

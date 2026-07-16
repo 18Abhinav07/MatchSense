@@ -9,7 +9,24 @@ import {
 
 import { ListeningProvider, useListening } from "./ListeningProvider.js";
 import {
+  ConfirmedGoalMoment,
+  FreshnessBanner,
+  MatchMemory,
+  ReconnectCatchUp,
+  type MomentScore,
+  type MomentTeam,
+  VarOverturnedMoment,
+  VarStandsMoment,
+  VarUnderReviewMoment,
+} from "./features/moments/index.js";
+import {
+  enableMomentPush,
+  showLocalMomentNotification,
+  triggerTestMomentPush,
+} from "./push-notifications.js";
+import {
   type CanonicalEventPayload,
+  type CatchupEventPayload,
   type CommentaryEventPayload,
   createInitialLiveState,
   formatFreshness,
@@ -37,6 +54,51 @@ const opponents: Record<TeamCode, TeamCode> = {
   JPN: "BRA",
 };
 
+const momentTeams: Record<TeamCode, MomentTeam> = {
+  ARG: {
+    code: "ARG",
+    foreground: "#071018",
+    name: "Argentina",
+    primary: "#75aadb",
+    secondary: "#f3efe4",
+  },
+  BRA: {
+    code: "BRA",
+    foreground: "#07130c",
+    name: "Brazil",
+    primary: "#eacb46",
+    secondary: "#177c46",
+  },
+  ESP: {
+    code: "ESP",
+    name: "Spain",
+    primary: "#b51f32",
+    secondary: "#f4c84a",
+  },
+  FRA: {
+    code: "FRA",
+    name: "France",
+    primary: "#173a70",
+    secondary: "#d34d58",
+  },
+  JPN: {
+    code: "JPN",
+    foreground: "#131313",
+    name: "Japan",
+    primary: "#f4f1e8",
+    secondary: "#bc3347",
+  },
+};
+
+function toMomentScore(snapshot: LiveSnapshot): MomentScore {
+  return {
+    away: snapshot.score.away,
+    awayTeam: momentTeams[snapshot.awayTeam],
+    home: snapshot.score.home,
+    homeTeam: momentTeams[snapshot.homeTeam],
+  };
+}
+
 function teamName(code: TeamCode) {
   return teams.find((team) => team.code === code)?.name ?? code;
 }
@@ -44,6 +106,11 @@ function teamName(code: TeamCode) {
 export interface AppProps {
   initialFavoriteTeam?: TeamCode | null;
   initialPath?: string;
+}
+
+interface BeforeInstallPromptEvent extends Event {
+  prompt(): Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
 }
 
 function storedFavorite(): TeamCode | null {
@@ -56,6 +123,17 @@ function storedFavorite(): TeamCode | null {
 
 function browserPath() {
   return typeof window === "undefined" ? "/" : window.location.pathname;
+}
+
+function shouldResumeAlertSetup() {
+  if (typeof window === "undefined") return false;
+  const standalone =
+    window.matchMedia("(display-mode: standalone)").matches ||
+    Boolean((navigator as Navigator & { standalone?: boolean }).standalone);
+  return (
+    standalone &&
+    window.localStorage.getItem("matchsense.alertSetupPending") === "1"
+  );
 }
 
 export function App(props: AppProps = {}) {
@@ -71,11 +149,23 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
     initialFavoriteTeam === undefined ? storedFavorite() : initialFavoriteTeam,
   );
   const [onboardingStage, setOnboardingStage] = useState<
-    "pick" | "moment" | "done"
-  >(favoriteTeam ? "done" : "pick");
+    "pick" | "moment" | "buzz" | "done"
+  >(favoriteTeam ? (shouldResumeAlertSetup() ? "buzz" : "done") : "pick");
   const [path, setPath] = useState(() =>
     normalizePath(initialPath ?? browserPath()),
   );
+  const [installPrompt, setInstallPrompt] =
+    useState<BeforeInstallPromptEvent | null>(null);
+
+  useEffect(() => {
+    const capturePrompt = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as BeforeInstallPromptEvent);
+    };
+    window.addEventListener("beforeinstallprompt", capturePrompt);
+    return () =>
+      window.removeEventListener("beforeinstallprompt", capturePrompt);
+  }, []);
 
   useEffect(() => {
     const onPopState = () => setPath(normalizePath(window.location.pathname));
@@ -92,6 +182,7 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
     setFavoriteTeam(team);
     if (typeof window !== "undefined") {
       window.localStorage.setItem("matchsense.favoriteTeam", team);
+      window.localStorage.setItem("matchsense.alertSetupPending", "1");
     }
     setOnboardingStage("moment");
   };
@@ -99,8 +190,7 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
   useEffect(() => {
     if (onboardingStage !== "moment") return;
     const timer = window.setTimeout(() => {
-      setOnboardingStage("done");
-      navigate("/");
+      setOnboardingStage("buzz");
     }, 4_800);
     return () => window.clearTimeout(timer);
   }, [onboardingStage]);
@@ -112,7 +202,43 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
     return (
       <SampleMoment
         team={favoriteTeam}
-        onContinue={() => setOnboardingStage("done")}
+        onContinue={() => setOnboardingStage("buzz")}
+      />
+    );
+  }
+  if (onboardingStage === "buzz") {
+    return (
+      <BuzzSetup
+        installPrompt={installPrompt}
+        team={favoriteTeam}
+        onComplete={() => {
+          window.localStorage.removeItem("matchsense.alertSetupPending");
+          setOnboardingStage("done");
+          navigate("/");
+        }}
+      />
+    );
+  }
+  const momentDeepLink = path.match(/^\/matches\/([^/]+)\/moments\/([^/]+)$/u);
+  if (momentDeepLink?.[1] && momentDeepLink[2]) {
+    return (
+      <LiveCompanion
+        favoriteTeam={favoriteTeam}
+        fixtureId={momentDeepLink[1]}
+        initialMomentIdentity={decodeURIComponent(momentDeepLink[2])}
+        onBack={() => navigate("/")}
+        onMomentClose={() => navigate(`/matches/${momentDeepLink[1]}/live`)}
+      />
+    );
+  }
+  const memoryRoute = path.match(/^\/matches\/([^/]+)\/memory$/u);
+  if (memoryRoute?.[1]) {
+    return (
+      <MatchMemoryScreen
+        favoriteTeam={favoriteTeam}
+        fixtureId={memoryRoute[1]}
+        onBack={() => navigate(`/matches/${memoryRoute[1]}/live`)}
+        onReplay={() => navigate(`/matches/${memoryRoute[1]}/live`)}
       />
     );
   }
@@ -123,6 +249,7 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
         favoriteTeam={favoriteTeam}
         fixtureId={liveMatch[1]}
         onBack={() => navigate("/")}
+        onOpenMemory={() => navigate(`/matches/${liveMatch[1]}/memory`)}
       />
     );
   }
@@ -131,6 +258,160 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
       favoriteTeam={favoriteTeam}
       onOpen={(fixtureId) => navigate(`/matches/${fixtureId}/live`)}
     />
+  );
+}
+
+function BuzzSetup({
+  installPrompt,
+  team,
+  onComplete,
+}: {
+  installPrompt: BeforeInstallPromptEvent | null;
+  team: TeamCode;
+  onComplete(): void;
+}) {
+  const [permissionState, setPermissionState] = useState<
+    "idle" | "working" | "granted" | "denied"
+  >("idle");
+  const isIos =
+    typeof navigator !== "undefined" &&
+    /iPad|iPhone|iPod/u.test(navigator.userAgent);
+  const isStandalone =
+    typeof window !== "undefined" &&
+    (window.matchMedia("(display-mode: standalone)").matches ||
+      Boolean((navigator as Navigator & { standalone?: boolean }).standalone));
+
+  const enableAlerts = async () => {
+    setPermissionState("working");
+    try {
+      if (isIos && !isStandalone) {
+        window.localStorage.setItem("matchsense.alertSetupPending", "1");
+        setPermissionState("idle");
+        return;
+      }
+      if (installPrompt && !isStandalone) {
+        await installPrompt.prompt();
+        const choice = await installPrompt.userChoice;
+        if (choice.outcome === "dismissed") {
+          setPermissionState("idle");
+          return;
+        }
+      }
+      if (!("Notification" in window) || !("serviceWorker" in navigator)) {
+        setPermissionState("denied");
+        return;
+      }
+      const fixtureResponse = await fetch("/api/v1/fixtures");
+      const fixturePayload = fixtureResponse.ok
+        ? ((await fixtureResponse.json()) as { fixtures?: LiveSnapshot[] })
+        : null;
+      const sampleFixtureId =
+        fixturePayload?.fixtures?.[0]?.fixtureId ?? "arg-fra-demo";
+      const sampleMoment = {
+        body: `${teamName(team)} lead 1–0. Tap to feel the Moment and hear the live call.`,
+        fixtureId: sampleFixtureId,
+        momentId: `${sampleFixtureId}:welcome`,
+        occurredAt: new Date().toISOString(),
+        revision: 1,
+        title: `⚽ GOAL — ${teamName(team)} lead 1–0, 23′`,
+      };
+      const configResponse = await fetch("/api/v1/push/config");
+      if (configResponse.ok) {
+        const config = (await configResponse.json()) as {
+          applicationServerKey?: unknown;
+        };
+        if (typeof config.applicationServerKey !== "string") {
+          throw new Error("Push configuration is invalid");
+        }
+        const registration = await enableMomentPush({
+          applicationServerKey: config.applicationServerKey,
+        });
+        try {
+          await triggerTestMomentPush(registration.id, sampleMoment);
+        } catch {
+          await showLocalMomentNotification(sampleMoment);
+        }
+      } else {
+        const permission = await Notification.requestPermission();
+        if (permission !== "granted") {
+          setPermissionState("denied");
+          return;
+        }
+        await showLocalMomentNotification(sampleMoment);
+      }
+      setPermissionState("granted");
+      window.setTimeout(onComplete, 900);
+    } catch {
+      setPermissionState("denied");
+    }
+  };
+
+  return (
+    <main className="buzz-shell" id="main-content">
+      <Masthead end="Setup · 2 of 2" />
+      <section className="buzz-layout">
+        <div className="buzz-copy">
+          <p className="kicker">Take the match with you</p>
+          <h1>Want a buzz the second {teamName(team)} score?</h1>
+          <p>
+            The alert tells the truth on your lock screen. Tap it and the full
+            MatchSense Moment opens in your team&apos;s atmosphere.
+          </p>
+          {isIos && !isStandalone ? (
+            <div className="ios-install-note">
+              <span>On iPhone</span>
+              <b>Share ↑ · Add to Home Screen · open MatchSense once</b>
+              <small>Apple enables web push only after installation.</small>
+            </div>
+          ) : null}
+          <div className="buzz-actions">
+            <button
+              className="primary-control"
+              type="button"
+              disabled={permissionState === "working"}
+              onClick={() => void enableAlerts()}
+            >
+              <SoundIcon />
+              {permissionState === "working"
+                ? "Setting up your alerts"
+                : permissionState === "granted"
+                  ? "Alerts are ready"
+                  : isIos && !isStandalone
+                    ? "Install, then open MatchSense"
+                    : "Yes, buzz me"}
+            </button>
+            <button className="quiet-button" type="button" onClick={onComplete}>
+              Maybe later
+            </button>
+          </div>
+          {permissionState === "denied" ? (
+            <p className="inline-error" role="status">
+              Alerts are blocked on this device. The live companion and
+              Listening Mode still work now; you can enable alerts later.
+            </p>
+          ) : null}
+        </div>
+        <div
+          className="lockscreen-preview"
+          aria-label="Sample lock screen alert"
+        >
+          <div className="lockscreen-time">
+            <span>Thursday, 16 July</span>
+            <b>20:23</b>
+          </div>
+          <div className="sample-notification">
+            <div className="notification-app-icon">MS</div>
+            <div>
+              <span>MATCHSENSE · NOW</span>
+              <b>⚽ GOAL — {teamName(team)} lead 1–0, 23′</b>
+              <p>Tap to feel the Moment and hear the live call.</p>
+            </div>
+          </div>
+          <small>Sample · your operating system controls the real card</small>
+        </div>
+      </section>
+      <Provenance />
+    </main>
   );
 }
 
@@ -349,14 +630,164 @@ function Today({
   );
 }
 
+function MatchMemoryScreen({
+  favoriteTeam,
+  fixtureId,
+  onBack,
+  onReplay,
+}: {
+  favoriteTeam: TeamCode;
+  fixtureId: string;
+  onBack(): void;
+  onReplay(): void;
+}) {
+  const [snapshot, setSnapshot] = useState<LiveSnapshot | null>(null);
+  const [shareState, setShareState] = useState<"idle" | "shared">("idle");
+
+  useEffect(() => {
+    let active = true;
+    let replaySnapshot: LiveSnapshot | null = null;
+    try {
+      const stored = window.sessionStorage.getItem(
+        `matchsense.memory.${fixtureId}`,
+      );
+      replaySnapshot = stored ? (JSON.parse(stored) as LiveSnapshot) : null;
+    } catch {
+      replaySnapshot = null;
+    }
+    fetch(`/api/v1/fixtures/${fixtureId}`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Fixture unavailable");
+        return (await response.json()) as LiveSnapshot;
+      })
+      .then((result) => active && setSnapshot(replaySnapshot ?? result))
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [fixtureId]);
+
+  const share = async () => {
+    if (!snapshot) return;
+    const text = `${teamName(snapshot.homeTeam)} ${snapshot.score.home}–${snapshot.score.away} ${teamName(snapshot.awayTeam)} · my MatchSense Memory`;
+    const url = window.location.href;
+    try {
+      if (navigator.share) {
+        await navigator.share({ text, title: "My MatchSense Memory", url });
+      } else {
+        await navigator.clipboard.writeText(`${text} ${url}`);
+      }
+      setShareState("shared");
+    } catch {
+      setShareState("idle");
+    }
+  };
+
+  if (!snapshot) {
+    return (
+      <main className="memory-shell" id="main-content">
+        <Masthead end="Building your memory" />
+        <p className="memory-loading">Replaying the match as you felt it…</p>
+      </main>
+    );
+  }
+
+  if (snapshot.provenance === "live_txline" && snapshot.phase !== "full_time") {
+    return (
+      <main className="memory-shell" id="main-content">
+        <Masthead end={snapshot.sourceLabel ?? "TXLINE MATCH WIRE"} />
+        <section className="memory-locked">
+          <p className="kicker">Match Memory</p>
+          <h1>This memory is still being written.</h1>
+          <p>
+            It unlocks only after TxLINE finalises the match. No premature
+            result, no invented ending.
+          </p>
+          <button className="primary-control" type="button" onClick={onBack}>
+            Return to the live match
+          </button>
+        </section>
+      </main>
+    );
+  }
+
+  const supportedTeam =
+    favoriteTeam === snapshot.homeTeam || favoriteTeam === snapshot.awayTeam
+      ? favoriteTeam
+      : snapshot.homeTeam;
+  const supportedWon =
+    supportedTeam === snapshot.homeTeam
+      ? snapshot.score.home > snapshot.score.away
+      : snapshot.score.away > snapshot.score.home;
+  const lastEvent = snapshot.lastEvent;
+  return (
+    <main className="memory-shell" id="main-content">
+      <MatchMemory
+        moments={
+          lastEvent
+            ? [
+                {
+                  detail: `${lastEvent.score.home}–${lastEvent.score.away} became the canonical score.`,
+                  id: lastEvent.identity,
+                  kind: "goal",
+                  minute: lastEvent.minute,
+                  team: momentTeams[lastEvent.eventTeam],
+                  title: `${teamName(lastEvent.eventTeam)} changed the night`,
+                },
+              ]
+            : []
+        }
+        onReplay={onReplay}
+        onShare={() => void share()}
+        score={toMomentScore(snapshot)}
+        stats={[
+          {
+            away: snapshot.score.away,
+            home: snapshot.score.home,
+            label: "Goals",
+          },
+          { away: "—", home: "—", label: "Cards" },
+          { away: "—", home: "—", label: "Corners" },
+        ]}
+        summary={
+          supportedWon
+            ? `Your night: a roar, a result, and ${teamName(supportedTeam)} on top.`
+            : `Your night: every turn of ${teamName(supportedTeam)}'s match, kept in one place.`
+        }
+        supportedTeam={momentTeams[supportedTeam]}
+        truth={{
+          eventId: lastEvent?.identity ?? `${fixtureId}:memory`,
+          minute: "FT",
+          revision: snapshot.revision ?? 1,
+          sourceLabel:
+            snapshot.provenance === "live_txline"
+              ? (snapshot.sourceLabel ?? "TXLINE · DEVNET SOURCE")
+              : "REPLAY MEMORY · TXLINE-SHAPED DATA",
+        }}
+      />
+      {shareState === "shared" ? (
+        <p className="share-confirmation" role="status">
+          Memory ready to share.
+        </p>
+      ) : null}
+    </main>
+  );
+}
+
 function LiveCompanion({
   fixtureId,
   favoriteTeam,
+  initialMomentIdentity,
   onBack,
+  onMomentClose,
+  onOpenMemory,
 }: {
   fixtureId: string;
   favoriteTeam: TeamCode;
+  initialMomentIdentity?: string | undefined;
   onBack(): void;
+  onMomentClose?: (() => void) | undefined;
+  onOpenMemory?: (() => void) | undefined;
 }) {
   const [state, dispatch] = useReducer(
     liveViewReducer,
@@ -365,10 +796,17 @@ function LiveCompanion({
   );
   const [error, setError] = useState<string | null>(null);
   const [isPlayingDemo, setIsPlayingDemo] = useState(false);
+  const [honestMoment, setHonestMoment] = useState<
+    "review" | "stands" | "overturned" | null
+  >(null);
+  const [overturnedMomentIdentity, setOverturnedMomentIdentity] = useState<
+    string | null
+  >(null);
   const [freshnessNow, setFreshnessNow] = useState(() =>
     new Date().toISOString(),
   );
   const replaySession = useRef<string | null>(null);
+  const varTimer = useRef<number | null>(null);
   const listening = useListening();
 
   useEffect(() => {
@@ -389,6 +827,27 @@ function LiveCompanion({
     return () => window.clearInterval(interval);
   }, []);
 
+  useEffect(
+    () => () => {
+      if (varTimer.current !== null) window.clearTimeout(varTimer.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const markOffline = () =>
+      dispatch({ transportHealth: "offline", type: "transport" });
+    const markConnecting = () =>
+      dispatch({ transportHealth: "connecting", type: "transport" });
+    window.addEventListener("offline", markOffline);
+    window.addEventListener("online", markConnecting);
+    if (!navigator.onLine) markOffline();
+    return () => {
+      window.removeEventListener("offline", markOffline);
+      window.removeEventListener("online", markConnecting);
+    };
+  }, []);
+
   useEffect(() => {
     let active = true;
     fetch(`/api/v1/fixtures/${fixtureId}`)
@@ -396,7 +855,23 @@ function LiveCompanion({
         if (!response.ok) throw new Error("Fixture is unavailable");
         return (await response.json()) as LiveSnapshot;
       })
-      .then((snapshot) => active && dispatch({ snapshot, type: "snapshot" }))
+      .then((snapshot) => {
+        if (!active) return;
+        dispatch({ snapshot, type: "snapshot" });
+        if (initialMomentIdentity && snapshot.lastEvent) {
+          const payload: CanonicalEventPayload = {
+            event: "moment.created",
+            id: snapshot.lastEvent.identity,
+            moment: snapshot.lastEvent,
+            snapshot,
+          };
+          dispatch({ payload, type: "canonical_event" });
+          window.setTimeout(
+            () => dispatch({ identity: payload.id, type: "open_moment" }),
+            80,
+          );
+        }
+      })
       .catch(() => active && setError("Could not load the current score."));
 
     const stream = new EventSource(`/api/v1/fixtures/${fixtureId}/stream`);
@@ -416,10 +891,15 @@ function LiveCompanion({
       const payload = JSON.parse(event.data) as CommentaryEventPayload;
       dispatch({ payload, type: "commentary_ready" });
     };
+    const onCatchup = (event: MessageEvent<string>) => {
+      const payload = JSON.parse(event.data) as CatchupEventPayload;
+      dispatch({ payload, type: "catchup_ready" });
+    };
     stream.addEventListener("snapshot", onSnapshot as EventListener);
     stream.addEventListener("moment.created", onMoment as EventListener);
     stream.addEventListener("moment.revised", onMoment as EventListener);
     stream.addEventListener("commentary.ready", onCommentary as EventListener);
+    stream.addEventListener("catchup.ready", onCatchup as EventListener);
     stream.onopen = () =>
       dispatch({ transportHealth: "reconciled", type: "transport" });
     stream.onerror = () =>
@@ -428,7 +908,7 @@ function LiveCompanion({
       active = false;
       stream.close();
     };
-  }, [fixtureId]);
+  }, [fixtureId, initialMomentIdentity]);
 
   const playGoal = async () => {
     setIsPlayingDemo(true);
@@ -481,6 +961,53 @@ function LiveCompanion({
     }
   };
 
+  const runVarSequence = (outcome: "stands" | "overturned") => {
+    if (!state.snapshot.lastEvent) {
+      setError("Play the goal first so VAR has a canonical Moment to review.");
+      return;
+    }
+    setError(null);
+    setHonestMoment("review");
+    if (varTimer.current !== null) window.clearTimeout(varTimer.current);
+    varTimer.current = window.setTimeout(() => {
+      if (outcome === "overturned") {
+        setOverturnedMomentIdentity(state.snapshot.lastEvent?.identity ?? null);
+        const scoringHome =
+          state.snapshot.lastEvent?.eventTeam === state.snapshot.homeTeam;
+        dispatch({
+          snapshot: {
+            ...state.snapshot,
+            lastEvent: null,
+            revision: (state.snapshot.revision ?? state.currentRevision) + 1,
+            score: {
+              away: Math.max(
+                0,
+                state.snapshot.score.away - (scoringHome ? 0 : 1),
+              ),
+              home: Math.max(
+                0,
+                state.snapshot.score.home - (scoringHome ? 1 : 0),
+              ),
+            },
+            updatedAt: new Date().toISOString(),
+          },
+          type: "snapshot",
+        });
+      }
+      setHonestMoment(outcome);
+      varTimer.current = null;
+    }, 2_600);
+  };
+
+  const openMemory = () => {
+    if (!onOpenMemory) return;
+    window.sessionStorage.setItem(
+      `matchsense.memory.${fixtureId}`,
+      JSON.stringify(state.snapshot),
+    );
+    onOpenMemory();
+  };
+
   const relation =
     state.openMoment?.eventTeam === favoriteTeam ? "for" : "neutral";
   const sourceFreshness = formatFreshness(
@@ -507,6 +1034,14 @@ function LiveCompanion({
       <button className="back-button" type="button" onClick={onBack}>
         <BackIcon /> Today
       </button>
+      {state.transportHealth === "stale" ||
+      state.transportHealth === "offline" ? (
+        <FreshnessBanner
+          age={sourceFreshness.replace("UPDATED ", "").toLowerCase()}
+          asOf={state.snapshot.minute}
+          status={state.transportHealth}
+        />
+      ) : null}
       <section className="live-score-stage" aria-label="Current match score">
         <div className="live-provenance">
           <span>
@@ -586,12 +1121,26 @@ function LiveCompanion({
             state.timeline.map((moment) => {
               const commentary = state.commentaryByMoment[moment.identity];
               return (
-                <div className="timeline-row" key={moment.identity}>
+                <div
+                  className="timeline-row"
+                  data-overturned={
+                    overturnedMomentIdentity === moment.identity
+                      ? "true"
+                      : "false"
+                  }
+                  key={moment.identity}
+                >
                   <span>{moment.minute}</span>
-                  <b>Goal · {teamName(moment.eventTeam)}</b>
+                  <b>
+                    {overturnedMomentIdentity === moment.identity
+                      ? "No goal · VAR overturned"
+                      : `Goal · ${teamName(moment.eventTeam)}`}
+                  </b>
                   <small>{moment.identity}</small>
                   <p className="timeline-commentary">
-                    {commentary?.text ?? "Commentary is warming up…"}
+                    {overturnedMomentIdentity === moment.identity
+                      ? "The score rolled back cleanly. This revision no longer counts."
+                      : (commentary?.text ?? "Commentary is warming up…")}
                   </p>
                 </div>
               );
@@ -619,6 +1168,22 @@ function LiveCompanion({
               {isPlayingDemo ? "Advancing replay" : "Play goal"}
               <ArrowIcon />
             </button>
+            <div className="demo-secondary-actions">
+              <button type="button" onClick={() => runVarSequence("stands")}>
+                VAR · stands
+              </button>
+              <button
+                type="button"
+                onClick={() => runVarSequence("overturned")}
+              >
+                VAR · overturn
+              </button>
+              {onOpenMemory ? (
+                <button type="button" onClick={openMemory}>
+                  Build match memory
+                </button>
+              ) : null}
+            </div>
             {error ? (
               <p className="inline-error" role="alert">
                 {error}
@@ -638,13 +1203,86 @@ function LiveCompanion({
       </section>
       <Provenance label={state.snapshot.sourceLabel} />
       {state.openMoment ? (
-        <GoalMoment
-          commentary={state.commentaryByMoment[state.openMoment.identity]}
-          homeTeam={state.snapshot.homeTeam}
-          awayTeam={state.snapshot.awayTeam}
-          moment={state.openMoment}
+        <ConfirmedGoalMoment
+          commentary={
+            state.commentaryByMoment[state.openMoment.identity]?.text ??
+            "Live commentary is being prepared."
+          }
+          consequence={
+            initialMomentIdentity &&
+            initialMomentIdentity !== state.openMoment.identity
+              ? "Your alert was updated. This is the current match truth."
+              : "The score was current before this celebration opened."
+          }
+          onClose={() => {
+            dispatch({ type: "close_moment" });
+            onMomentClose?.();
+          }}
           relation={relation}
-          onClose={() => dispatch({ type: "close_moment" })}
+          score={toMomentScore(state.snapshot)}
+          scoringTeam={momentTeams[state.openMoment.eventTeam]}
+          truth={{
+            eventId: state.openMoment.identity,
+            minute: state.openMoment.minute,
+            revision: state.openMoment.revision,
+            sourceLabel: state.snapshot.sourceLabel ?? "MATCHSENSE MATCH WIRE",
+          }}
+        />
+      ) : null}
+      {state.catchup ? (
+        <ReconnectCatchUp
+          caughtUpAt="just now"
+          events={state.catchup.moments.map((moment, index) => ({
+            id: moment.id,
+            kind: "goal" as const,
+            minute: moment.minute,
+            revision: moment.revision,
+            sequence: index + 1,
+            team: momentTeams[moment.eventTeam],
+            title: `${teamName(moment.eventTeam)} changed the score to ${moment.score.home}–${moment.score.away}`,
+          }))}
+          onContinue={() => dispatch({ type: "acknowledge_catchup" })}
+          sourceLabel={state.snapshot.sourceLabel ?? "MATCHSENSE MATCH WIRE"}
+        />
+      ) : null}
+      {honestMoment === "review" && state.timeline[0] ? (
+        <VarUnderReviewMoment
+          attackingTeam={momentTeams[state.timeline[0].eventTeam]}
+          score={toMomentScore(state.snapshot)}
+          truth={{
+            eventId: state.timeline[0].identity,
+            minute: state.timeline[0].minute,
+            revision: state.currentRevision + 1,
+            sourceLabel: state.snapshot.sourceLabel ?? "MATCHSENSE MATCH WIRE",
+          }}
+        />
+      ) : null}
+      {honestMoment === "stands" && state.timeline[0] ? (
+        <VarStandsMoment
+          onContinue={() => setHonestMoment(null)}
+          score={toMomentScore(state.snapshot)}
+          team={momentTeams[state.timeline[0].eventTeam]}
+          truth={{
+            eventId: state.timeline[0].identity,
+            minute: state.timeline[0].minute,
+            revision: state.currentRevision + 1,
+            sourceLabel: state.snapshot.sourceLabel ?? "MATCHSENSE MATCH WIRE",
+          }}
+        />
+      ) : null}
+      {honestMoment === "overturned" && state.timeline[0] ? (
+        <VarOverturnedMoment
+          onContinue={() => setHonestMoment(null)}
+          reason="Attacking infringement"
+          score={toMomentScore(state.snapshot)}
+          supersededScore={state.timeline[0].score}
+          team={momentTeams[state.timeline[0].eventTeam]}
+          truth={{
+            eventId: state.timeline[0].identity,
+            minute: state.timeline[0].minute,
+            revision: state.currentRevision,
+            sourceLabel: state.snapshot.sourceLabel ?? "MATCHSENSE MATCH WIRE",
+          }}
         />
       ) : null}
     </main>
@@ -657,6 +1295,7 @@ function GoalMoment({
   awayTeam,
   moment,
   relation,
+  superseded,
   onClose,
 }: {
   commentary?: LiveCommentary | undefined;
@@ -664,6 +1303,7 @@ function GoalMoment({
   awayTeam: TeamCode;
   moment: LiveMoment;
   relation: "for" | "neutral";
+  superseded?: boolean | undefined;
   onClose(): void;
 }) {
   useEffect(() => {
@@ -694,6 +1334,11 @@ function GoalMoment({
       <p className="goal-word">GOAL</p>
       <div className="goal-consequence">
         <p className="kicker">Current canonical moment</p>
+        {superseded ? (
+          <p className="superseded-note">
+            Your alert was updated. This is the current match truth.
+          </p>
+        ) : null}
         <h2>{teamName(moment.eventTeam)} change the match.</h2>
         <p>The score was already current before this celebration opened.</p>
         <p className="moment-commentary">

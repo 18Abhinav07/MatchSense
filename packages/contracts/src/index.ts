@@ -88,16 +88,23 @@ export interface CommentaryReady {
   usedFallback: boolean;
 }
 
+export interface FixtureCatchup {
+  fromEventId: string;
+  moments: CanonicalMoment[];
+}
+
 export interface FixtureStreamEvent {
   event:
     | "snapshot"
     | "moment.created"
     | "moment.revised"
     | "commentary.ready"
+    | "catchup.ready"
     | "heartbeat";
   id: string;
   moment?: CanonicalMoment;
   commentary?: CommentaryReady;
+  catchup?: FixtureCatchup;
   snapshot: FixtureSnapshot;
 }
 

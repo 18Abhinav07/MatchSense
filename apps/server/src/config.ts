@@ -17,6 +17,9 @@ const serverEnvironmentSchema = z
     HOST: z.string().trim().min(1).default("0.0.0.0"),
     PORT: z.coerce.number().int().min(1).max(65_535).default(8080),
     TXLINE_API_TOKEN: z.string().trim().min(1).optional(),
+    VAPID_PRIVATE_KEY: z.string().trim().min(1).optional(),
+    VAPID_PUBLIC_KEY: z.string().trim().min(1).optional(),
+    VAPID_SUBJECT: z.string().trim().min(1).optional(),
   })
   .superRefine((environment, context) => {
     if (
@@ -29,6 +32,18 @@ const serverEnvironmentSchema = z
         path: ["TXLINE_API_TOKEN"],
       });
     }
+    const vapidValues = [
+      environment.VAPID_PRIVATE_KEY,
+      environment.VAPID_PUBLIC_KEY,
+      environment.VAPID_SUBJECT,
+    ];
+    if (vapidValues.some(Boolean) && !vapidValues.every(Boolean)) {
+      context.addIssue({
+        code: "custom",
+        message: "VAPID configuration must include subject and both keys",
+        path: ["VAPID_PUBLIC_KEY"],
+      });
+    }
   });
 
 export interface ServerConfig {
@@ -37,6 +52,7 @@ export interface ServerConfig {
   host: string;
   port: number;
   txlineApiToken?: string;
+  vapid?: { privateKey: string; publicKey: string; subject: string };
 }
 
 export function parseServerEnv(
@@ -56,6 +72,17 @@ export function parseServerEnv(
   };
   if (result.data.DATA_RIGHTS_MODE === "txline_hackathon") {
     config.txlineApiToken = result.data.TXLINE_API_TOKEN!;
+  }
+  if (
+    result.data.VAPID_PRIVATE_KEY &&
+    result.data.VAPID_PUBLIC_KEY &&
+    result.data.VAPID_SUBJECT
+  ) {
+    config.vapid = {
+      privateKey: result.data.VAPID_PRIVATE_KEY,
+      publicKey: result.data.VAPID_PUBLIC_KEY,
+      subject: result.data.VAPID_SUBJECT,
+    };
   }
   return config;
 }

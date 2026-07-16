@@ -19,6 +19,7 @@ const workspaces = [
   ["packages/moment-engine", "@matchsense/moment-engine"],
   ["packages/commentary", "@matchsense/commentary"],
   ["packages/replay", "@matchsense/replay"],
+  ["packages/rooms", "@matchsense/rooms"],
   ["packages/ui", "@matchsense/ui"],
 ];
 

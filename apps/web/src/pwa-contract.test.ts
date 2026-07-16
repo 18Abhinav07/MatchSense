@@ -28,4 +28,22 @@ describe("installable PWA contract", () => {
     expect(serviceWorker).toContain('pathname.endsWith("stream.mp3")');
     expect(serviceWorker).toContain("return;");
   });
+
+  it("renders canonical Moment pushes and deep-links notification taps", async () => {
+    const [serviceWorker, notificationContract] = await Promise.all([
+      readFile(new URL("../public/sw.js", import.meta.url), "utf8"),
+      readFile(
+        new URL("../public/push-notification.js", import.meta.url),
+        "utf8",
+      ),
+    ]);
+
+    expect(serviceWorker).toContain('addEventListener("push"');
+    expect(serviceWorker).toContain('addEventListener("notificationclick"');
+    expect(serviceWorker).toContain("showNotification");
+    expect(serviceWorker).toContain("clients.openWindow");
+    expect(notificationContract).toContain("momentId");
+    expect(notificationContract).toContain("revision");
+    expect(notificationContract).toContain("momentIdentity");
+  });
 });

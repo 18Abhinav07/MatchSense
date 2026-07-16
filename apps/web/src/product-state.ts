@@ -49,6 +49,13 @@ export interface CommentaryEventPayload {
   snapshot: LiveSnapshot;
 }
 
+export interface CatchupEventPayload {
+  event: "catchup.ready";
+  id: string;
+  catchup: { fromEventId: string; moments: LiveMoment[] };
+  snapshot: LiveSnapshot;
+}
+
 export interface LiveViewState {
   dataMode: "simulation" | "txline";
   snapshot: LiveSnapshot;
@@ -59,12 +66,15 @@ export interface LiveViewState {
   transportHealth: "connecting" | "reconciled" | "stale" | "offline";
   lastEventId: string | null;
   commentaryByMoment: Record<string, LiveCommentary>;
+  catchup: { fromEventId: string; moments: LiveMoment[] } | null;
 }
 
 export type LiveViewAction =
   | { type: "snapshot"; snapshot: LiveSnapshot }
   | { type: "canonical_event"; payload: CanonicalEventPayload }
   | { type: "commentary_ready"; payload: CommentaryEventPayload }
+  | { type: "catchup_ready"; payload: CatchupEventPayload }
+  | { type: "acknowledge_catchup" }
   | { type: "open_moment"; identity: string }
   | { type: "close_moment" }
   | {
@@ -77,6 +87,7 @@ export function createInitialLiveState(): LiveViewState {
     dataMode: "simulation",
     currentRevision: 0,
     commentaryByMoment: {},
+    catchup: null,
     lastEventId: null,
     openMoment: null,
     pendingMoment: null,
@@ -141,6 +152,25 @@ export function liveViewReducer(
       },
       transportHealth: "reconciled",
     };
+  }
+  if (action.type === "catchup_ready") {
+    const known = new Set(state.timeline.map((moment) => moment.identity));
+    const missed = action.payload.catchup.moments.filter(
+      (moment) => !known.has(moment.identity),
+    );
+    return {
+      ...state,
+      catchup: action.payload.catchup,
+      currentRevision:
+        action.payload.snapshot.revision ?? state.currentRevision,
+      lastEventId: action.payload.id,
+      snapshot: action.payload.snapshot,
+      timeline: [...missed].reverse().concat(state.timeline),
+      transportHealth: "reconciled",
+    };
+  }
+  if (action.type === "acknowledge_catchup") {
+    return { ...state, catchup: null };
   }
   if (action.type === "open_moment") {
     if (state.pendingMoment?.identity !== action.identity) return state;

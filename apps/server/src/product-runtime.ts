@@ -115,6 +115,10 @@ export function createProductRuntime(options: {
   silenceBytes: Buffer;
   cueBytes: Buffer;
   fixture?: ProductFixture;
+  notifyMoment?: (
+    moment: CanonicalMoment,
+    snapshot: FixtureSnapshot,
+  ) => Promise<void> | void;
   transcodeCommentary?: (wavBytes: Buffer) => Promise<Buffer>;
   writeIntervalMs: number;
   now?: () => string;
@@ -162,6 +166,12 @@ export function createProductRuntime(options: {
       []) {
       subscriber(event);
     }
+  };
+  const notifyMoment = (moment: CanonicalMoment) => {
+    if (!options.notifyMoment) return;
+    void Promise.resolve(options.notifyMoment(moment, snapshot())).catch(
+      () => undefined,
+    );
   };
 
   const trackCommentary = (work: Promise<void>) => {
@@ -391,6 +401,7 @@ export function createProductRuntime(options: {
         : projection.awayTeam;
     scoringTeamByMoment.set(reduced.moment.identity, scoringTeam);
     publish(streamEvent);
+    notifyMoment(reduced.moment);
     const matchingListeners: string[] = [];
     for (const session of listeningSessions.values()) {
       if (session.fixtureId === projection.fixtureId) {
@@ -465,6 +476,7 @@ export function createProductRuntime(options: {
       snapshot: snapshot(),
     };
     publish(streamEvent);
+    notifyMoment(reduced.moment);
     const matchingListeners = [...listeningSessions.values()]
       .filter((session) => session.fixtureId === event.fixtureId)
       .map((session) => {

@@ -10,6 +10,8 @@ import { buildApp, type ReadinessProbe } from "./app.js";
 import { transcodeWavToStreamMp3 } from "./audio-transcoder.js";
 import { parseServerEnv } from "./config.js";
 import { inspectMp3 } from "./mp3.js";
+import { deliverMomentPush } from "./push-delivery.js";
+import { InMemoryPushSubscriptionStore } from "./push-subscriptions.js";
 import {
   createProductRuntime,
   type ProductRuntime,
@@ -19,6 +21,7 @@ import {
   registerShutdownSignals,
   type ShutdownSignalSource,
 } from "./start.js";
+import { createVapidWebPushSender } from "./web-push-sender.js";
 
 interface ServerDatabaseRuntime extends ReadinessProbe {
   close(): Promise<void>;
@@ -44,6 +47,13 @@ export interface StartServerOptions {
 
 export async function startServer(options: StartServerOptions = {}) {
   const config = parseServerEnv(options.environment ?? process.env);
+  const push = config.vapid
+    ? {
+        applicationServerKey: config.vapid.publicKey,
+        sender: createVapidWebPushSender(config.vapid),
+        store: new InMemoryPushSubscriptionStore(),
+      }
+    : null;
   const webDistPath =
     options.webDistPath ?? path.resolve(import.meta.dirname, "../../web/dist");
   const databaseRuntime =
@@ -64,6 +74,30 @@ export async function startServer(options: StartServerOptions = {}) {
         env: options.environment ?? process.env,
       }),
       cueBytes,
+      ...(push
+        ? {
+            notifyMoment: async (moment, fixtureSnapshot) => {
+              const teamNames = {
+                ARG: "Argentina",
+                BRA: "Brazil",
+                ESP: "Spain",
+                FRA: "France",
+                JPN: "Japan",
+              } as const;
+              await deliverMomentPush(
+                {
+                  body: `${teamNames[moment.eventTeam]} change the match. Tap to feel the Moment and hear the live call.`,
+                  fixtureId: moment.fixtureId,
+                  momentId: moment.id,
+                  occurredAt: fixtureSnapshot.updatedAt,
+                  revision: moment.revision,
+                  title: `⚽ GOAL — ${moment.eventTeam} ${moment.score.home}–${moment.score.away}, ${moment.minute}`,
+                },
+                push,
+              );
+            },
+          }
+        : {}),
       ...(config.dataRightsMode === "txline_hackathon"
         ? {
             fixture: {
@@ -98,6 +132,7 @@ export async function startServer(options: StartServerOptions = {}) {
     txlineTask = source.run(txlineAbort.signal).catch(() => undefined);
   }
   const app = buildApp({
+    ...(push ? { push } : {}),
     readinessProbe: options.readinessProbe ?? databaseRuntime!,
     runtime: productRuntime,
     webDistPath,
