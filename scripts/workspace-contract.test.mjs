@@ -4,8 +4,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { scanCommittedSecrets } from "./secret-scan.mjs";
-import { forbiddenInfrastructureCategory } from "./workspace-policy.mjs";
+import {
+  isAllowedEnvironmentExampleValue,
+  scanCommittedSecrets,
+} from "./secret-scan.mjs";
+import {
+  forbiddenInfrastructureCategory,
+  isCanonicalVitestTestScript,
+} from "./workspace-policy.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -171,8 +177,20 @@ test("the production workspace keeps its locked lean-monorepo contract", () => {
       );
       if (isApplication) {
         check(
-          manifest.scripts?.test === "vitest run",
-          `${manifestPath} needs the standard application test script`,
+          isCanonicalVitestTestScript(
+            manifest.scripts?.test,
+            `${directory}/src`,
+          ),
+          `${manifestPath} needs a canonical Vitest test script scoped to its own workspace`,
+        );
+      }
+      if (directory === "packages/rooms") {
+        check(
+          isCanonicalVitestTestScript(
+            manifest.scripts?.test,
+            "packages/rooms/test",
+          ),
+          `${manifestPath} must run its Rooms suite through Vitest`,
         );
       }
       if (isApplication) {
@@ -332,9 +350,16 @@ test("the production workspace keeps its locked lean-monorepo contract", () => {
       ".env.example must document the required variable names",
     );
     for (const line of envLines) {
+      const separator = line.indexOf("=");
+      const key = line.slice(0, separator);
+      const value = line.slice(separator + 1);
       check(
-        /^[A-Z][A-Z0-9_]*=$/u.test(line),
-        `.env.example values must be empty: ${line.split("=", 1)[0]}`,
+        separator > 0 && /^[A-Z][A-Z0-9_]*$/u.test(key),
+        `.env.example contains an invalid assignment: ${line}`,
+      );
+      check(
+        value === "" || isAllowedEnvironmentExampleValue(key, value),
+        `.env.example contains an unapproved nonempty default: ${key}`,
       );
     }
   }

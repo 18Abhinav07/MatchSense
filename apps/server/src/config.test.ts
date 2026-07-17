@@ -30,11 +30,11 @@ describe("parseServerEnv", () => {
       parseServerEnv({
         DATABASE_URL: "postgresql://db.example/matchsense",
         DATA_RIGHTS_MODE: "txline_hackathon",
-        TXLINE_API_TOKEN: "server-only-token",
+        TXLINE_API_TOKEN: "fixture-server-only-token",
       }),
     ).toMatchObject({
       dataRightsMode: "txline_hackathon",
-      txlineApiToken: "server-only-token",
+      txlineApiToken: "fixture-server-only-token",
     });
     expect(() =>
       parseServerEnv({
@@ -48,12 +48,12 @@ describe("parseServerEnv", () => {
     expect(
       parseServerEnv({
         DATABASE_URL: "postgresql://db.example/matchsense",
-        VAPID_PRIVATE_KEY: "private-key",
+        VAPID_PRIVATE_KEY: "fixture-private-key",
         VAPID_PUBLIC_KEY: "public-key",
         VAPID_SUBJECT: "mailto:team@matchsense.app",
       }).vapid,
     ).toEqual({
-      privateKey: "private-key",
+      privateKey: "fixture-private-key",
       publicKey: "public-key",
       subject: "mailto:team@matchsense.app",
     });

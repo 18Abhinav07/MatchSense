@@ -300,7 +300,7 @@ describe("live source lifecycle", () => {
     });
 
     const source = createTxlineLiveScoreSource({
-      apiToken: "activated-token",
+      apiToken: "fixture-activated-token",
       fetchImpl,
       fixtures: [fixtureContext],
       onEvent(event) {
@@ -339,7 +339,7 @@ describe("live source lifecycle", () => {
         .filter(({ url }) => url.includes("/api/scores/"))
         .every(
           ({ headers }) =>
-            headers.get("X-Api-Token") === "activated-token" &&
+            headers.get("X-Api-Token") === "fixture-activated-token" &&
             headers.get("Authorization")?.startsWith("Bearer jwt-") === true,
         ),
     ).toBe(true);
@@ -353,12 +353,14 @@ describe("live source lifecycle", () => {
     const fetchImpl: typeof fetch = vi.fn(async (input) => {
       const url = String(input);
       if (url.endsWith("/auth/guest/start")) {
-        return new Response(JSON.stringify({ token: "jwt" }), { status: 200 });
+        return new Response(JSON.stringify({ token: "fixture-jwt" }), {
+          status: 200,
+        });
       }
       return new Response(null, { status: 403 });
     });
     const source = createTxlineLiveScoreSource({
-      apiToken: "activated-token",
+      apiToken: "fixture-activated-token",
       fetchImpl,
       fixtures: [fixtureContext],
       onEvent: vi.fn(),

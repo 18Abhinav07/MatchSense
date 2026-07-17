@@ -126,3 +126,59 @@ test("allows empty examples, runtime lookups, and prose", async () => {
     );
   }
 });
+
+test("allows only the documented non-secret environment example defaults", async () => {
+  const scanner = await loadScanner();
+  assert.notEqual(scanner, null, "secret-scan helper must exist");
+
+  assert.equal(
+    scanner.isAllowedEnvironmentExampleValue(
+      "DATA_RIGHTS_MODE",
+      "synthetic_demo",
+    ),
+    true,
+  );
+  assert.equal(
+    scanner.isAllowedEnvironmentExampleValue(
+      "VAPID_SUBJECT",
+      "mailto:you@example.com",
+    ),
+    true,
+  );
+
+  for (const [key, value] of [
+    ["DATA_RIGHTS_MODE", "authorized_live"],
+    ["VAPID_SUBJECT", "mailto:real-team@example.com"],
+    ["VAPID_PRIVATE_KEY", "example-private-key"],
+    ["UNRELATED_SETTING", "synthetic_demo"],
+  ]) {
+    assert.equal(
+      scanner.isAllowedEnvironmentExampleValue(key, value),
+      false,
+      `${key}=${value} must not be allowlisted`,
+    );
+  }
+});
+
+test("allows marked synthetic test literals while still detecting test-file secrets", async () => {
+  const scanner = await loadScanner();
+  assert.notEqual(scanner, null, "secret-scan helper must exist");
+
+  const findings = scanner.scanCommittedSecrets(
+    "fixture.test.ts",
+    [
+      'const password = "sentinel-db-password";',
+      'const apiToken = "fixture-activated-token";',
+      "const config = {",
+      '  token: "production-credential-value",',
+      '  privateKey: "production-private-material",',
+      "};",
+    ].join("\n"),
+  );
+
+  assert.deepEqual(
+    findings.map(({ key }) => key),
+    ["token", "privateKey"],
+    "test files may contain explicit fixtures, but ordinary nonempty credentials must still be rejected",
+  );
+});

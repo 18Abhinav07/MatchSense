@@ -4,6 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import {
+  runtimeAptPackages,
+  runtimeStageContents,
+} from "./dockerfile-policy.mjs";
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function read(relativePath) {
@@ -17,10 +22,15 @@ function readJson(relativePath) {
 test("production Dockerfile is immutable, portable, and least privileged", () => {
   assert.equal(existsSync(path.join(root, "Dockerfile")), true);
   const dockerfile = read("Dockerfile");
+  const runtimeStage = runtimeStageContents(dockerfile);
 
-  assert.match(
-    dockerfile,
-    /^FROM node:24\.18\.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS builder$/mu,
+  assert.deepEqual(
+    [...dockerfile.matchAll(/^FROM .*$/gmu)].map((match) => match[0]),
+    [
+      "FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS builder",
+      "FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS runtime",
+    ],
+    "both stages must use the exact immutable Node base",
   );
   assert.match(dockerfile, /corepack prepare pnpm@11\.13\.0 --activate/u);
   assert.match(dockerfile, /pnpm install --frozen-lockfile/u);
@@ -39,12 +49,30 @@ test("production Dockerfile is immutable, portable, and least privileged", () =>
   );
   assert.match(dockerfile, /^ENV NODE_ENV=production$/mu);
   assert.match(dockerfile, /^ENV PORT=8080$/mu);
-  assert.match(dockerfile, /^USER node$/mu);
+  assert.deepEqual(
+    [...runtimeStage.matchAll(/^USER\s+(.+)$/gmu)].map((match) => match[1]),
+    ["node"],
+    "the runtime must drop privileges once and never switch back to root",
+  );
   assert.match(dockerfile, /^EXPOSE 8080$/mu);
   assert.match(dockerfile, /^HEALTHCHECK .*node.*\/health\/live/mu);
   assert.match(dockerfile, /process\.env\.PORT/u);
   assert.match(dockerfile, /^CMD \["node", "dist\/main\.js"\]$/mu);
-  assert.doesNotMatch(dockerfile, /ffmpeg/iu);
+  assert.deepEqual(
+    runtimeAptPackages(dockerfile),
+    ["ffmpeg"],
+    "ffmpeg is required for transcoding; no unrelated runtime package is allowed",
+  );
+  assert.match(
+    runtimeStage,
+    /RUN apt-get update \\\r?\n\s+&& apt-get install -y --no-install-recommends ffmpeg \\\r?\n\s+&& rm -rf \/var\/lib\/apt\/lists\/\*/u,
+    "runtime apt metadata must be removed in the same layer as the ffmpeg install",
+  );
+  assert.equal(
+    [...runtimeStage.matchAll(/\bapt-get install\b/gu)].length,
+    1,
+    "the runtime stage must not hide a second package install",
+  );
 });
 
 test("Docker context excludes local, generated, and secret-bearing files", () => {
@@ -179,6 +207,16 @@ test("CI pins supply-chain actions and proves quality before container runtime",
   ]) {
     assert.equal(workflow.includes(command), true, `${command} must run in CI`);
   }
+  const installIndex = workflow.indexOf("run: pnpm install --frozen-lockfile");
+  const formatIndex = workflow.indexOf("run: pnpm format:check");
+  const gitleaksIndex = workflow.indexOf(
+    "uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e",
+  );
+  assert.equal(
+    installIndex < formatIndex && formatIndex < gitleaksIndex,
+    true,
+    "CI must install, format-check the repository, then let gitleaks create results.sarif",
+  );
   assert.match(
     workflow,
     /postgres:17\.5-alpine@sha256:6567bca8d7bc8c82c5922425a0baee57be8402df92bae5eacad5f01ae9544daa/u,

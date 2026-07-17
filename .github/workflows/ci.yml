@@ -39,12 +39,12 @@ jobs:
           node-version: 24.18.0
       - name: Activate pinned pnpm
         run: corepack enable && corepack prepare pnpm@11.13.0 --activate
-      - name: Scan committed secrets
-        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
       - name: Install frozen dependencies
         run: pnpm install --frozen-lockfile
       - name: Check formatting
         run: pnpm format:check
+      - name: Scan committed secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
       - name: Run unit and contract tests
         run: pnpm test
       - name: Run PostgreSQL migration integration

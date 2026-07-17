@@ -106,8 +106,8 @@ describe("shared commentary pipeline", () => {
     const fetchImpl = successfulProviderFetch();
     const pipeline = createCommentaryPipeline({
       env: {
-        GEMINI_API_KEY: "gemini-test-key",
-        GROQ_API_KEY: "groq-test-key",
+        GEMINI_API_KEY: "fixture-gemini-key",
+        GROQ_API_KEY: "fixture-groq-key",
       },
       fetchImpl,
       now: () => new Date("2026-07-16T12:00:00.000Z"),
@@ -171,8 +171,8 @@ describe("shared commentary pipeline", () => {
     );
     const pipeline = createCommentaryPipeline({
       env: {
-        GEMINI_API_KEY: "gemini-test-key",
-        GROQ_API_KEY: "groq-test-key",
+        GEMINI_API_KEY: "fixture-gemini-key",
+        GROQ_API_KEY: "fixture-groq-key",
       },
       fetchImpl,
     });
@@ -211,8 +211,8 @@ describe("shared commentary pipeline", () => {
     const store = createMemoryCommentaryArtifactStore();
     const options = {
       env: {
-        GEMINI_API_KEY: "gemini-test-key",
-        GROQ_API_KEY: "groq-test-key",
+        GEMINI_API_KEY: "fixture-gemini-key",
+        GROQ_API_KEY: "fixture-groq-key",
       },
       fetchImpl,
       store,
@@ -272,8 +272,8 @@ describe("shared commentary pipeline", () => {
     });
     const pipeline = createCommentaryPipeline({
       env: {
-        GEMINI_API_KEY: "gemini-secret-value",
-        GROQ_API_KEY: "groq-secret-value",
+        GEMINI_API_KEY: "sentinel-gemini-secret-value",
+        GROQ_API_KEY: "sentinel-groq-secret-value",
       },
       fetchImpl,
     });
@@ -287,8 +287,8 @@ describe("shared commentary pipeline", () => {
       speechFallbackReason: "gemini_http_429",
       speechProvider: "deterministic-cue",
     });
-    expect(serialized).not.toContain("groq-secret-value");
-    expect(serialized).not.toContain("gemini-secret-value");
+    expect(serialized).not.toContain("sentinel-groq-secret-value");
+    expect(serialized).not.toContain("sentinel-gemini-secret-value");
     expect(serialized).not.toContain("quota");
   });
 
@@ -298,8 +298,8 @@ describe("shared commentary pipeline", () => {
     });
     const pipeline = createCommentaryPipeline({
       env: {
-        GEMINI_API_KEY: "gemini-test-key",
-        GROQ_API_KEY: "groq-test-key",
+        GEMINI_API_KEY: "fixture-gemini-key",
+        GROQ_API_KEY: "fixture-groq-key",
       },
       fetchImpl,
     });
@@ -319,8 +319,8 @@ describe("shared commentary pipeline", () => {
     });
     const pipeline = createCommentaryPipeline({
       env: {
-        GEMINI_API_KEY: "gemini-test-key",
-        GROQ_API_KEY: "groq-test-key",
+        GEMINI_API_KEY: "fixture-gemini-key",
+        GROQ_API_KEY: "fixture-groq-key",
       },
       fetchImpl,
     });
@@ -340,8 +340,8 @@ describe("shared commentary pipeline", () => {
     });
     const pipeline = createCommentaryPipeline({
       env: {
-        GEMINI_API_KEY: "gemini-test-key",
-        GROQ_API_KEY: "groq-test-key",
+        GEMINI_API_KEY: "fixture-gemini-key",
+        GROQ_API_KEY: "fixture-groq-key",
       },
       fetchImpl,
     });
@@ -362,8 +362,8 @@ describe("shared commentary pipeline", () => {
     });
     const pipeline = createCommentaryPipeline({
       env: {
-        GEMINI_API_KEY: "gemini-test-key",
-        GROQ_API_KEY: "groq-test-key",
+        GEMINI_API_KEY: "fixture-gemini-key",
+        GROQ_API_KEY: "fixture-groq-key",
       },
       fetchImpl,
     });

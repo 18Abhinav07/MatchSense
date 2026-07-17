@@ -8,6 +8,11 @@ const sensitiveIdentifierPatterns = [
   /(?:^|_)API_KEY(?:_|$)/u,
 ];
 
+const allowedEnvironmentExampleValues = new Map([
+  ["DATA_RIGHTS_MODE", "synthetic_demo"],
+  ["VAPID_SUBJECT", "mailto:you@example.com"],
+]);
+
 function lineNumberAt(contents, index) {
   return contents.slice(0, index).split("\n").length;
 }
@@ -35,6 +40,20 @@ function isEmptyConfigurationValue(rawValue) {
   );
 }
 
+function literalString(rawValue) {
+  const value = rawValue
+    .trim()
+    .replace(/[;,]\s*$/u, "")
+    .trim();
+  const quote = value.at(0);
+
+  if (['"', "'", "`"].includes(quote) && value.at(-1) === quote) {
+    return value.slice(1, -1);
+  }
+
+  return null;
+}
+
 function isNonemptyLiteral(rawValue) {
   const value = rawValue
     .trim()
@@ -45,9 +64,8 @@ function isNonemptyLiteral(rawValue) {
     return false;
   }
 
-  const quote = value.at(0);
-  if (['"', "'", "`"].includes(quote) && value.at(-1) === quote) {
-    const literal = value.slice(1, -1);
+  const literal = literalString(value);
+  if (literal !== null) {
     return literal !== "" && !/^\$\{[^}]+\}$/u.test(literal);
   }
 
@@ -60,6 +78,14 @@ function secretAssignment(line, key) {
     line,
     key,
   };
+}
+
+function isMarkedSyntheticTestLiteral(rawValue) {
+  const literal = literalString(rawValue);
+  return (
+    literal !== null &&
+    /^(?:fixture|sentinel)-[A-Za-z0-9][\w.:-]*$/u.test(literal)
+  );
 }
 
 function scanEnvironment(contents) {
@@ -82,7 +108,7 @@ function scanEnvironment(contents) {
   return findings;
 }
 
-function scanJavaScript(contents) {
+function scanJavaScript(contents, allowSyntheticTestLiterals) {
   const findings = [];
 
   for (const [index, line] of contents.split(/\r?\n/u).entries()) {
@@ -94,7 +120,11 @@ function scanJavaScript(contents) {
     if (
       variableAssignment &&
       isSensitiveIdentifier(variableAssignment[1]) &&
-      isNonemptyLiteral(variableAssignment[2])
+      isNonemptyLiteral(variableAssignment[2]) &&
+      !(
+        allowSyntheticTestLiterals &&
+        isMarkedSyntheticTestLiteral(variableAssignment[2])
+      )
     ) {
       findings.push(secretAssignment(lineNumber, variableAssignment[1]));
     }
@@ -106,16 +136,28 @@ function scanJavaScript(contents) {
     if (
       propertyAssignment &&
       isSensitiveIdentifier(propertyAssignment[1]) &&
-      isNonemptyLiteral(propertyAssignment[2])
+      isNonemptyLiteral(propertyAssignment[2]) &&
+      !(
+        allowSyntheticTestLiterals &&
+        isMarkedSyntheticTestLiteral(propertyAssignment[2])
+      )
     ) {
       findings.push(secretAssignment(lineNumber, propertyAssignment[1]));
     }
 
     const objectPropertyPattern =
-      /(?:^|[{,]\s*)(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$-]*))\s*:\s*([^,}\n]+)/gu;
+      /(?:^|[{,])\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_$][\w$-]*))\s*:\s*([^,}\n]+)/gu;
     for (const property of line.matchAll(objectPropertyPattern)) {
       const key = property[1] ?? property[2] ?? property[3];
-      if (key && isSensitiveIdentifier(key) && isNonemptyLiteral(property[4])) {
+      if (
+        key &&
+        isSensitiveIdentifier(key) &&
+        isNonemptyLiteral(property[4]) &&
+        !(
+          allowSyntheticTestLiterals &&
+          isMarkedSyntheticTestLiteral(property[4])
+        )
+      ) {
         findings.push(secretAssignment(lineNumber, key));
       }
     }
@@ -205,6 +247,10 @@ function scanYaml(contents) {
   return findings;
 }
 
+export function isAllowedEnvironmentExampleValue(key, value) {
+  return allowedEnvironmentExampleValues.get(key) === value;
+}
+
 export function scanCommittedSecrets(filePath, contents) {
   const findings = [];
   const pemHeaderPattern =
@@ -227,7 +273,9 @@ export function scanCommittedSecrets(filePath, contents) {
       extension,
     )
   ) {
-    findings.push(...scanJavaScript(contents));
+    findings.push(
+      ...scanJavaScript(contents, /\.(?:test|spec)\.[^.]+$/u.test(basename)),
+    );
   } else if (extension === ".json") {
     findings.push(...scanJson(contents));
   } else if ([".yaml", ".yml"].includes(extension)) {

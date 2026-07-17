@@ -22,3 +22,14 @@ export function forbiddenInfrastructureCategory(dependency) {
 
   return forbiddenDependencies.get(normalizedDependency) ?? null;
 }
+
+export function isCanonicalVitestTestScript(script, workspaceTestTarget) {
+  if (typeof script !== "string") {
+    return false;
+  }
+
+  return (
+    script === "vitest run" ||
+    script === `vitest run --root ../.. ${workspaceTestTarget}`
+  );
+}

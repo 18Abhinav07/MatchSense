@@ -64,3 +64,47 @@ test("allows dependency names outside the exact infrastructure policy", async ()
     );
   }
 });
+
+test("accepts only canonical full-workspace or own-workspace Vitest runs", async () => {
+  const policy = await loadPolicy();
+  assert.notEqual(policy, null, "workspace policy helper must exist");
+
+  assert.equal(
+    policy.isCanonicalVitestTestScript("vitest run", "apps/web/src"),
+    true,
+  );
+  assert.equal(
+    policy.isCanonicalVitestTestScript(
+      "vitest run --root ../.. apps/server/src",
+      "apps/server/src",
+    ),
+    true,
+  );
+  assert.equal(
+    policy.isCanonicalVitestTestScript(
+      "vitest run --root ../.. apps/web/src",
+      "apps/server/src",
+    ),
+    false,
+    "a scoped script must not silently test another workspace",
+  );
+});
+
+test("rejects missing, non-run, and pass-with-no-tests scripts", async () => {
+  const policy = await loadPolicy();
+  assert.notEqual(policy, null, "workspace policy helper must exist");
+
+  for (const script of [
+    undefined,
+    "",
+    "vitest",
+    "vitest run --passWithNoTests",
+    "node --test",
+  ]) {
+    assert.equal(
+      policy.isCanonicalVitestTestScript(script, "apps/server/src"),
+      false,
+      `${String(script)} must not satisfy the Vitest run contract`,
+    );
+  }
+});

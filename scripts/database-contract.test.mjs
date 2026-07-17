@@ -48,7 +48,7 @@ test("database commands are real explicit package entrypoints", () => {
   );
 });
 
-test("root verification prebuilds the internal DB package from a fresh clone", () => {
+test("root verification prebuilds required internal packages from a fresh clone", () => {
   const rootManifest = readManifest("package.json");
 
   assert.equal(
@@ -60,8 +60,12 @@ test("root verification prebuilds the internal DB package from a fresh clone", (
     "corepack pnpm run preflight:db && node --test scripts/*.test.mjs && vitest run",
   );
   assert.equal(
+    rootManifest.scripts?.["preflight:typecheck"],
+    "corepack pnpm --recursive --filter './packages/**' --if-present run build",
+  );
+  assert.equal(
     rootManifest.scripts?.typecheck,
-    "corepack pnpm run preflight:db && corepack pnpm --recursive --if-present run typecheck",
+    "corepack pnpm run preflight:typecheck && corepack pnpm --recursive --if-present run typecheck",
   );
 });
 
