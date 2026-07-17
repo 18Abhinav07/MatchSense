@@ -725,6 +725,7 @@ export async function startServer(options: StartServerOptions = {}) {
       databaseRuntime.rooms && fanSessions
         ? createDurableRoomService({
             fixture: (fixtureId) => runtime.fixture(fixtureId),
+            followFixture: (input) => databaseRuntime.fans!.upsertFollow(input),
             repository:
               databaseRuntime.rooms as RoomAggregateRepository<DurableRoomAggregate>,
             ...(experienceRuntime

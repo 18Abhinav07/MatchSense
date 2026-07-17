@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import type {
+  FanRepository,
   PersistenceMode,
   RoomAggregateRecord,
   RoomAggregateRepository,
@@ -37,6 +38,15 @@ import {
 
 const STARTING_SENSE = 100 as const;
 const MAX_CAS_ATTEMPTS = 4;
+const ROOM_FOLLOW_EVENT_PREFERENCES = {
+  fullTime: true,
+  goals: true,
+  halfTime: true,
+  penalties: true,
+  redCards: true,
+  var: true,
+  yellowCards: true,
+} as const;
 
 export interface DurableSenseLedgerEntry {
   available: number;
@@ -76,6 +86,7 @@ export interface DurableRoomServiceOptions {
   fixture(
     fixtureId: string,
   ): FixtureSnapshot | null | Promise<FixtureSnapshot | null>;
+  followFixture?: Pick<FanRepository, "upsertFollow">["upsertFollow"];
   inviteBytes?: (() => Buffer) | undefined;
   now?: (() => number) | undefined;
   repository: RoomAggregateRepository<DurableRoomAggregate>;
@@ -490,6 +501,12 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
         startedAt: null,
         statTotals: { cards: null, corners: null, goals: null },
       };
+      await options.followFixture?.({
+        eventPreferences: ROOM_FOLLOW_EVENT_PREFERENCES,
+        fanId: input.host.fanId,
+        fixtureId: fixture.fixtureId,
+        mode: modeFor(fixture),
+      });
       const record = await options.repository.create({
         aggregate,
         fixtureId: fixture.fixtureId,
@@ -595,6 +612,12 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
           },
           room,
         };
+        await options.followFixture?.({
+          eventPreferences: ROOM_FOLLOW_EVENT_PREFERENCES,
+          fanId: input.fanId,
+          fixtureId: current.fixtureId,
+          mode: current.mode,
+        });
         const updated = await options.repository.joinAndCompareAndSwap({
           aggregate,
           expectedVersion: current.version,

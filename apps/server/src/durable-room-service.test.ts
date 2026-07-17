@@ -125,10 +125,14 @@ describe("durable Room happy path", () => {
       kickoffAt: "2026-07-17T12:00:10.000Z",
       updatedAt: "2026-07-17T12:00:00.000Z",
     };
+    const follows: unknown[] = [];
     const starts: string[] = [];
     const service = createDurableRoomService({
       fixture: async (fixtureId) =>
         fixtureId === preparedFixture.fixtureId ? preparedFixture : null,
+      followFixture: async (input) => {
+        follows.push(input);
+      },
       now: () => now,
       repository,
       roomId: () => "room-orchestrated",
@@ -153,6 +157,36 @@ describe("durable Room happy path", () => {
       nickname: "Pratik",
       teamCode: "FRA",
     });
+    expect(follows).toEqual([
+      {
+        eventPreferences: {
+          fullTime: true,
+          goals: true,
+          halfTime: true,
+          penalties: true,
+          redCards: true,
+          var: true,
+          yellowCards: true,
+        },
+        fanId: "fan-host",
+        fixtureId: preparedFixture.fixtureId,
+        mode: "demo",
+      },
+      {
+        eventPreferences: {
+          fullTime: true,
+          goals: true,
+          halfTime: true,
+          penalties: true,
+          redCards: true,
+          var: true,
+          yellowCards: true,
+        },
+        fanId: "fan-friend",
+        fixtureId: preparedFixture.fixtureId,
+        mode: "demo",
+      },
+    ]);
     await service.openPicks(created.room.id, "fan-host");
     await service.saveSensePicks({
       fanId: "fan-friend",
