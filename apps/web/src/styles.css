@@ -418,6 +418,7 @@ svg {
 }
 .team-choice span:nth-child(2) {
   display: grid;
+  min-width: 0;
   gap: 4px;
 }
 .team-choice small {
@@ -1455,7 +1456,7 @@ audio {
     font-size: clamp(46px, 13vw, 64px);
   }
   .team-choice {
-    grid-template-columns: 78px 1fr 24px;
+    grid-template-columns: 78px minmax(0, 1fr) 24px;
     min-height: 112px;
     gap: 16px;
   }
