@@ -4,6 +4,9 @@ import type {
 } from "@matchsense/contracts";
 
 export * from "./live.js";
+export * from "./client.js";
+export * from "./raw-source.js";
+export * from "./schedule.js";
 
 function assertNonNegativeInteger(value: number, label: string) {
   if (!Number.isSafeInteger(value) || value < 0) {

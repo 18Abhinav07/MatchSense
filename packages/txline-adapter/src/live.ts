@@ -1,12 +1,8 @@
 import { createHash } from "node:crypto";
 
-export const VERIFIED_TXLINE_DEVNET_ENDPOINTS = {
-  guestSessionPath: "/auth/guest/start",
-  historicalScorePath: (fixtureId: string) =>
-    `/api/scores/historical/${encodeURIComponent(fixtureId)}`,
-  origin: "https://txline-dev.txodds.com",
-  scoresStreamPath: "/api/scores/stream",
-} as const;
+import { TxlineHttpError, VERIFIED_TXLINE_DEVNET_ENDPOINTS } from "./client.js";
+
+export { TxlineHttpError, VERIFIED_TXLINE_DEVNET_ENDPOINTS } from "./client.js";
 
 export type TxlineDataProvenance =
   "live_txline" | "recorded_txline_authorised" | "synthetic_txline_shaped";
@@ -763,17 +759,6 @@ export function createTxlineOrderedCanonicalizer(
       };
     },
   };
-}
-
-export class TxlineHttpError extends Error {
-  override readonly name = "TxlineHttpError";
-
-  constructor(
-    readonly status: number,
-    readonly path: string,
-  ) {
-    super(`TxLINE ${path} returned HTTP ${status}`);
-  }
 }
 
 function defaultSleep(delayMs: number, signal: AbortSignal) {
