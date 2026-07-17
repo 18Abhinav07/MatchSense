@@ -1,0 +1,84 @@
+.ms-team-flag {
+  --ms-flag-primary: #244f42;
+  --ms-flag-secondary: #f7f1df;
+  --ms-flag-ink: #f7f4ea;
+  position: relative;
+  display: inline-block;
+  flex: 0 0 auto;
+  overflow: hidden;
+  aspect-ratio: 3 / 2;
+  border: 1px solid rgb(255 255 255 / 28%);
+  border-radius: 0.38rem;
+  background: var(--ms-flag-primary);
+  box-shadow:
+    0 0.45rem 1rem rgb(0 0 0 / 20%),
+    inset 0 1px 0 rgb(255 255 255 / 24%);
+  isolation: isolate;
+}
+
+.ms-team-flag::after {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background:
+    linear-gradient(115deg, rgb(255 255 255 / 20%), transparent 32%),
+    radial-gradient(circle at 78% 80%, rgb(0 0 0 / 20%), transparent 48%);
+  content: "";
+  pointer-events: none;
+}
+
+.ms-team-flag--compact {
+  width: 2rem;
+}
+
+.ms-team-flag--standard {
+  width: 3.625rem;
+}
+
+.ms-team-flag--hero {
+  width: clamp(5.8rem, 20vw, 9.5rem);
+  border-radius: 0.7rem;
+}
+
+.ms-team-flag img,
+.ms-team-flag__art,
+.ms-team-flag__textile {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.ms-team-flag__art svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.ms-team-flag img {
+  object-fit: cover;
+}
+
+.ms-team-flag__textile {
+  background:
+    repeating-linear-gradient(
+      0deg,
+      transparent 0 3px,
+      rgb(255 255 255 / 7%) 3px 4px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      transparent 0 4px,
+      rgb(0 0 0 / 7%) 4px 5px
+    ),
+    linear-gradient(
+      180deg,
+      var(--ms-flag-primary) 0 48%,
+      var(--ms-flag-secondary) 48% 100%
+    );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ms-team-flag {
+    scroll-behavior: auto;
+  }
+}

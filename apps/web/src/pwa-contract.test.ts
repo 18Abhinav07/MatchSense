@@ -42,6 +42,9 @@ describe("installable PWA contract", () => {
     expect(serviceWorker).toContain('addEventListener("notificationclick"');
     expect(serviceWorker).toContain("showNotification");
     expect(serviceWorker).toContain("clients.openWindow");
+    expect(serviceWorker).toContain("existing.postMessage");
+    expect(serviceWorker).toContain("existing.focus()");
+    expect(serviceWorker).not.toContain("existing.navigate");
     expect(notificationContract).toContain("momentId");
     expect(notificationContract).toContain("revision");
     expect(notificationContract).toContain("momentIdentity");

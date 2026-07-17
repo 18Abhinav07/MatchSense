@@ -1,0 +1,517 @@
+.ms-intro,
+.ms-identity-step,
+.ms-avatar-step,
+.ms-profile {
+  min-height: 100dvh;
+  color: var(--ink, #f7f4ea);
+  background: #090b09;
+}
+
+.ms-intro {
+  position: relative;
+  display: grid;
+  overflow: hidden;
+  place-items: center;
+  padding: 28px;
+  background:
+    radial-gradient(circle at 50% 42%, rgb(159 236 88 / 18%), transparent 28%),
+    linear-gradient(145deg, #090b09, #121812 62%, #080a08);
+}
+
+.ms-intro::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  pointer-events: none;
+  opacity: 0.14;
+  background-image: repeating-linear-gradient(
+    96deg,
+    transparent 0 9px,
+    #d8ead0 10px 11px
+  );
+  mix-blend-mode: soft-light;
+}
+
+.ms-intro-pitch {
+  position: relative;
+  width: min(72vw, 390px);
+  aspect-ratio: 1.55;
+  border: 1px solid rgb(232 245 226 / 22%);
+  transform: perspective(700px) rotateX(61deg) rotateZ(-11deg);
+  animation: msPitchEnter 1.1s cubic-bezier(0.17, 0.84, 0.3, 1) both;
+}
+
+.ms-intro-pitch::before,
+.ms-intro-pitch::after,
+.ms-intro-pitch i {
+  position: absolute;
+  content: "";
+  border: 1px solid rgb(232 245 226 / 20%);
+}
+
+.ms-intro-pitch::before {
+  inset: 12%;
+}
+.ms-intro-pitch::after {
+  inset: 0 49%;
+}
+.ms-intro-pitch i:first-child {
+  inset: 36% 42%;
+  border-radius: 50%;
+}
+.ms-intro-pitch i:nth-child(2) {
+  inset: 18% 0 18% 82%;
+}
+.ms-intro-pitch i:nth-child(3) {
+  inset: 18% 82% 18% 0;
+}
+
+.ms-intro-pitch span {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  width: 74px;
+  aspect-ratio: 1;
+  place-items: center;
+  color: #0b0d0b;
+  border-radius: 50%;
+  background: #9fec58;
+  box-shadow: 0 0 80px rgb(159 236 88 / 44%);
+  font:
+    950 20px/1 ui-monospace,
+    monospace;
+  transform: translate(-50%, -50%);
+}
+
+.ms-intro-copy {
+  position: absolute;
+  bottom: 13vh;
+  z-index: 1;
+  width: min(90vw, 760px);
+  text-align: center;
+}
+
+.ms-intro-copy p,
+.ms-step-mark,
+.ms-profile-header {
+  font:
+    800 10px/1.3 ui-monospace,
+    monospace;
+  letter-spacing: 0.14em;
+}
+
+.ms-intro-copy h1 {
+  margin: 14px 0 10px;
+  font-size: clamp(35px, 7vw, 86px);
+  line-height: 0.86;
+  letter-spacing: -0.075em;
+}
+
+.ms-intro-copy span {
+  color: #b7c0b8;
+}
+.ms-intro-skip {
+  position: absolute;
+  top: 30px;
+  right: 30px;
+  z-index: 2;
+  color: #d8ded8;
+  border: 0;
+  border-bottom: 1px solid #657065;
+  background: transparent;
+}
+
+.ms-step-mark,
+.ms-profile-header {
+  display: flex;
+  justify-content: space-between;
+  padding: 24px clamp(20px, 5vw, 72px);
+  color: #a9b0a9;
+  border-bottom: 1px solid rgb(255 255 255 / 10%);
+}
+
+.ms-identity-grid {
+  display: grid;
+  min-height: calc(100dvh - 68px);
+  grid-template-columns: minmax(280px, 0.85fr) minmax(340px, 1.15fr);
+}
+
+.ms-identity-team {
+  display: grid;
+  align-content: center;
+  padding: clamp(28px, 7vw, 100px);
+  background: #101410;
+}
+
+.ms-identity-team .ms-team-flag {
+  width: 100%;
+  max-width: 480px;
+}
+.ms-identity-team small {
+  margin-top: 24px;
+  color: #9fec58;
+  font:
+    800 11px/1 ui-monospace,
+    monospace;
+}
+.ms-identity-team strong {
+  margin-top: 7px;
+  font-size: clamp(28px, 5vw, 64px);
+  letter-spacing: -0.06em;
+}
+.ms-identity-grid form,
+.ms-avatar-copy {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: clamp(32px, 8vw, 118px);
+}
+
+.ms-identity-grid h1,
+.ms-avatar-copy h1,
+.ms-profile h1 {
+  margin: 8px 0 18px;
+  font-size: clamp(36px, 5vw, 70px);
+  line-height: 0.94;
+  letter-spacing: -0.065em;
+}
+
+.ms-identity-grid form > p:not(.kicker),
+.ms-avatar-copy > p:not(.kicker) {
+  max-width: 570px;
+  color: #abb3ac;
+  line-height: 1.6;
+}
+.ms-handle-field {
+  display: flex;
+  margin-top: 34px;
+  border-bottom: 2px solid #9fec58;
+}
+.ms-handle-field span {
+  padding: 18px 8px 18px 0;
+  color: #9fec58;
+  font:
+    800 26px/1 ui-monospace,
+    monospace;
+}
+.ms-handle-field input {
+  min-width: 0;
+  flex: 1;
+  color: #f7f4ea;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font:
+    750 clamp(22px, 4vw, 43px)/1.1 ui-monospace,
+    monospace;
+}
+.ms-identity-grid form > small {
+  margin: 12px 0 30px;
+  color: #7f887f;
+}
+.ms-identity-grid .primary-control {
+  width: fit-content;
+}
+
+.ms-avatar-step {
+  padding-bottom: 60px;
+}
+.ms-avatar-copy {
+  padding-bottom: 36px;
+}
+.ms-avatar-options {
+  display: grid;
+  width: min(1120px, calc(100% - 40px));
+  margin: 0 auto;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+  background: rgb(255 255 255 / 12%);
+}
+.ms-avatar-options button {
+  display: grid;
+  min-height: 280px;
+  place-items: center;
+  padding: 35px;
+  color: #e9eee8;
+  border: 0;
+  background: #111511;
+}
+.ms-avatar-options button:hover {
+  background: #171d17;
+}
+.ms-avatar-options button > span:last-child {
+  font:
+    800 10px/1 ui-monospace,
+    monospace;
+  text-transform: uppercase;
+}
+
+.ms-fan-avatar {
+  --fan-primary: #527f55;
+  --fan-secondary: #d6e4d4;
+  position: relative;
+  display: grid;
+  width: 132px;
+  aspect-ratio: 1;
+  overflow: hidden;
+  place-items: center;
+  color: var(--fan-ink);
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: 50%;
+  background: linear-gradient(
+    145deg,
+    var(--fan-primary),
+    color-mix(in srgb, var(--fan-secondary) 48%, #090b09)
+  );
+  box-shadow:
+    inset 0 1px rgb(255 255 255 / 20%),
+    0 26px 70px rgb(0 0 0 / 42%);
+  isolation: isolate;
+}
+.ms-fan-avatar::after {
+  position: absolute;
+  inset: 12%;
+  content: "";
+  border: 1px solid rgb(255 255 255 / 25%);
+  border-radius: 50%;
+}
+.ms-fan-avatar i {
+  position: absolute;
+  width: 68%;
+  aspect-ratio: 1;
+  background: var(--fan-secondary);
+  opacity: 0.28;
+  transform: rotate(45deg);
+}
+.ms-fan-avatar[data-variant="terrace"] i {
+  width: 120%;
+  transform: translateY(42%) skewY(-12deg);
+}
+.ms-fan-avatar[data-variant="wave"] i {
+  width: 150%;
+  border-radius: 50%;
+  transform: translate(-28%, 30%);
+}
+.ms-fan-avatar b {
+  z-index: 1;
+  font:
+    950 30px/1 ui-monospace,
+    monospace;
+  text-shadow: 0 2px 14px rgb(0 0 0 / 55%);
+}
+
+.ms-completion-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgb(5 7 5 / 68%);
+  backdrop-filter: blur(16px);
+}
+.ms-completion-card {
+  display: grid;
+  width: min(100%, 470px);
+  max-height: 92dvh;
+  overflow: auto;
+  gap: 16px;
+  padding: 30px;
+  color: #f7f4ea;
+  border: 1px solid rgb(255 255 255 / 14%);
+  background: #121612;
+  box-shadow: 0 32px 100px rgb(0 0 0 / 70%);
+}
+.ms-completion-card h2 {
+  margin: 0;
+  font-size: 36px;
+  letter-spacing: -0.05em;
+}
+.ms-completion-card > p:not(.kicker) {
+  margin: 0;
+  color: #aeb6ae;
+  line-height: 1.55;
+}
+.ms-completion-card label,
+.ms-profile-grid label {
+  display: grid;
+  gap: 8px;
+  color: #afb7af;
+  font-size: 12px;
+}
+.ms-completion-card input,
+.ms-completion-card select,
+.ms-profile-grid input,
+.ms-profile-grid select {
+  min-height: 48px;
+  padding: 0 14px;
+  color: #f7f4ea;
+  border: 1px solid #434b43;
+  border-radius: 2px;
+  outline: none;
+  background: #0c0f0c;
+}
+.ms-completion-card input:focus,
+.ms-completion-card select:focus,
+.ms-profile-grid input:focus,
+.ms-profile-grid select:focus {
+  border-color: #9fec58;
+}
+.ms-fan-error {
+  color: #ff8d82;
+  font-size: 13px;
+}
+
+.ms-profile {
+  padding-bottom: 80px;
+}
+.ms-profile-header button {
+  color: #f7f4ea;
+  border: 0;
+  background: transparent;
+}
+.ms-profile-hero {
+  display: flex;
+  width: min(1180px, calc(100% - 40px));
+  align-items: center;
+  gap: clamp(28px, 6vw, 80px);
+  margin: 0 auto;
+  padding: clamp(55px, 8vw, 110px) 0;
+}
+.ms-profile-hero .ms-fan-avatar {
+  width: clamp(120px, 20vw, 210px);
+}
+.ms-profile-hero h1 {
+  margin-bottom: 10px;
+}
+.ms-profile-hero strong {
+  display: block;
+  color: #9fec58;
+  font:
+    800 15px/1 ui-monospace,
+    monospace;
+}
+.ms-profile-hero div > span {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 22px;
+  color: #c4cac4;
+}
+.ms-profile-grid {
+  display: grid;
+  width: min(1180px, calc(100% - 40px));
+  margin: 0 auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-top: 1px solid rgb(255 255 255 / 12%);
+  border-left: 1px solid rgb(255 255 255 / 12%);
+}
+.ms-profile-grid article {
+  display: grid;
+  gap: 18px;
+  padding: clamp(24px, 4vw, 48px);
+  border-right: 1px solid rgb(255 255 255 / 12%);
+  border-bottom: 1px solid rgb(255 255 255 / 12%);
+}
+.ms-profile-toggle {
+  display: grid !important;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+}
+.ms-profile-toggle input {
+  position: absolute;
+  opacity: 0;
+}
+.ms-profile-toggle i {
+  position: relative;
+  width: 45px;
+  height: 25px;
+  border-radius: 999px;
+  background: #303730;
+}
+.ms-profile-toggle i::after {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 17px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  content: "";
+  background: #aab1aa;
+  transition: transform 0.2s ease;
+}
+.ms-profile-toggle input:checked + i {
+  background: #608e43;
+}
+.ms-profile-toggle input:checked + i::after {
+  background: #f7f4ea;
+  transform: translateX(20px);
+}
+.ms-profile-actions {
+  display: flex;
+  width: min(1180px, calc(100% - 40px));
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 24px;
+  margin: 36px auto 0;
+}
+.ms-profile-actions .primary-control {
+  width: auto;
+}
+.ms-delete-profile {
+  color: #ef9188;
+  border: 0;
+  border-bottom: 1px solid #834943;
+  background: transparent;
+}
+
+@keyframes msPitchEnter {
+  from {
+    opacity: 0;
+    transform: perspective(700px) rotateX(72deg) rotateZ(-16deg) scale(0.7);
+  }
+  to {
+    opacity: 1;
+    transform: perspective(700px) rotateX(61deg) rotateZ(-11deg) scale(1);
+  }
+}
+
+@media (max-width: 760px) {
+  .ms-identity-grid {
+    grid-template-columns: 1fr;
+  }
+  .ms-identity-team {
+    min-height: 270px;
+    padding: 30px 22px;
+  }
+  .ms-identity-team .ms-team-flag {
+    max-width: 250px;
+  }
+  .ms-identity-grid form,
+  .ms-avatar-copy {
+    padding: 42px 22px;
+  }
+  .ms-avatar-options {
+    grid-template-columns: 1fr;
+  }
+  .ms-avatar-options button {
+    min-height: 220px;
+  }
+  .ms-profile-hero {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .ms-profile-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ms-intro-pitch {
+    animation: none;
+  }
+  .ms-profile-toggle i::after {
+    transition: none;
+  }
+}

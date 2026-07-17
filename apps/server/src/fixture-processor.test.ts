@@ -70,6 +70,12 @@ describe("fixture processor", () => {
       raw,
     };
     await expect(processor.process(input)).resolves.toMatchObject({
+      event: {
+        event: "moment.created",
+        id: `${fixture.fixtureId}:revision:1`,
+        moment: { identity: `${goalFact.familyId}:1` },
+        snapshot: { revision: 1, score: { away: 0, home: 1 } },
+      },
       kind: "committed",
       revision: 1,
     });
@@ -130,6 +136,7 @@ describe("fixture processor", () => {
     const processor = createFixtureProcessor({
       repository,
     });
+    const fixtureFenceGeneration = 1;
 
     await processor.process({
       deliveryIntent: "realtime",
@@ -138,7 +145,7 @@ describe("fixture processor", () => {
       mode: "live",
       raw: { ...raw, source: "txline" },
       sourceFence: {
-        fencingToken: 1,
+        fencingToken: fixtureFenceGeneration,
         holderId: "worker-1",
         source: "txline",
         streamKey: "scores:mainnet",
@@ -249,6 +256,51 @@ describe("fixture processor", () => {
           .inspect({ fixtureId: fixture.fixtureId, mode: "demo" })
           .outbox.map(({ topic }) => topic),
       ).toEqual(["fixture.broadcast", "room.project", "memory.project"]);
+    },
+  );
+
+  it.each([
+    ["red card", { kind: "card.red", minute: "68'" }],
+    ["full time", { kind: "phase.full_time", minute: "FT" }],
+  ] as const)(
+    "queues %s for targeted push and commentary",
+    async (_label, event) => {
+      const repository = repositoryHarness("demo");
+      const processor = createFixtureProcessor({ repository });
+      const fact: CanonicalEventFact = {
+        ...goalFact,
+        familyId: `family:${event.kind}`,
+        kind: event.kind,
+        minute: event.minute,
+        sourceEnvelopeId: `envelope:${event.kind}`,
+        sourceEventId: `event:${event.kind}`,
+        team: event.kind === "card.red" ? "FRA" : null,
+      };
+
+      await processor.process({
+        deliveryIntent: "realtime",
+        fact,
+        fixture,
+        mode: "demo",
+        raw: {
+          ...raw,
+          dedupeKey: fact.sourceEnvelopeId,
+          id: `raw:${fact.sourceEnvelopeId}`,
+          sourceRecordId: fact.sourceEventId,
+        },
+      });
+
+      expect(
+        repository
+          .inspect({ fixtureId: fixture.fixtureId, mode: "demo" })
+          .outbox.map(({ topic }) => topic),
+      ).toEqual([
+        "fixture.broadcast",
+        "push.candidate",
+        "commentary.prepare",
+        "room.project",
+        "memory.project",
+      ]);
     },
   );
 });

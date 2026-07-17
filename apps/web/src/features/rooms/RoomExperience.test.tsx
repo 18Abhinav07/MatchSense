@@ -25,7 +25,7 @@ const fixture = {
     secondary: "#f3efe4",
   },
   id: "fixture-1",
-  isReplay: false,
+  isReplay: true,
   kickoffAt: "2026-07-19T19:00:00.000Z",
 } as const;
 
@@ -114,7 +114,6 @@ const api: RoomApi = {
   getRoom: async () => room("OPEN"),
   joinRoom: async () => ({ lateJoin: false, room: room("OPEN") }),
   openPicks: async () => room("OPEN"),
-  playReplay: async () => room("FINAL"),
   previewInvite: async () => ({
     callsLocked: false,
     expiresAt: fixture.kickoffAt,
@@ -125,6 +124,7 @@ const api: RoomApi = {
   }),
   savePicks: async () => room("OPEN"),
   sendReaction: async () => ({ receiptId: "r1", room: room("LIVE") }),
+  startExperience: async () => room("LIVE"),
   subscribeRoom: () => () => undefined,
 };
 
@@ -152,6 +152,7 @@ describe("100-Sense room experience", () => {
     expect(html).toContain("Open 100-Sense picks");
     expect(html).toContain("FRIEND SENSE · NO MONEY · NO PRIZES");
     expect(html).toContain("Share private invite");
+    expect(html.match(/ms-team-flag/g)?.length).toBeGreaterThanOrEqual(2);
   });
 
   it("renders all five MatchSense-priced markets when picks open", () => {
@@ -167,5 +168,20 @@ describe("100-Sense room experience", () => {
     expect(html).toContain("Total corners · 9.5");
     expect(html).toContain("Both teams to score?");
     expect(html.match(/MatchSense pricing/g)?.length).toBe(5);
+    expect(html).toContain("Start Experience");
+  });
+
+  it("does not expose Experience controls to a non-host", () => {
+    const html = renderToStaticMarkup(
+      createElement(RoomExperience, {
+        api,
+        route: {
+          initialRoom: { ...room("OPEN"), isHost: false },
+          mode: "room",
+          roomId: "room-1",
+        },
+      }),
+    );
+    expect(html).not.toContain("Start Experience");
   });
 });

@@ -162,6 +162,8 @@ export interface CanonicalEventEffect {
 }
 
 export interface CanonicalMoment {
+  /** True only when this exact canonical revision may open the goal celebration. */
+  celebratesGoal: boolean;
   eventTeam: TeamCode | null;
   familyId: string;
   id: string;

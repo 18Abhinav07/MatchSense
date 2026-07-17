@@ -1,5 +1,6 @@
 export interface MomentTeam {
   code: string;
+  flagUrl?: string;
   name: string;
   primary: string;
   secondary: string;

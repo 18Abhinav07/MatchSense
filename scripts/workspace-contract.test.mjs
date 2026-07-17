@@ -71,7 +71,7 @@ function projectFiles(relativePath = "") {
   }
 
   return readdirSync(absolutePath, { withFileTypes: true }).flatMap((entry) => {
-    if ([".git", "dist", "node_modules"].includes(entry.name)) {
+    if ([".git", ".worktrees", "dist", "node_modules"].includes(entry.name)) {
       return [];
     }
 

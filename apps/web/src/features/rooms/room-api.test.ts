@@ -127,6 +127,7 @@ describe("100-Sense browser API", () => {
       },
     );
     const api = createRoomApi({
+      cookieSource: () => "matchsense_csrf=room%20csrf",
       fanId: "fan-one",
       favoriteTeam: "ARG",
       fetchImpl: fetchImpl as typeof fetch,
@@ -146,16 +147,21 @@ describe("100-Sense browser API", () => {
       { allocation: 20, marketId: "corners_9_5", selection: "OVER" },
       { allocation: 20, marketId: "btts", selection: "YES" },
     ]);
+    await api.startExperience(created.room.id);
 
     expect(calls.map(({ method, path }) => `${method} ${path}`)).toEqual([
       "POST /api/v1/rooms",
       "POST /api/v1/rooms/room-one/picks/open",
       "PUT /api/v1/rooms/room-one/picks",
+      "POST /api/v1/rooms/room-one/start",
     ]);
     expect(
-      calls.every(
-        ({ headers }) => headers.get("x-matchsense-fan-id") === "fan-one",
-      ),
+      calls.every(({ headers }) => {
+        return (
+          headers.get("x-matchsense-fan-id") === null &&
+          headers.get("x-matchsense-csrf") === "room csrf"
+        );
+      }),
     ).toBe(true);
     expect(calls[0]?.body).toEqual({
       fixtureId: "fixture-1",

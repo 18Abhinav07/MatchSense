@@ -100,9 +100,11 @@ describe("durable fan repositories", () => {
       fixtureId: "fx-1",
       mode: "demo",
     });
+    await repository.listFollowers({ fixtureId: "fx-1", mode: "demo" });
 
     expect(fake.queries[0]?.parameters).toContain("abhinav");
     expect(fake.queries[1]?.query).toContain("matchsense.fan_follows");
+    expect(fake.queries[2]?.query).toContain("fixture_id = $2");
   });
 });
 
@@ -143,8 +145,12 @@ describe("durable push, Experience, Room, and Memory repositories", () => {
       }),
     ).resolves.toMatchObject({ id: "device-1", preferences: { goal: true } });
     await repository.listActiveForFan("fan-1");
+    await expect(
+      repository.getActiveForFan({ deviceId: "device-1", fanId: "fan-1" }),
+    ).resolves.toMatchObject({ id: "device-1" });
 
     expect(fake.queries[1]?.query).toMatch(/invalidated_at IS NULL/u);
+    expect(fake.queries[2]?.parameters).toEqual(["device-1", "fan-1"]);
   });
 
   it("creates a run with materialized beats in one transaction", async () => {
@@ -204,6 +210,35 @@ describe("durable push, Experience, Room, and Memory repositories", () => {
     ]);
   });
 
+  it("lists Experience runs owned by one fan newest first", async () => {
+    const runRow = {
+      completed_at: "2026-07-17T10:05:00.000Z",
+      created_at: "2026-07-17T10:00:00.000Z",
+      fixture_id: "experience:run-1",
+      fixture_mode: "demo",
+      id: "run-1",
+      journey: "experience_match",
+      kickoff_at: "2026-07-17T10:00:00.000Z",
+      next_beat_index: 11,
+      owner_fan_id: "fan-1",
+      status: "final",
+      template_id: "five-minute",
+      template_version: 1,
+      updated_at: "2026-07-17T10:05:00.000Z",
+      version: 11,
+    };
+    const fake = testClient(() => [runRow]);
+    const repository = databaseModule.createExperienceRepository(fake.client);
+
+    await expect(repository.listForOwner("fan-1")).resolves.toMatchObject([
+      { id: "run-1", ownerFanId: "fan-1" },
+    ]);
+
+    expect(fake.queries[0]?.query).toMatch(/owner_fan_id = \$1/u);
+    expect(fake.queries[0]?.query).toMatch(/ORDER BY created_at DESC/u);
+    expect(fake.queries[0]?.parameters).toEqual(["fan-1"]);
+  });
+
   it("compare-and-swaps one JSONB Room aggregate", async () => {
     const row = {
       aggregate: '{"members":["fan-1"],"picks":{}}',
@@ -242,6 +277,51 @@ describe("durable push, Experience, Room, and Memory repositories", () => {
     expect(fake.queries[0]?.query).toMatch(/version = \$2/u);
   });
 
+  it("joins a member and advances the Room aggregate atomically", async () => {
+    const row = {
+      aggregate: '{"members":["fan-1","fan-2"],"picks":{}}',
+      created_at: "2026-07-17T10:00:00.000Z",
+      finalized_at: null,
+      fixture_id: "fx-1",
+      id: "room-1",
+      invite_expires_at: "2026-07-17T11:00:00.000Z",
+      invite_hash: "e".repeat(64),
+      mode: "demo",
+      owner_fan_id: "fan-1",
+      status: "lobby",
+      updated_at: "2026-07-17T10:01:00.000Z",
+      version: 1,
+    };
+    const fake = testClient((query) =>
+      query.includes("UPDATE matchsense.rooms") ? [row] : [],
+    );
+    const repository = databaseModule.createRoomAggregateRepository(
+      fake.client,
+    );
+
+    await expect(
+      repository.joinAndCompareAndSwap({
+        aggregate: { members: ["fan-1", "fan-2"], picks: {} },
+        expectedVersion: 0,
+        finalizedAt: null,
+        member: {
+          fanId: "fan-2",
+          nickname: "Pratik",
+          role: "member",
+          teamCode: "FRA",
+        },
+        roomId: "room-1",
+        status: "lobby",
+      }),
+    ).resolves.toMatchObject({ version: 1 });
+
+    expect(fake.client.begin).toHaveBeenCalledTimes(1);
+    expect(fake.queries.map(({ query }) => query)).toEqual([
+      expect.stringContaining("UPDATE matchsense.rooms"),
+      expect.stringContaining("INSERT INTO matchsense.room_memberships"),
+    ]);
+  });
+
   it("appends immutable Memory revisions and resolves the latest", async () => {
     const row = {
       created_at: "2026-07-17T10:00:00.000Z",
@@ -271,6 +351,12 @@ describe("durable push, Experience, Room, and Memory repositories", () => {
       }),
     ).resolves.toMatchObject({ revision: 2 });
 
+    await repository.listLatestForFan("fan-1");
+
     expect(fake.queries[1]?.query).toMatch(/ORDER BY revision DESC/u);
+    expect(fake.queries[2]?.query).toMatch(
+      /SELECT DISTINCT ON \(mode, fixture_id\)/u,
+    );
+    expect(fake.queries[2]?.query).toMatch(/ORDER BY created_at DESC/u);
   });
 });

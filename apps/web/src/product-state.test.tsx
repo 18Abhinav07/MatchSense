@@ -2,7 +2,7 @@ import { createElement, type FunctionComponent } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
-import { App, type AppProps, SampleMoment } from "./App.js";
+import { App, type AppProps, MomentOverlay, SampleMoment } from "./App.js";
 import {
   beginPreparedPlayback,
   decidePreparationRelease,
@@ -16,7 +16,7 @@ import {
 } from "./product-state.js";
 
 describe("fan journey state", () => {
-  it("renders a searchable keyboard-operable team-first onboarding route", () => {
+  it("renders the reduced-motion-safe first-launch promise before permissions", () => {
     const markup = renderToStaticMarkup(
       createElement(App as FunctionComponent<AppProps>, {
         initialFavoriteTeam: null,
@@ -24,10 +24,9 @@ describe("fan journey state", () => {
       }),
     );
 
-    expect(markup).toContain("Who do you support?");
-    expect(markup).toContain('aria-label="Search teams"');
-    expect(markup).toContain("Loading the tournament team sheet");
-    expect(markup).toContain("TXLINE TOURNAMENT CATALOG");
+    expect(markup).toContain("EVERY MATCH HAS A PULSE.");
+    expect(markup).toContain("Skip intro");
+    expect(markup).toContain('aria-live="polite"');
   });
 
   it("makes canonical truth render before the cinematic moment opens", () => {
@@ -36,6 +35,7 @@ describe("fan journey state", () => {
       event: "moment.created" as const,
       id: "arg-fra-demo:score:1-0:1",
       moment: {
+        celebratesGoal: true,
         eventTeam: "ARG" as const,
         id: "arg-fra-demo:score:1-0",
         identity: "arg-fra-demo:score:1-0:1",
@@ -196,6 +196,7 @@ describe("fan journey state", () => {
         event: "moment.created",
         id: "arg-fra-demo:score:1-0:1",
         moment: {
+          celebratesGoal: true,
           eventTeam: "ARG",
           id: "arg-fra-demo:score:1-0",
           identity: "arg-fra-demo:score:1-0:1",
@@ -237,6 +238,7 @@ describe("fan journey state", () => {
         event: "moment.created",
         id: "arg-fra-demo:score:1-0:1",
         moment: {
+          celebratesGoal: true,
           eventTeam: "ARG",
           id: "arg-fra-demo:score:1-0",
           identity: "arg-fra-demo:score:1-0:1",
@@ -280,6 +282,60 @@ describe("fan journey state", () => {
     expect(spoken.currentRevision).toBe(1);
   });
 
+  it("opens the goal celebration for a VAR-stands goal but not a non-goal VAR decision", () => {
+    const props = {
+      catalog: { teams: [] },
+      commentary: "The check is complete.",
+      favoriteTeam: "ARG",
+      onClose: () => undefined,
+      snapshot: {
+        awayTeam: "FRA",
+        fixtureId: "fixture-1",
+        homeTeam: "ARG",
+        minute: "24'",
+        score: { away: 0, home: 1 },
+        sourceLabel: "TXLINE · DEVNET SOURCE",
+      },
+    };
+    const goalStands = renderToStaticMarkup(
+      createElement(MomentOverlay, {
+        ...props,
+        moment: {
+          celebratesGoal: true,
+          eventTeam: "ARG",
+          id: "goal-family",
+          identity: "goal-family:3",
+          kind: "var.stands",
+          minute: "24'",
+          revision: 3,
+          score: { away: 0, home: 1 },
+          status: "confirmed",
+        },
+      }),
+    );
+    const cardStands = renderToStaticMarkup(
+      createElement(MomentOverlay, {
+        ...props,
+        moment: {
+          celebratesGoal: false,
+          eventTeam: "ARG",
+          id: "card-family",
+          identity: "card-family:3",
+          kind: "var.stands",
+          minute: "24'",
+          revision: 3,
+          score: { away: 0, home: 1 },
+          status: "confirmed",
+        },
+      }),
+    );
+
+    expect(goalStands).toContain('data-state="confirmed-goal"');
+    expect(goalStands).toContain("Goal · confirmed");
+    expect(cardStands).not.toContain('data-state="confirmed-goal"');
+    expect(cardStands).toContain("VAR stands.");
+  });
+
   it("renders a France replay sample against a different mapped opponent", () => {
     const markup = renderToStaticMarkup(
       createElement(SampleMoment, { onContinue: () => undefined, team: "FRA" }),
@@ -303,6 +359,7 @@ describe("fan journey state", () => {
     );
     expect(markup).toContain("Create a room");
     expect(markup).toContain("free Sense");
+    expect(markup).toContain("ms-team-flag");
     expect(markup).not.toContain("Place a bet");
   });
 
@@ -316,5 +373,18 @@ describe("fan journey state", () => {
 
     expect(markup).toContain("OPENING ROOMS");
     expect(markup).toContain("Finding the next match for your room");
+  });
+
+  it("serves Match Memory replay as a dedicated route, not a final live screen", () => {
+    const markup = renderToStaticMarkup(
+      createElement(App as FunctionComponent<AppProps>, {
+        initialFavoriteTeam: "ARG",
+        initialPath: "/matches/experience%3Arun-1/memory/replay",
+      }),
+    );
+
+    expect(markup).toContain("MATCH REPLAY");
+    expect(markup).toContain("Loading the canonical Moment timeline");
+    expect(markup).not.toContain("CONNECTING TO MATCH");
   });
 });

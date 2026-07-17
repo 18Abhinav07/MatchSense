@@ -20,6 +20,7 @@ export interface LiveSnapshot {
 }
 
 export interface LiveMoment {
+  celebratesGoal: boolean;
   eventTeam: TeamCode;
   id: string;
   identity: string;

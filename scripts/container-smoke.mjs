@@ -147,7 +147,7 @@ async function main() {
     );
     assert.equal(
       migrationOutput,
-      "Database migrations applied: 1; current version: 1",
+      "Database migrations applied: 3; current version: 3",
       "deployed migration CLI must execute and report the exact applied state",
     );
     const checkOutput = await docker(
@@ -178,6 +178,8 @@ async function main() {
       appName,
       "--network",
       networkName,
+      "--env",
+      "DATA_RIGHTS_MODE=synthetic_demo",
       "--env",
       `DATABASE_URL=${databaseUrl}`,
       "--publish",

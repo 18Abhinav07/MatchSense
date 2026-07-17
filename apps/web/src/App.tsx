@@ -1,5 +1,6 @@
 import {
   type CSSProperties,
+  type ReactNode,
   useCallback,
   useEffect,
   useMemo,
@@ -10,9 +11,31 @@ import {
 
 import { ListeningProvider, useListening } from "./ListeningProvider.js";
 import {
+  MemorySourceNotice,
+  type MemoryDataSource,
+} from "./MemorySourceNotice.js";
+import { TeamFlag } from "./components/TeamFlag.js";
+import {
+  createFanProfileApi,
+  type FanBootstrap,
+  type FanProfile,
+  needsProfileCompletion,
+  profileComplete,
+} from "./fan-profile.js";
+import {
+  AvatarStep,
+  type FanCardDraft,
+  FirstLaunchIntro,
+  HandleStep,
+  ProfileCompletionOverlay,
+  ProfileSurface,
+} from "./features/fan/FanSurfaces.js";
+import {
   ConfirmedGoalMoment,
   FreshnessBanner,
   MatchMemory,
+  memoryReplayPath,
+  MemoryReplayPlayer,
   ReconnectCatchUp,
   type MomentScore,
   type MomentTeam,
@@ -31,13 +54,13 @@ import {
   type DemoBeatEvent,
   type DemoBeatType,
 } from "./features/demo/demo-state.js";
-import { getOrCreateFanIdentity } from "./fan-identity.js";
 import {
   eventLabel,
   fallbackTeam,
   fetchCatalog,
   fetchFixture,
   fetchFixtures,
+  fetchMomentResolution,
   fixtureState,
   parseCanonicalEvent,
   parseCatchupEvent,
@@ -46,11 +69,11 @@ import {
   type ProductCatalog,
   type ProductTeam,
 } from "./live-api.js";
-import {
-  enableMomentPush,
-  showLocalMomentNotification,
-  triggerTestMomentPush,
-} from "./push-notifications.js";
+import { fetchMatchMemories, fetchMatchMemory } from "./memory-api.js";
+import { loadMemoryHistory, loadOneMemory } from "./memory-loader.js";
+import { matchMemoryView, type MatchMemoryView } from "./memory-view.js";
+import { enableMomentPush } from "./push-notifications.js";
+import { parseMomentActivation } from "./notification-activation.js";
 import {
   createInitialLiveState,
   formatFreshness,
@@ -61,7 +84,7 @@ import {
   type TeamCode,
 } from "./product-state.js";
 
-const FAVORITE_KEY = "matchsense.favoriteTeam";
+const INTRO_SEEN_KEY = "matchsense.introSeen";
 const CATALOG_EMPTY: ProductCatalog = { teams: [] };
 
 interface BeforeInstallPromptEvent extends Event {
@@ -74,14 +97,25 @@ export interface AppProps {
   initialPath?: string;
 }
 
-function safeStoredFavorite(): TeamCode | null {
-  if (typeof window === "undefined") return null;
-  const value = window.localStorage.getItem(FAVORITE_KEY)?.trim().toUpperCase();
-  return value && /^[A-Z0-9_-]{2,12}$/u.test(value) ? value : null;
-}
-
 function browserPath() {
   return typeof window === "undefined" ? "/" : window.location.pathname;
+}
+
+function previewFan(team: TeamCode | null): FanProfile | null {
+  if (!team) return null;
+  const now = "2026-07-17T00:00:00.000Z";
+  return {
+    avatarVariant: `${team.toLowerCase()}-pulse`,
+    createdAt: now,
+    deletedAt: null,
+    favoriteTeam: team,
+    handle: `supporter_${team.toLowerCase()}`,
+    handleNormalized: `supporter_${team.toLowerCase()}`,
+    id: "server-preview",
+    preferences: {},
+    profile: {},
+    updatedAt: now,
+  };
 }
 
 function standalone() {
@@ -95,6 +129,7 @@ function standalone() {
 function momentTeam(team: ProductTeam): MomentTeam {
   return {
     code: team.code,
+    ...(team.flagUrl ? { flagUrl: team.flagUrl } : {}),
     ...(team.foreground ? { foreground: team.foreground } : {}),
     name: team.name,
     primary: team.primary,
@@ -186,23 +221,72 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
   const initialRoute = normalizePath(initialPath ?? browserPath());
   const [path, setPath] = useState(initialRoute);
   const isDemo = path === "/demo" || path.startsWith("/demo/");
-  const [fanId] = useState(() =>
-    typeof window === "undefined"
-      ? "server-preview"
-      : getOrCreateFanIdentity(window.localStorage),
+  const fanApi = useMemo(() => createFanProfileApi(), []);
+  const [bootstrap, setBootstrap] = useState<FanBootstrap | null>(() => {
+    const fan = previewFan(initialFavoriteTeam ?? null);
+    return fan ? { fan, follows: [], memories: [], rooms: [] } : null;
+  });
+  const [bootstrapStatus, setBootstrapStatus] = useState<
+    "loading" | "ready" | "error"
+  >(() => (initialFavoriteTeam === undefined ? "loading" : "ready"));
+  const [draftTeam, setDraftTeam] = useState<TeamCode | null>(
+    initialFavoriteTeam ?? null,
   );
-  const [favoriteTeam, setFavoriteTeam] = useState<TeamCode | null>(() =>
-    initialFavoriteTeam === undefined
-      ? (safeStoredFavorite() ??
-        (initialRoute.startsWith("/demo") ? "ARG" : null))
-      : initialFavoriteTeam,
-  );
+  const [draftHandle, setDraftHandle] = useState("");
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [experienceState, setExperienceState] = useState<
+    "idle" | "starting" | "error"
+  >("idle");
   const [onboardingStage, setOnboardingStage] = useState<
-    "pick" | "moment" | "buzz" | "done"
-  >(() => (favoriteTeam ? "done" : "pick"));
+    | "booting"
+    | "intro"
+    | "pick"
+    | "handle"
+    | "avatar"
+    | "moment"
+    | "buzz"
+    | "minimal"
+    | "done"
+  >(() => {
+    if (initialFavoriteTeam) return "done";
+    if (initialFavoriteTeam === null) {
+      return needsProfileCompletion(null, initialRoute) ? "minimal" : "intro";
+    }
+    return "booting";
+  });
   const [installPrompt, setInstallPrompt] =
     useState<BeforeInstallPromptEvent | null>(null);
   const catalogState = useCatalog();
+  const fan = bootstrap?.fan ?? null;
+  const favoriteTeam = fan?.favoriteTeam ?? draftTeam;
+  const fanId = fan?.id ?? "server-preview";
+
+  const loadBootstrap = useCallback(async () => {
+    setBootstrapStatus("loading");
+    try {
+      const next = await fanApi.ensureBootstrap();
+      setBootstrap(next);
+      setDraftTeam(next.fan.favoriteTeam);
+      setDraftHandle(next.fan.handle ?? "");
+      setBootstrapStatus("ready");
+      if (profileComplete(next.fan)) {
+        setOnboardingStage("done");
+      } else if (needsProfileCompletion(next.fan, initialRoute)) {
+        setOnboardingStage("minimal");
+      } else {
+        const introSeen = window.localStorage.getItem(INTRO_SEEN_KEY) === "1";
+        setOnboardingStage(introSeen ? "pick" : "intro");
+      }
+    } catch {
+      setBootstrapStatus("error");
+    }
+  }, [fanApi, initialRoute]);
+
+  useEffect(() => {
+    if (initialFavoriteTeam !== undefined) return;
+    void loadBootstrap();
+  }, [initialFavoriteTeam, loadBootstrap]);
 
   useEffect(() => {
     const onPop = () => setPath(normalizePath(window.location.pathname));
@@ -218,17 +302,147 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
     };
   }, []);
 
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) {
+      return;
+    }
+    const onServiceWorkerMessage = (event: MessageEvent<unknown>) => {
+      const activation = parseMomentActivation(
+        event.data,
+        window.location.origin,
+      );
+      if (!activation) return;
+      window.history.pushState({}, "", activation.url);
+      setPath(normalizePath(activation.url));
+      if (needsProfileCompletion(fan, activation.url)) {
+        setOnboardingStage("minimal");
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", onServiceWorkerMessage);
+    return () =>
+      navigator.serviceWorker.removeEventListener(
+        "message",
+        onServiceWorkerMessage,
+      );
+  }, [fan]);
+
   const navigate = useCallback((next: string) => {
     window.history.pushState({}, "", next);
     setPath(normalizePath(next));
     window.scrollTo({ top: 0, behavior: "instant" });
   }, []);
 
+  const persistFollow = useCallback(
+    async (
+      fixtureId: string,
+      mode: "demo" | "live",
+      eventPreferences: Record<string, boolean> = {
+        fullTime: true,
+        goals: true,
+        redCards: true,
+      },
+    ) => {
+      await fanApi.followFixture(fixtureId, mode, eventPreferences);
+      setBootstrap((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          follows: [
+            ...current.follows.filter(
+              (follow) =>
+                follow.fixtureId !== fixtureId || follow.mode !== mode,
+            ),
+            { eventPreferences, fixtureId, mode },
+          ],
+        };
+      });
+    },
+    [fanApi],
+  );
+
   const pickTeam = (team: TeamCode) => {
-    setFavoriteTeam(team);
-    window.localStorage.setItem(FAVORITE_KEY, team);
-    setOnboardingStage("moment");
+    setDraftTeam(team);
+    setProfileError(null);
+    setOnboardingStage("handle");
   };
+
+  const checkHandle = async (handle: string) => {
+    setProfileBusy(true);
+    setProfileError(null);
+    try {
+      const result = await fanApi.checkHandle(handle);
+      if (!result.available) {
+        setProfileError("That handle is already supporting someone else.");
+        return;
+      }
+      setDraftHandle(result.handle);
+      setOnboardingStage("avatar");
+    } catch {
+      setProfileError("We could not reserve that handle. Try another one.");
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  const saveFanCard = async (draft: FanCardDraft) => {
+    setProfileBusy(true);
+    setProfileError(null);
+    try {
+      const updated = await fanApi.updateProfile({
+        avatarVariant: draft.avatarVariant,
+        favoriteTeam: draft.favoriteTeam,
+        handle: draft.handle,
+        preferences: {
+          alertsFullTime: true,
+          alertsGoals: true,
+          alertsRedCards: true,
+          captions: true,
+          commentaryLanguage: "en",
+          commentaryVoice: "stadium",
+          ...(fan?.preferences ?? {}),
+        },
+        profile: fan?.profile ?? {},
+      });
+      setBootstrap((current) => ({
+        fan: updated,
+        follows: current?.follows ?? [],
+        memories: current?.memories ?? [],
+        rooms: current?.rooms ?? [],
+      }));
+      setDraftTeam(updated.favoriteTeam);
+      setDraftHandle(updated.handle ?? draft.handle);
+      return true;
+    } catch {
+      setProfileError(
+        "That fan card could not be saved. Check the handle and try again.",
+      );
+      return false;
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  const chooseAvatar = async (avatarVariant: string) => {
+    if (!draftTeam || !draftHandle) return;
+    const saved = await saveFanCard({
+      avatarVariant,
+      favoriteTeam: draftTeam,
+      handle: draftHandle,
+    });
+    if (saved) setOnboardingStage("moment");
+  };
+
+  const completeMinimalProfile = async (draft: FanCardDraft) => {
+    const saved = await saveFanCard(draft);
+    if (saved) setOnboardingStage("done");
+  };
+
+  const finishIntro = useCallback(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(INTRO_SEEN_KEY, "1");
+    }
+    setOnboardingStage("pick");
+  }, []);
 
   useEffect(() => {
     if (onboardingStage !== "moment") return;
@@ -236,7 +450,35 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
     return () => window.clearTimeout(timeout);
   }, [onboardingStage]);
 
-  if (!isDemo && (!favoriteTeam || onboardingStage === "pick")) {
+  if (onboardingStage === "booting" || bootstrapStatus === "loading") {
+    return (
+      <main className="onboarding-shell" id="main-content">
+        <Masthead end="OPENING YOUR MATCH DAY" />
+        <div className="match-loading">
+          <span />
+          <span />
+          <p>Preparing your private supporter card…</p>
+        </div>
+      </main>
+    );
+  }
+  if (bootstrapStatus === "error") {
+    return (
+      <main className="onboarding-shell" id="main-content">
+        <Masthead end="PROFILE CONNECTION" />
+        <DataError
+          action="Try again"
+          detail="Your matches are safe. MatchSense just could not open your supporter profile."
+          onRetry={() => void loadBootstrap()}
+          title="The fan entrance is offline."
+        />
+      </main>
+    );
+  }
+  if (!isDemo && onboardingStage === "intro") {
+    return <FirstLaunchIntro onComplete={finishIntro} />;
+  }
+  if (!isDemo && onboardingStage === "pick") {
     return (
       <TeamPick
         catalog={catalogState.catalog}
@@ -247,6 +489,54 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
     );
   }
   const supported = favoriteTeam ?? "ARG";
+  const startExperience = async () => {
+    if (experienceState === "starting") return;
+    setExperienceState("starting");
+    const opponent =
+      catalogState.catalog.teams.find((team) => team.code !== supported)
+        ?.code ?? (supported === "FRA" ? "ARG" : "FRA");
+    try {
+      const run = await fanApi.startExperience({
+        awayTeam: opponent,
+        homeTeam: supported,
+        idempotencyKey: `experience:${globalThis.crypto.randomUUID()}`,
+      });
+      await persistFollow(run.fixtureId, "demo", {
+        fullTime: true,
+        goals: true,
+        halfTime: true,
+        penalties: true,
+        redCards: true,
+        var: true,
+        yellowCards: true,
+      });
+      setExperienceState("idle");
+      navigate(`/matches/${encodeURIComponent(run.fixtureId)}/live`);
+    } catch {
+      setExperienceState("error");
+    }
+  };
+  if (!isDemo && onboardingStage === "handle") {
+    return (
+      <HandleStep
+        busy={profileBusy}
+        error={profileError}
+        onContinue={(handle) => void checkHandle(handle)}
+        team={teamFor(supported, catalogState.catalog)}
+      />
+    );
+  }
+  if (!isDemo && onboardingStage === "avatar") {
+    return (
+      <AvatarStep
+        busy={profileBusy}
+        error={profileError}
+        handle={draftHandle}
+        onChoose={(variant) => void chooseAvatar(variant)}
+        team={teamFor(supported, catalogState.catalog)}
+      />
+    );
+  }
   if (!isDemo && onboardingStage === "moment") {
     return (
       <SampleMoment
@@ -259,24 +549,43 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
     return (
       <BuzzSetup
         installPrompt={installPrompt}
+        onFollow={persistFollow}
         team={teamFor(supported, catalogState.catalog)}
         onComplete={() => setOnboardingStage("done")}
       />
     );
   }
 
+  const withProfileCompletion = (surface: ReactNode) => (
+    <>
+      {surface}
+      {onboardingStage === "minimal" ? (
+        <ProfileCompletionOverlay
+          busy={profileBusy}
+          catalog={catalogState.catalog}
+          error={profileError}
+          onComplete={(draft) => void completeMinimalProfile(draft)}
+        />
+      ) : null}
+    </>
+  );
+
   if (isDemo) {
-    return (
-      <DemoCompanion
+    return withProfileCompletion(
+      <JudgedDemoLauncher
         catalog={catalogState.catalog}
+        favoriteTeam={supported}
+        installPrompt={installPrompt}
+        launchState={experienceState}
         onBack={() => navigate("/")}
-      />
+        onLaunch={() => void startExperience()}
+      />,
     );
   }
 
   const momentRoute = path.match(/^\/matches\/([^/]+)\/moments\/([^/]+)$/u);
   if (momentRoute?.[1] && momentRoute[2]) {
-    return (
+    return withProfileCompletion(
       <LiveCompanion
         catalog={catalogState.catalog}
         favoriteTeam={supported}
@@ -286,93 +595,138 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
         onMomentClose={() =>
           navigate(`/matches/${decodeURIComponent(momentRoute[1]!)}/live`)
         }
-      />
+      />,
+    );
+  }
+  if (path === "/you") {
+    const profileFan = fan ?? previewFan(supported)!;
+    return withProfileCompletion(
+      <ProfileSurface
+        api={fanApi}
+        catalog={catalogState.catalog}
+        fan={profileFan}
+        onBack={() => navigate("/")}
+        onDeleted={() => {
+          setBootstrap(null);
+          setDraftTeam(null);
+          setDraftHandle("");
+          setOnboardingStage("intro");
+          navigate("/");
+        }}
+        onSaved={(updated) =>
+          setBootstrap((current) => ({
+            fan: updated,
+            follows: current?.follows ?? [],
+            memories: current?.memories ?? [],
+            rooms: current?.rooms ?? [],
+          }))
+        }
+      />,
     );
   }
   if (path === "/rooms" || path === "/rooms/new") {
-    return (
+    return withProfileCompletion(
       <RoomsSurface
         catalog={catalogState.catalog}
         fanId={fanId}
         favoriteTeam={supported}
         navigate={navigate}
         route={{ mode: "create" }}
-      />
+      />,
     );
   }
   const roomInvite = path.match(/^\/rooms\/join\/([^/]+)$/u);
   if (roomInvite?.[1]) {
-    return (
+    return withProfileCompletion(
       <RoomsSurface
         catalog={catalogState.catalog}
         fanId={fanId}
         favoriteTeam={supported}
         navigate={navigate}
         route={{ inviteCode: roomInvite[1], mode: "invite" }}
-      />
+      />,
     );
   }
   const roomRoute = path.match(/^\/rooms\/([^/]+)$/u);
   if (roomRoute?.[1]) {
-    return (
+    return withProfileCompletion(
       <RoomsSurface
         catalog={catalogState.catalog}
         fanId={fanId}
         favoriteTeam={supported}
         navigate={navigate}
         route={{ mode: "room", roomId: roomRoute[1] }}
-      />
+      />,
     );
   }
   if (path === "/history") {
-    return (
+    return withProfileCompletion(
       <HistorySurface
         catalog={catalogState.catalog}
         favoriteTeam={supported}
         onBack={() => navigate("/")}
-        onOpen={(fixtureId) => navigate(`/matches/${fixtureId}/memory`)}
-      />
+        onOpen={(fixtureId) => navigate(memoryReplayPath(fixtureId))}
+      />,
+    );
+  }
+  const memoryReplayRoute = path.match(/^\/matches\/([^/]+)\/memory\/replay$/u);
+  if (memoryReplayRoute?.[1]) {
+    const fixtureId = decodeURIComponent(memoryReplayRoute[1]);
+    return withProfileCompletion(
+      <MatchMemoryReplayScreen
+        catalog={catalogState.catalog}
+        favoriteTeam={supported}
+        fixtureId={fixtureId}
+        onBack={() => navigate("/history")}
+        onOpenMemory={() =>
+          navigate(`/matches/${encodeURIComponent(fixtureId)}/memory`)
+        }
+      />,
     );
   }
   const memoryRoute = path.match(/^\/matches\/([^/]+)\/memory$/u);
   if (memoryRoute?.[1]) {
-    return (
+    const fixtureId = decodeURIComponent(memoryRoute[1]);
+    return withProfileCompletion(
       <MatchMemoryScreen
         catalog={catalogState.catalog}
         favoriteTeam={supported}
-        fixtureId={decodeURIComponent(memoryRoute[1])}
-        onBack={() => navigate(`/matches/${memoryRoute[1]}/live`)}
-        onReplay={() => navigate(`/matches/${memoryRoute[1]}/live`)}
-      />
+        fixtureId={fixtureId}
+        onBack={() =>
+          navigate(`/matches/${encodeURIComponent(fixtureId)}/live`)
+        }
+        onReplay={() => navigate(memoryReplayPath(fixtureId))}
+      />,
     );
   }
   const liveRoute = path.match(/^\/matches\/([^/]+)(?:\/live)?$/u);
   if (liveRoute?.[1]) {
     const fixtureId = decodeURIComponent(liveRoute[1]);
-    return (
+    return withProfileCompletion(
       <LiveCompanion
         catalog={catalogState.catalog}
         favoriteTeam={supported}
         fixtureId={fixtureId}
         onBack={() => navigate("/")}
         onOpenMemory={() => navigate(`/matches/${fixtureId}/memory`)}
-      />
+      />,
     );
   }
   return (
     <Today
       catalog={catalogState.catalog}
       favoriteTeam={supported}
+      follows={bootstrap?.follows ?? []}
       installPrompt={installPrompt}
-      onChangeTeam={() => {
-        setOnboardingStage("pick");
-        setFavoriteTeam(null);
-        window.localStorage.removeItem(FAVORITE_KEY);
-      }}
+      onChangeTeam={() => navigate("/you")}
       onCreateRoom={() => navigate("/rooms/new")}
       onDemo={() => navigate("/demo")}
+      onExperience={() => void startExperience()}
+      experienceState={experienceState}
       onHistory={() => navigate("/history")}
       onOpen={(fixtureId) => navigate(`/matches/${fixtureId}/live`)}
+      onFollow={persistFollow}
+      onProfile={() => navigate("/you")}
     />
   );
 }
@@ -543,10 +897,16 @@ export function SampleMoment({
 
 function BuzzSetup({
   installPrompt,
+  onFollow,
   team,
   onComplete,
 }: {
   installPrompt: BeforeInstallPromptEvent | null;
+  onFollow(
+    fixtureId: string,
+    mode: "demo" | "live",
+    preferences?: Record<string, boolean>,
+  ): Promise<void>;
   team: ProductTeam;
   onComplete(): void;
 }) {
@@ -568,16 +928,15 @@ function BuzzSetup({
           return;
         }
       }
-      const fixture = (await fetchFixtures())[0];
+      const available = await fetchFixtures();
+      const fixture =
+        available.find(
+          (candidate) =>
+            (candidate.homeTeam === team.code ||
+              candidate.awayTeam === team.code) &&
+            fixtureState(candidate) !== "final",
+        ) ?? available[0];
       if (!fixture) throw new Error("No fixture available");
-      const sample = {
-        body: `${team.name} lead 1–0. Tap for the full Moment.`,
-        fixtureId: fixture.fixtureId,
-        momentId: `${fixture.fixtureId}:welcome`,
-        occurredAt: new Date().toISOString(),
-        revision: 1,
-        title: `⚽ GOAL — ${team.name} lead 1–0`,
-      };
       const response = await fetch("/api/v1/push/config");
       if (!response.ok) throw new Error("Push unavailable");
       const config = (await response.json()) as {
@@ -585,14 +944,20 @@ function BuzzSetup({
       };
       if (typeof config.applicationServerKey !== "string")
         throw new Error("Push invalid");
-      const registration = await enableMomentPush({
+      await enableMomentPush({
         applicationServerKey: config.applicationServerKey,
       });
-      try {
-        await triggerTestMomentPush(registration.id, sample);
-      } catch {
-        await showLocalMomentNotification(sample);
-      }
+      await onFollow(
+        fixture.fixtureId,
+        fixture.provenance === "synthetic_txline_shaped" ? "demo" : "live",
+      );
+      const serviceWorker = await navigator.serviceWorker.ready;
+      await serviceWorker.showNotification("MatchSense alerts are ready", {
+        body: `You will get factual ${team.name} match updates here.`,
+        data: { url: "/" },
+        icon: "/icons/matchsense-icon.svg",
+        tag: "matchsense:alerts-ready",
+      });
       setState("done");
       window.setTimeout(onComplete, 800);
     } catch {
@@ -675,29 +1040,45 @@ function LockscreenPreview({ team }: { team: ProductTeam }) {
 
 function Today({
   catalog,
+  experienceState,
   favoriteTeam,
+  follows,
   installPrompt,
   onChangeTeam,
   onCreateRoom,
   onDemo,
+  onExperience,
   onHistory,
   onOpen,
+  onFollow,
+  onProfile,
 }: {
   catalog: ProductCatalog;
+  experienceState: "idle" | "starting" | "error";
   favoriteTeam: TeamCode;
+  follows: FanBootstrap["follows"];
   installPrompt: BeforeInstallPromptEvent | null;
   onChangeTeam(): void;
   onCreateRoom(): void;
   onDemo(): void;
+  onExperience(): void;
   onHistory(): void;
   onOpen(fixtureId: string): void;
+  onFollow(
+    fixtureId: string,
+    mode: "demo" | "live",
+    preferences?: Record<string, boolean>,
+  ): Promise<void>;
+  onProfile(): void;
 }) {
   const [fixtures, setFixtures] = useState<LiveSnapshot[]>([]);
   const [status, setStatus] = useState<"loading" | "ready" | "error">(
     "loading",
   );
   const [reload, setReload] = useState(0);
-  const [alertOpen, setAlertOpen] = useState(false);
+  const [alertTarget, setAlertTarget] = useState<LiveSnapshot | null | false>(
+    false,
+  );
   useEffect(() => {
     const controller = new AbortController();
     setStatus("loading");
@@ -725,15 +1106,33 @@ function Today({
     return Date.parse(a.kickoffAt ?? "") - Date.parse(b.kickoffAt ?? "");
   });
   const favorite = teamFor(favoriteTeam, catalog);
+  const followedFixtureIds = new Set(follows.map(({ fixtureId }) => fixtureId));
+  const alertFixtures = alertTarget
+    ? [alertTarget]
+    : fixtures.filter(
+        (fixture) =>
+          (fixture.homeTeam === favoriteTeam ||
+            fixture.awayTeam === favoriteTeam) &&
+          fixtureState(fixture) !== "final",
+      );
+  const persistAlertFollows = async () => {
+    await Promise.all(
+      alertFixtures.map((fixture) =>
+        onFollow(
+          fixture.fixtureId,
+          fixture.provenance === "synthetic_txline_shaped" ? "demo" : "live",
+        ),
+      ),
+    );
+  };
   return (
     <main className="app-canvas" id="main-content">
       <Masthead end="LIVE PRODUCT · TXLINE" />
       <AppNav
         active="today"
-        onDemo={onDemo}
-        onHistory={onHistory}
         onRooms={onCreateRoom}
         onToday={() => undefined}
+        onYou={onProfile}
       />
       <section className="today-hero">
         <div>
@@ -742,7 +1141,7 @@ function Today({
           <div className="today-hero-actions">
             <button
               className="primary-control"
-              onClick={() => setAlertOpen(true)}
+              onClick={() => setAlertTarget(null)}
               type="button"
             >
               Turn on match alerts
@@ -761,7 +1160,9 @@ function Today({
           style={{ "--team": favorite.primary } as CSSProperties}
         >
           <span>Following</span>
-          <b>{favorite.code}</b>
+          <b>
+            <TeamFlag size="compact" team={favorite} /> {favorite.code}
+          </b>
           <small>{favorite.name} · adaptive match atmosphere</small>
         </div>
       </section>
@@ -792,7 +1193,9 @@ function Today({
                 catalog={catalog}
                 favoriteTeam={favoriteTeam}
                 fixture={fixture}
+                followed={followedFixtureIds.has(fixture.fixtureId)}
                 key={fixture.fixtureId}
+                onAlert={() => setAlertTarget(fixture)}
                 onOpen={() => onOpen(fixture.fixtureId)}
               />
             ))}
@@ -801,6 +1204,30 @@ function Today({
       </section>
 
       <section className="experience-grid">
+        <article className="experience-card experience-match-card">
+          <p className="kicker">Experience Match · always available</p>
+          <h2>Put your team into a complete five-minute live match.</h2>
+          <p>
+            Real companion, lock-screen goal alerts, canonical VAR, continuous
+            commentary, Rooms and Memory—all on the same server-owned event
+            engine as a live fixture.
+          </p>
+          <button
+            disabled={experienceState === "starting"}
+            onClick={onExperience}
+            type="button"
+          >
+            {experienceState === "starting"
+              ? "Preparing your match…"
+              : "Start Experience Match"}{" "}
+            <ArrowIcon />
+          </button>
+          {experienceState === "error" ? (
+            <small role="status">
+              The Experience match could not start. Tap again to retry.
+            </small>
+          ) : null}
+        </article>
         <article className="experience-card listening-card">
           <p className="kicker">Listening Mode</p>
           <h2>A live match call that waits in your pocket.</h2>
@@ -847,10 +1274,12 @@ function Today({
         </button>
       </section>
       <Provenance label={catalog.sourceLabel ?? "TXLINE TOURNAMENT DATA"} />
-      {alertOpen ? (
+      {alertTarget !== false ? (
         <AlertSheet
+          fixtureCount={alertFixtures.length}
           installPrompt={installPrompt}
-          onClose={() => setAlertOpen(false)}
+          onClose={() => setAlertTarget(false)}
+          onEnabled={persistAlertFollows}
           team={favorite}
         />
       ) : null}
@@ -862,11 +1291,15 @@ function FixtureCard({
   catalog,
   favoriteTeam,
   fixture,
+  followed,
+  onAlert,
   onOpen,
 }: {
   catalog: ProductCatalog;
   favoriteTeam: TeamCode;
   fixture: LiveSnapshot;
+  followed: boolean;
+  onAlert(): void;
   onOpen(): void;
 }) {
   const state = fixtureState(fixture);
@@ -913,10 +1346,22 @@ function FixtureCard({
             ? `${fixture.minute} · ${fixture.sourceLabel}`
             : (fixture.venue ?? fixture.sourceLabel)}
         </span>
-        <button onClick={onOpen} type="button">
-          {state === "live" ? "Join live" : "Open companion"}
-          <ArrowIcon />
-        </button>
+        <div className="fixture-card-actions">
+          {state !== "final" ? (
+            <button
+              className="fixture-alert-action"
+              disabled={followed}
+              onClick={onAlert}
+              type="button"
+            >
+              {followed ? "Alerts on" : "Alert me"}
+            </button>
+          ) : null}
+          <button onClick={onOpen} type="button">
+            {state === "live" ? "Join live" : "Open companion"}
+            <ArrowIcon />
+          </button>
+        </div>
       </div>
     </article>
   );
@@ -994,12 +1439,16 @@ function DataError({
 }
 
 function AlertSheet({
+  fixtureCount,
   installPrompt,
   onClose,
+  onEnabled,
   team,
 }: {
+  fixtureCount: number;
   installPrompt: BeforeInstallPromptEvent | null;
   onClose(): void;
+  onEnabled(): Promise<void>;
   team: ProductTeam;
 }) {
   const [state, setState] = useState<"idle" | "working" | "done" | "error">(
@@ -1025,6 +1474,7 @@ function AlertSheet({
       await enableMomentPush({
         applicationServerKey: config.applicationServerKey,
       });
+      await onEnabled();
       setState("done");
     } catch {
       setState("error");
@@ -1049,6 +1499,11 @@ function AlertSheet({
           score, minute, and event; full animation and sound open inside the
           PWA.
         </p>
+        <p className="alert-target-copy">
+          {fixtureCount > 0
+            ? `${fixtureCount} ${fixtureCount === 1 ? "match" : "matches"} will be followed on this device.`
+            : `Alerts are ready; follow a ${team.name} fixture when it appears.`}
+        </p>
         <LockscreenPreview team={team} />
         <button
           className="primary-control"
@@ -1070,6 +1525,181 @@ function AlertSheet({
         ) : null}
       </section>
     </div>
+  );
+}
+
+function JudgedDemoLauncher({
+  catalog,
+  favoriteTeam,
+  installPrompt,
+  launchState,
+  onBack,
+  onLaunch,
+}: {
+  catalog: ProductCatalog;
+  favoriteTeam: TeamCode;
+  installPrompt: BeforeInstallPromptEvent | null;
+  launchState: "idle" | "starting" | "error";
+  onBack(): void;
+  onLaunch(): void;
+}) {
+  const [alertState, setAlertState] = useState<
+    "idle" | "working" | "done" | "error"
+  >("idle");
+  const supported = teamFor(favoriteTeam, catalog);
+  const opponentCode =
+    catalog.teams.find((team) => team.code !== favoriteTeam)?.code ??
+    (favoriteTeam === "FRA" ? "ARG" : "FRA");
+  const opponent = teamFor(opponentCode, catalog);
+
+  const enableAndTestAlerts = async () => {
+    const ios = /iPad|iPhone|iPod/u.test(navigator.userAgent);
+    if (ios && !standalone()) {
+      setAlertState("error");
+      return;
+    }
+    setAlertState("working");
+    try {
+      if (installPrompt && !standalone()) {
+        await installPrompt.prompt();
+        if ((await installPrompt.userChoice).outcome === "dismissed") {
+          setAlertState("idle");
+          return;
+        }
+      }
+      const configResponse = await fetch("/api/v1/push/config");
+      if (!configResponse.ok) throw new Error("Push unavailable");
+      const config = (await configResponse.json()) as {
+        applicationServerKey?: unknown;
+      };
+      if (typeof config.applicationServerKey !== "string") {
+        throw new Error("Push configuration is invalid");
+      }
+      await enableMomentPush({
+        applicationServerKey: config.applicationServerKey,
+      });
+      setAlertState("done");
+    } catch {
+      setAlertState("error");
+    }
+  };
+
+  return (
+    <main className="app-canvas demo-launcher" id="main-content">
+      <Masthead demo end="JUDGED DEMO · REAL PRODUCT FLOW" />
+      <button className="back-button" onClick={onBack} type="button">
+        <BackIcon /> Exit judged demo
+      </button>
+      <div className="demo-disclosure" role="status">
+        <b>SERVER-OWNED EXPERIENCE MATCH</b>
+        <span>
+          Synthetic match facts stay clearly labelled, while notifications,
+          Moments, commentary, Rooms and Memory use the production paths.
+        </span>
+      </div>
+
+      <section className="today-hero demo-launcher-hero">
+        <div>
+          <p className="kicker">Your team · the complete five-minute journey</p>
+          <h1>
+            {supported.name} face {opponent.name}. Every product surface is
+            live.
+          </h1>
+          <p>
+            Arm real system alerts, launch the same Experience Match available
+            from Today, then leave this PWA open, background it, or lock the
+            device while the match runs itself.
+          </p>
+        </div>
+        <div
+          className="today-ticket-stamp"
+          style={{ "--team": supported.primary } as CSSProperties}
+        >
+          <span>Your perspective</span>
+          <b>
+            <TeamFlag size="compact" team={supported} /> {supported.code}
+          </b>
+          <small>
+            versus {opponent.code} · synthetic facts · production delivery
+          </small>
+        </div>
+      </section>
+
+      <section className="experience-grid demo-launcher-grid">
+        <article className="experience-card">
+          <p className="kicker">1 · Lock-screen proof</p>
+          <h2>Use the browser&apos;s real permission and Web Push path.</h2>
+          <p>
+            MatchSense asks the operating system for permission. The confirmed
+            goal inside this Experience is the server Web Push test, so tapping
+            it opens a Moment that actually exists. No fake notification card is
+            drawn here.
+          </p>
+          <button
+            disabled={alertState === "working"}
+            onClick={() => void enableAndTestAlerts()}
+            type="button"
+          >
+            {alertState === "working"
+              ? "Opening the real alert channel…"
+              : alertState === "done"
+                ? "Real alert channel armed"
+                : "Enable & test real alerts"}
+          </button>
+          {alertState === "error" ? (
+            <p className="inline-error" role="status">
+              Install the PWA first on iPhone and allow notifications. You can
+              still run the match and test Listening Mode.
+            </p>
+          ) : null}
+        </article>
+
+        <article className="experience-card experience-match-card">
+          <p className="kicker">2 · Start one canonical match</p>
+          <h2>Launch {supported.name}&apos;s complete Experience Match.</h2>
+          <p>
+            This creates the same durable five-minute fixture used by Today,
+            exact Moment deep-links, commentary, Rooms and Match Memory.
+          </p>
+          <button
+            disabled={launchState === "starting"}
+            onClick={onLaunch}
+            type="button"
+          >
+            {launchState === "starting"
+              ? "Preparing your match…"
+              : "Start the five-minute Experience Match"}{" "}
+            <ArrowIcon />
+          </button>
+          {launchState === "error" ? (
+            <p className="inline-error" role="status">
+              The Experience Match could not start. Check the server connection
+              and try again.
+            </p>
+          ) : null}
+        </article>
+
+        <article className="experience-card listening-card">
+          <p className="kicker">3 · Continuous Listening Mode</p>
+          <h2>Tap Start listening on the match screen.</h2>
+          <p>
+            The persistent MP3 channel and native media controls are the real
+            production listener. Keep it playing when the PWA is backgrounded or
+            the phone is locked.
+          </p>
+        </article>
+
+        <article className="experience-card memory-card">
+          <p className="kicker">4 · Tap back into truth</p>
+          <h2>Open a real alert into its exact canonical Moment.</h2>
+          <p>
+            The score renders first, then motion and commentary. Full time
+            produces the same Match Memory and Room result as the live product.
+          </p>
+        </article>
+      </section>
+      <Provenance label="JUDGED DEMO · SYNTHETIC FACTS · PRODUCTION PIPELINE" />
+    </main>
   );
 }
 
@@ -1484,16 +2114,36 @@ function LiveCompanion({
     let active = true;
     const controller = new AbortController();
     setLoadState("loading");
-    fetchFixture(fixtureId, controller.signal)
-      .then((snapshot) => {
+    const loadInitialTruth = async () => {
+      if (!initialMomentIdentity) {
+        return {
+          moment: null,
+          snapshot: await fetchFixture(fixtureId, controller.signal),
+          superseded: false,
+        };
+      }
+      const resolution = await fetchMomentResolution(
+        fixtureId,
+        initialMomentIdentity,
+        controller.signal,
+      );
+      return {
+        moment: resolution.superseded
+          ? (resolution.latest ?? resolution.requested)
+          : (resolution.requested ?? resolution.latest),
+        snapshot: resolution.snapshot,
+        superseded: resolution.superseded,
+      };
+    };
+    loadInitialTruth()
+      .then(({ moment, snapshot, superseded }) => {
         if (!active) return;
         dispatch({ snapshot, type: "snapshot" });
         setLoadState("ready");
-        if (initialMomentIdentity && snapshot.lastEvent) {
-          const moment = snapshot.lastEvent;
+        if (initialMomentIdentity && moment) {
           dispatch({
             payload: {
-              event: "moment.created",
+              event: superseded ? "moment.revised" : "moment.created",
               id: moment.identity,
               moment,
               snapshot,
@@ -1839,7 +2489,7 @@ function TimelineRow({
   );
 }
 
-function MomentOverlay({
+export function MomentOverlay({
   catalog,
   commentary,
   favoriteTeam,
@@ -1855,7 +2505,7 @@ function MomentOverlay({
   snapshot: LiveSnapshot;
 }) {
   const team = teamFor(moment.eventTeam, catalog);
-  if (moment.kind === "goal") {
+  if (moment.celebratesGoal) {
     return (
       <ConfirmedGoalMoment
         commentary={
@@ -1954,6 +2604,132 @@ function MatchLoading({ demo, onBack }: { demo: boolean; onBack(): void }) {
   );
 }
 
+function useLoadedMatchMemory(fixtureId: string) {
+  const [view, setView] = useState<MatchMemoryView | null>(null);
+  const [source, setSource] = useState<MemoryDataSource>("loading");
+  const [error, setError] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setError(false);
+    setView(null);
+    setSource("loading");
+    loadOneMemory({
+      fetchRemote: (id) => fetchMatchMemory(id, controller.signal),
+      fixtureId,
+      readLocal: (id) => {
+        const stored = readStoredMatch(id);
+        return stored ? localMemoryView(stored) : null;
+      },
+      toView: matchMemoryView,
+    })
+      .then((result) => {
+        setView(result.view);
+        setSource(result.source);
+      })
+      .catch((reason: unknown) => {
+        if ((reason as { name?: string }).name === "AbortError") return;
+        setError(true);
+      });
+    return () => controller.abort();
+  }, [fixtureId]);
+
+  return { error, source, view };
+}
+
+function MatchMemoryReplayScreen({
+  catalog,
+  favoriteTeam,
+  fixtureId,
+  onBack,
+  onOpenMemory,
+}: {
+  catalog: ProductCatalog;
+  favoriteTeam: TeamCode;
+  fixtureId: string;
+  onBack(): void;
+  onOpenMemory(): void;
+}) {
+  const { error, source, view } = useLoadedMatchMemory(fixtureId);
+
+  if (!view) {
+    return (
+      <main className="memory-replay-shell">
+        <Masthead end="MATCH REPLAY" />
+        {error ? (
+          <DataError
+            action="Back to history"
+            detail="No persisted canonical timeline is available for this match."
+            onRetry={onBack}
+            title="This replay is not ready."
+          />
+        ) : (
+          <>
+            <MemorySourceNotice source={source} />
+            <p className="memory-loading">
+              Loading the canonical Moment timeline…
+            </p>
+          </>
+        )}
+      </main>
+    );
+  }
+
+  const { moments, snapshot } = view;
+  const home = teamFor(snapshot.homeTeam, catalog, snapshot.homeTeamName);
+  const away = teamFor(snapshot.awayTeam, catalog, snapshot.awayTeamName);
+  const supported = favoriteTeam === away.code ? away : home;
+
+  if (fixtureState(snapshot) !== "final") {
+    return (
+      <main className="memory-replay-shell">
+        <Masthead end="MATCH REPLAY" />
+        <MemorySourceNotice source={source} />
+        <section className="memory-locked">
+          <p className="kicker">Canonical replay</p>
+          <h1>This timeline is still being written.</h1>
+          <p>
+            Replay unlocks only after the source finalises the result. Until
+            then, follow the live companion instead.
+          </p>
+          <button className="primary-control" onClick={onBack} type="button">
+            Back to history
+          </button>
+        </section>
+      </main>
+    );
+  }
+
+  const replayMoments = [...moments]
+    .sort((left, right) => left.revision - right.revision)
+    .map((moment) => ({
+      ...(moment.detail ? { detail: moment.detail } : {}),
+      identity: moment.identity,
+      kind: catchupKind(moment.kind),
+      minute: moment.minute,
+      score: moment.score,
+      team: momentTeam(teamFor(moment.eventTeam, catalog)),
+      title: eventLabel(moment),
+    }));
+
+  return (
+    <main className="memory-replay-shell" id="main-content">
+      <Masthead end="MATCH REPLAY" />
+      <MemorySourceNotice source={source} />
+      <MemoryReplayPlayer
+        finalScore={scoreFor(snapshot, catalog)}
+        key={fixtureId}
+        moments={replayMoments}
+        onBack={onBack}
+        onOpenMemory={onOpenMemory}
+        sourceLabel={snapshot.sourceLabel ?? "CANONICAL MATCH DATA"}
+        summary={view.summary}
+        supportedTeam={momentTeam(supported)}
+      />
+    </main>
+  );
+}
+
 function MatchMemoryScreen({
   catalog,
   favoriteTeam,
@@ -1967,22 +2743,9 @@ function MatchMemoryScreen({
   onBack(): void;
   onReplay(): void;
 }) {
-  const [snapshot, setSnapshot] = useState<LiveSnapshot | null>(
-    () => readStoredMatch(fixtureId)?.snapshot ?? null,
-  );
-  const [moments, setMoments] = useState<LiveMoment[]>(
-    () => readStoredMatch(fixtureId)?.moments ?? [],
-  );
-  const [error, setError] = useState(false);
+  const { error, source, view } = useLoadedMatchMemory(fixtureId);
   const [shared, setShared] = useState(false);
-  useEffect(() => {
-    const controller = new AbortController();
-    fetchFixture(fixtureId, controller.signal)
-      .then((next) => setSnapshot(next))
-      .catch(() => setError(true));
-    return () => controller.abort();
-  }, [fixtureId]);
-  if (!snapshot) {
+  if (!view) {
     return (
       <main className="memory-shell">
         <Masthead end="MATCH MEMORY" />
@@ -1994,11 +2757,15 @@ function MatchMemoryScreen({
             title="This memory is not ready."
           />
         ) : (
-          <p className="memory-loading">Gathering how the match felt…</p>
+          <>
+            <MemorySourceNotice source={source} />
+            <p className="memory-loading">Gathering how the match felt…</p>
+          </>
         )}
       </main>
     );
   }
+  const { moments, snapshot } = view;
   const home = teamFor(snapshot.homeTeam, catalog, snapshot.homeTeamName);
   const away = teamFor(snapshot.awayTeam, catalog, snapshot.awayTeamName);
   const supported = favoriteTeam === away.code ? away : home;
@@ -2007,6 +2774,7 @@ function MatchMemoryScreen({
     return (
       <main className="memory-shell">
         <Masthead end={snapshot.sourceLabel ?? "MATCH MEMORY"} />
+        <MemorySourceNotice source={source} />
         <section className="memory-locked">
           <p className="kicker">Match Memory</p>
           <h1>This memory is still being written.</h1>
@@ -2039,6 +2807,7 @@ function MatchMemoryScreen({
   };
   return (
     <main className="memory-shell">
+      <MemorySourceNotice source={source} />
       <MatchMemory
         moments={moments.map((moment) => ({
           ...(moment.detail ? { detail: moment.detail } : {}),
@@ -2051,16 +2820,12 @@ function MatchMemoryScreen({
         onReplay={onReplay}
         onShare={() => void share()}
         score={scoreFor(snapshot, catalog)}
-        stats={[
-          {
-            away: snapshot.score.away,
-            home: snapshot.score.home,
-            label: "Goals",
-          },
-          { away: "—", home: "—", label: "Cards" },
-          { away: "—", home: "—", label: "Corners" },
-        ]}
-        summary={`${supported.name}'s night: ${moments.length || "every"} key Moment${moments.length === 1 ? "" : "s"}, one final score, kept exactly as it unfolded.`}
+        stats={view.stats}
+        summary={
+          source === "server"
+            ? view.summary
+            : `${supported.name}'s night: ${moments.length || "every"} locally saved Moment${moments.length === 1 ? "" : "s"}.`
+        }
         supportedTeam={momentTeam(supported)}
         truth={{
           eventId: snapshot.lastEvent?.identity ?? `${fixtureId}:final`,
@@ -2082,6 +2847,24 @@ interface StoredMatch {
   snapshot: LiveSnapshot;
   moments: LiveMoment[];
   savedAt: string;
+}
+
+function localMemoryView(stored: StoredMatch): MatchMemoryView {
+  return {
+    moments: stored.moments,
+    savedAt: stored.savedAt,
+    snapshot: stored.snapshot,
+    stats: [
+      {
+        away: stored.snapshot.score.away,
+        home: stored.snapshot.score.home,
+        label: "Goals",
+      },
+      { away: "—", home: "—", label: "Cards" },
+      { away: "—", home: "—", label: "Corners" },
+    ],
+    summary: "This device's last saved copy of the match.",
+  };
 }
 
 function readStoredMatches(): StoredMatch[] {
@@ -2140,28 +2923,25 @@ function HistorySurface({
   onBack(): void;
   onOpen(fixtureId: string): void;
 }) {
-  const [entries, setEntries] = useState<StoredMatch[]>(readStoredMatches);
+  const [entries, setEntries] = useState<MatchMemoryView[]>([]);
+  const [source, setSource] = useState<MemoryDataSource>("loading");
   useEffect(() => {
-    fetchFixtures()
-      .then((fixtures) => {
-        const completed = fixtures.filter(
-          (fixture) => fixtureState(fixture) === "final",
-        );
-        setEntries((current) => {
-          const ids = new Set(current.map((entry) => entry.snapshot.fixtureId));
-          return [
-            ...current,
-            ...completed
-              .filter((fixture) => !ids.has(fixture.fixtureId))
-              .map((snapshot) => ({
-                moments: [],
-                savedAt: snapshot.updatedAt ?? new Date().toISOString(),
-                snapshot,
-              })),
-          ];
-        });
+    const controller = new AbortController();
+    loadMemoryHistory({
+      fetchRemote: () => fetchMatchMemories(controller.signal),
+      readLocal: () => readStoredMatches().map(localMemoryView),
+      toView: matchMemoryView,
+    })
+      .then((result) => {
+        setEntries(result.entries);
+        setSource(result.source);
       })
-      .catch(() => undefined);
+      .catch((reason: unknown) => {
+        if ((reason as { name?: string }).name === "AbortError") return;
+        setEntries(readStoredMatches().map(localMemoryView));
+        setSource("local-fallback");
+      });
+    return () => controller.abort();
   }, []);
   return (
     <main className="history-shell" id="main-content">
@@ -2173,11 +2953,14 @@ function HistorySurface({
         <p className="kicker">Memory</p>
         <h1>The matches that stayed with you.</h1>
         <p>
-          Key Moments are saved on this device as you follow. Final results
-          remain source-linked.
+          Final scores, canonical key Moments, and replay metadata follow your
+          fan profile across devices.
         </p>
       </section>
-      {entries.length ? (
+      <MemorySourceNotice source={source} />
+      {source === "loading" ? (
+        <p className="memory-loading">Loading your saved match history…</p>
+      ) : entries.length ? (
         <div className="history-grid">
           {entries.map((entry) => {
             const snapshot = entry.snapshot;
@@ -2224,8 +3007,9 @@ function HistorySurface({
           <span>00</span>
           <h2>Your first Match Memory starts here.</h2>
           <p>
-            Follow a live fixture and MatchSense will keep its important turns
-            on this device.
+            {source === "server"
+              ? "Follow a live fixture and MatchSense will keep its important turns with your fan profile."
+              : "No previously saved match copy is available on this device."}
           </p>
           <button className="primary-control" onClick={onBack} type="button">
             Choose a match
@@ -2335,34 +3119,25 @@ function RoomsSurface({
 
 function AppNav({
   active,
-  onDemo,
-  onHistory,
   onRooms,
   onToday,
+  onYou,
 }: {
-  active: "today" | "history" | "rooms";
-  onDemo(): void;
-  onHistory(): void;
+  active: "today" | "rooms" | "you";
   onRooms(): void;
   onToday(): void;
+  onYou(): void;
 }) {
   return (
     <nav className="app-nav" aria-label="Primary">
       <button data-active={active === "today"} onClick={onToday} type="button">
         Today
       </button>
-      <button
-        data-active={active === "history"}
-        onClick={onHistory}
-        type="button"
-      >
-        Memory
-      </button>
       <button data-active={active === "rooms"} onClick={onRooms} type="button">
         Rooms
       </button>
-      <button className="nav-demo" onClick={onDemo} type="button">
-        Demo
+      <button data-active={active === "you"} onClick={onYou} type="button">
+        You
       </button>
     </nav>
   );
@@ -2375,27 +3150,7 @@ function TeamMark({
   large?: boolean;
   team: ProductTeam;
 }) {
-  return (
-    <span
-      className={`team-mark${large ? " team-mark-large" : ""}`}
-      role="img"
-      aria-label={`${team.name} team mark`}
-      style={
-        {
-          "--team": team.primary,
-          "--team-secondary": team.secondary,
-          "--team-ink": team.foreground ?? "#f7f4ea",
-        } as CSSProperties
-      }
-    >
-      {team.flagUrl ? (
-        <img alt="" src={team.flagUrl} />
-      ) : (
-        <i aria-hidden="true" />
-      )}
-      <b>{team.code.slice(0, 3)}</b>
-    </span>
-  );
+  return <TeamFlag size={large ? "hero" : "standard"} team={team} />;
 }
 
 function kickoffLabel(value?: string) {

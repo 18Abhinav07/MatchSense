@@ -88,12 +88,13 @@ test("prose and incomplete license rows do not declare an asset", async () => {
   });
 });
 
-test("generated and dependency assets are outside the rights scan", async () => {
+test("generated, dependency, and local worktree assets are outside the rights scan", async () => {
   const gate = await loadGate();
   assert.notEqual(gate, null, "asset rights gate must exist");
 
   await withFixture(async (root) => {
     for (const assetPath of [
+      ".worktrees/feature/apps/web/public/local-preview.svg",
       "apps/web/dist/generated.svg",
       "node_modules/package/logo.svg",
       "packages/ui/dist/generated.woff2",

@@ -39,6 +39,7 @@ type StartServerContract = (options: {
   ) => Promise<readonly unknown[]>;
   txlineSourceFactory?: (options?: {
     fixtures?: readonly unknown[];
+    onEvent?: (event: unknown) => Promise<void> | void;
     onState?: (state: { attempt: number; state: "live" }) => void;
   }) => {
     run(signal: AbortSignal): Promise<void>;
@@ -161,6 +162,9 @@ describe("server entrypoint", () => {
     expect(colliding.every(({ code }) => /^[A-Z0-9-]{3,20}$/.test(code))).toBe(
       true,
     );
+    expect(catalog).toContainEqual(
+      expect.objectContaining({ code: "CIV", name: "Cote d'Ivoire" }),
+    );
     expect(serverModule.teamCatalogFromTxline([...schedule].reverse())).toEqual(
       catalog,
     );
@@ -253,8 +257,209 @@ describe("server entrypoint", () => {
     }
   });
 
+  it("hydrates live fixture truth before starting the TxLINE source", async () => {
+    const webDistPath = await temporaryWebShell();
+    const signalSource = new EventEmitter();
+    const hydratedAt = "2026-07-17T18:45:00.000Z";
+    const projectionRecord = {
+      fixtureId: "18257865",
+      mode: "live" as const,
+      payload: {
+        appliedSourceEnvelopeIds: ["txline:18257865:goal:7"],
+        eventEffects: {},
+        lastEvent: null,
+        minute: "67'",
+        phase: "second_half",
+        score: { away: 1, home: 2 },
+        scores: {
+          extraTime: { away: 0, home: 0 },
+          regulation: { away: 1, home: 2 },
+          shootout: { away: 0, home: 0 },
+        },
+        stats: {
+          away: { corners: 2, redCards: 0, yellowCards: 1 },
+          home: { corners: 5, redCards: 0, yellowCards: 2 },
+        },
+        updatedAt: hydratedAt,
+      },
+      revision: 7,
+      updatedAt: hydratedAt,
+    };
+    const getLatestProjection = vi.fn(async () => projectionRecord);
+    const eventsAfter = vi.fn(async () => []);
+    const upsert = vi.fn(async () => undefined);
+    let persistenceAttempt = 0;
+    const processSourceEnvelope = vi.fn(
+      async (input: {
+        derive(current: typeof projectionRecord): {
+          projection: { revision: number };
+        } | null;
+      }) => {
+        persistenceAttempt += 1;
+        if (persistenceAttempt === 1) return { kind: "duplicate" as const };
+        const derived = input.derive(projectionRecord);
+        return derived
+          ? {
+              eventSequence: 8,
+              kind: "committed" as const,
+              revision: derived.projection.revision,
+            }
+          : { kind: "accepted_no_change" as const };
+      },
+    );
+    const database = {
+      check: vi.fn(async () => ({
+        databaseReachable: true,
+        migrationsCurrent: true,
+      })),
+      close: vi.fn(async () => undefined),
+      fixtureTruth: {
+        eventsAfter,
+        getLatestProjection,
+        processSourceEnvelope,
+        upsert,
+      },
+      migrate: vi.fn(async () => undefined),
+      outbox: {},
+    };
+    let onLiveEvent: ((event: unknown) => Promise<void> | void) | undefined;
+    const sourceFactory = vi.fn(
+      (options?: { onEvent?: (event: unknown) => Promise<void> | void }) => {
+        onLiveEvent = options?.onEvent;
+        return {
+          run: async (signal: AbortSignal) =>
+            new Promise<void>((resolve) => {
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            }),
+        };
+      },
+    );
+    const startServer =
+      serverModule.startServer as unknown as StartServerContract;
+    let app: Awaited<ReturnType<StartServerContract>> | undefined;
+
+    try {
+      app = await startServer({
+        databaseFactory: () => database,
+        environment: {
+          DATABASE_URL: "postgresql://db.example/matchsense",
+          DATA_RIGHTS_MODE: "txline_hackathon",
+          TXLINE_API_TOKEN: "fixture-server-only-token",
+        },
+        listen: false,
+        outboxWorker: {
+          start: vi.fn(),
+          stop: vi.fn(async () => undefined),
+        },
+        signalSource,
+        txlineScheduleFetcher: async () => [
+          {
+            competition: "World Cup",
+            competitionId: "72",
+            fixtureGroupId: "10115771",
+            fixtureId: "18257865",
+            gameState: 1,
+            participant1: { id: "1999", name: "France" },
+            participant1IsHome: true,
+            participant2: { id: "1888", name: "England" },
+            sourceTimestampMs: 1_784_000_000_001,
+            startTimeMs: 1_784_408_400_000,
+          },
+        ],
+        txlineSourceFactory: sourceFactory,
+        webDistPath,
+      });
+
+      expect(getLatestProjection).toHaveBeenCalledWith({
+        fixtureId: "18257865",
+        mode: "live",
+      });
+      expect(eventsAfter).toHaveBeenCalledWith({
+        afterSequence: 0,
+        fixtureId: "18257865",
+        limit: 1_000,
+        mode: "live",
+      });
+      expect(upsert).not.toHaveBeenCalled();
+      expect(
+        (await app.inject({ url: "/api/v1/fixtures/18257865" })).json(),
+      ).toMatchObject({
+        minute: "67'",
+        revision: 7,
+        score: { away: 1, home: 2 },
+        updatedAt: hydratedAt,
+      });
+
+      const liveGoal = (actionId: string, observedSeq: string) => ({
+        action: "goal",
+        actionId,
+        clockSeconds: 4_200,
+        confirmed: true,
+        delivery: "live",
+        fixtureId: "18257865",
+        participant: 1,
+        participantScore: { participant1: 3, participant2: 1 },
+        playerId: "player-9",
+        provenance: "live_txline",
+        receivedAt: "2026-07-17T18:46:00.000Z",
+        revision: 8,
+        score: { away: 1, home: 3 },
+        source: {
+          actionId,
+          observedSeq,
+          payloadHash: `${actionId}-hash`,
+          sourceTimestampMs: 1_784_314_760_000,
+          sseEventId: observedSeq,
+        },
+        statusId: 4,
+        supersedesRevision: null,
+        varOutcome: null,
+        varReviewType: null,
+      });
+      if (!onLiveEvent) throw new Error("TxLINE event handler was not started");
+      await onLiveEvent(liveGoal("already-persisted", "8"));
+      expect(
+        (await app.inject({ url: "/api/v1/fixtures/18257865" })).json(),
+      ).toMatchObject({ revision: 7, score: { away: 1, home: 2 } });
+
+      await onLiveEvent(liveGoal("new-goal", "9"));
+      expect(
+        (await app.inject({ url: "/api/v1/fixtures/18257865" })).json(),
+      ).toMatchObject({ revision: 8, score: { away: 1, home: 3 } });
+    } finally {
+      if (app) await app.close();
+      await rm(webDistPath, { force: true, recursive: true });
+    }
+  });
+
   it("uses the tournament view for all teams while bounding fixtures and live ingest to the current view", async () => {
     const webDistPath = await temporaryWebShell();
+    const processSourceEnvelope = vi.fn(
+      async (input: {
+        derive(current: null): {
+          projection: { revision: number };
+        } | null;
+      }) => {
+        const derived = input.derive(null);
+        return derived
+          ? {
+              eventSequence: 1,
+              kind: "committed" as const,
+              revision: derived.projection.revision,
+            }
+          : { kind: "duplicate" as const };
+      },
+    );
+    const fixtureFenceGeneration = 7;
+    const sourceLease = {
+      fencingToken: fixtureFenceGeneration,
+      holderId: "matchsense-test-holder",
+      leaseUntil: "2099-01-01T00:01:00.000Z",
+      mode: "live" as const,
+      source: "txline_live",
+      streamKey: "world-cup-live-scores",
+      updatedAt: "2026-07-17T12:00:00.000Z",
+    };
     const database = {
       check: vi.fn(async () => ({
         databaseReachable: true,
@@ -263,6 +468,15 @@ describe("server entrypoint", () => {
       close: vi.fn(async () => undefined),
       migrate: vi.fn(async () => undefined),
       outbox: {},
+      fixtureTruth: {
+        processSourceEnvelope,
+        upsert: vi.fn(async () => undefined),
+      },
+      sourceState: {
+        acquireLease: vi.fn(async () => sourceLease),
+        releaseLease: vi.fn(async () => true),
+        renewLease: vi.fn(async () => sourceLease),
+      },
     };
     const tournamentTeams = [
       { id: "1999", name: "France" },
@@ -313,7 +527,10 @@ describe("server entrypoint", () => {
       },
     ];
     const requestedDays: Array<number | undefined> = [];
-    const sourceOptions: Array<{ fixtures?: readonly unknown[] }> = [];
+    const sourceOptions: Array<{
+      fixtures?: readonly unknown[];
+      onEvent?: (event: unknown) => Promise<void> | void;
+    }> = [];
     const startServer =
       serverModule.startServer as unknown as StartServerContract;
     let app: Awaited<ReturnType<StartServerContract>> | undefined;
@@ -367,11 +584,69 @@ describe("server entrypoint", () => {
           expect.objectContaining({ code: "ARG", name: "Argentina" }),
         ]),
       );
-      expect(fixtures.fixtures.map(({ fixtureId }) => fixtureId)).toEqual([
-        "18257865",
-        "18257739",
-      ]);
+      expect(fixtures.fixtures).toHaveLength(31);
+      expect(fixtures.fixtures.map(({ fixtureId }) => fixtureId)).toEqual(
+        expect.arrayContaining([
+          "18000000",
+          "18000028",
+          "18257865",
+          "18257739",
+        ]),
+      );
       expect(sourceOptions[0]?.fixtures).toHaveLength(2);
+      await sourceOptions[0]?.onEvent?.({
+        action: "goal",
+        actionId: "goal-1",
+        clockSeconds: 720,
+        confirmed: true,
+        delivery: "live",
+        fixtureId: "18257865",
+        participant: 1,
+        participantScore: { participant1: 1, participant2: 0 },
+        participantStats: {
+          participant1: {
+            corners: 1,
+            goals: 1,
+            redCards: 0,
+            yellowCards: 0,
+          },
+          participant2: {
+            corners: 0,
+            goals: 0,
+            redCards: 0,
+            yellowCards: 0,
+          },
+        },
+        playerId: "player-1",
+        provenance: "live_txline",
+        receivedAt: "2026-07-17T18:12:00.000Z",
+        revision: 1,
+        score: { away: 0, home: 1 },
+        source: {
+          actionId: "goal-1",
+          observedSeq: "1",
+          payloadHash: "goal-hash",
+          sourceTimestampMs: 1_784_314_320_000,
+          sseEventId: "1",
+        },
+        statusId: 4,
+        supersedesRevision: null,
+        varOutcome: null,
+        varReviewType: null,
+      });
+      expect(database.fixtureTruth.upsert).toHaveBeenCalledTimes(31);
+      // implicit kickoff + confirmed goal + the aggregate corner delta
+      expect(processSourceEnvelope).toHaveBeenCalledTimes(3);
+      expect(processSourceEnvelope).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceFence: {
+            fencingToken: fixtureFenceGeneration,
+            holderId: "matchsense-test-holder",
+            source: "txline_live",
+            streamKey: "world-cup-live-scores",
+          },
+        }),
+      );
       expect(requestedDays).toEqual(
         expect.arrayContaining([
           Math.floor(Date.UTC(2026, 5, 11) / 86_400_000),
@@ -379,6 +654,13 @@ describe("server entrypoint", () => {
       );
     } finally {
       if (app) await app.close();
+      expect(database.sourceState.releaseLease).toHaveBeenCalledWith({
+        fencingToken: fixtureFenceGeneration,
+        holderId: "matchsense-test-holder",
+        mode: "live",
+        source: "txline_live",
+        streamKey: "world-cup-live-scores",
+      });
       await rm(webDistPath, { force: true, recursive: true });
     }
   });

@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 
 import { createCommentaryPipeline } from "@matchsense/commentary";
 import type {
+  CanonicalEventFact,
   CanonicalMoment,
   FixtureStreamEvent,
 } from "@matchsense/contracts";
@@ -10,6 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createProductRuntime,
   isConfirmedGoalMoment,
+  isNarratableMoment,
 } from "./product-runtime.js";
 
 class ListeningClient extends EventEmitter {
@@ -23,9 +25,33 @@ class ListeningClient extends EventEmitter {
   }
 }
 
+function canonicalFact(
+  fixtureId: string,
+  id: string,
+  overrides: Partial<CanonicalEventFact>,
+): CanonicalEventFact {
+  return {
+    familyId: id,
+    fixtureId,
+    kind: "goal",
+    minute: "23'",
+    occurredAt: "2026-07-16T12:00:00.000Z",
+    player: null,
+    provenance: "live_txline",
+    receivedAt: "2026-07-16T12:00:01.000Z",
+    sourceEnvelopeId: id,
+    sourceEventId: id,
+    status: "confirmed",
+    team: "ARG",
+    type: "canonical_event",
+    ...overrides,
+  };
+}
+
 describe("canonical Moment to shared commentary", () => {
   it("allows goal delivery only for confirmed goal moments", () => {
     const goal: CanonicalMoment = {
+      celebratesGoal: true,
       eventTeam: "ARG",
       familyId: "goal-1",
       fixtureId: "arg-fra-demo",
@@ -46,6 +72,14 @@ describe("canonical Moment to shared commentary", () => {
       false,
     );
     expect(isConfirmedGoalMoment({ ...goal, kind: "card.red" })).toBe(false);
+    expect(isNarratableMoment({ ...goal, kind: "card.red" })).toBe(true);
+    expect(
+      isNarratableMoment({
+        ...goal,
+        eventTeam: null,
+        kind: "phase.full_time",
+      }),
+    ).toBe(true);
   });
 
   it("prepares once, fans one generated call to every listener, and publishes its transcript", async () => {
@@ -101,6 +135,179 @@ describe("canonical Moment to shared commentary", () => {
       },
       event: "commentary.ready",
     });
+    runtime.close();
+  });
+
+  it("streams red-card, VAR, and full-time speech to an active live listener", async () => {
+    const fixtureId = "experience-radio";
+    const pipeline = createCommentaryPipeline({ env: {}, fetchImpl: vi.fn() });
+    const generate = vi.spyOn(pipeline, "generate");
+    const transcodeCommentary = vi
+      .fn<(wav: Buffer) => Promise<Buffer>>()
+      .mockResolvedValue(Buffer.from("radio-voice"));
+    const notifyMoment = vi.fn();
+    const runtime = createProductRuntime({
+      commentaryPipeline: pipeline,
+      cueBytes: Buffer.from("goal-cue"),
+      fixture: {
+        awayTeam: "FRA",
+        fixtureId,
+        homeTeam: "ARG",
+        kickoffAt: "2026-07-16T18:00:00.000Z",
+        provenance: "live_txline",
+      },
+      notifyMoment,
+      silenceBytes: Buffer.from("silence"),
+      transcodeCommentary,
+      writeIntervalMs: 60_000,
+    });
+    const session = runtime.createListeningSession(fixtureId, "ARG");
+    expect(session).not.toBeNull();
+    const listener = new ListeningClient();
+    runtime.attachListeningClient(session!.id, listener);
+    const stream: FixtureStreamEvent[] = [];
+    runtime.subscribeFixture(fixtureId, (event) => stream.push(event));
+
+    for (const fact of [
+      canonicalFact(fixtureId, "kickoff", {
+        kind: "phase.kickoff",
+        minute: "0'",
+        team: null,
+      }),
+      canonicalFact(fixtureId, "red-france", {
+        kind: "card.red",
+        minute: "18'",
+        team: "FRA",
+      }),
+      canonicalFact(fixtureId, "goal-arg", {}),
+      canonicalFact(fixtureId, "var-started-goal-arg", {
+        familyId: "goal-arg",
+        kind: "var.started",
+        status: "under_review",
+        targetFamilyId: "goal-arg",
+        team: null,
+      }),
+      canonicalFact(fixtureId, "var-stands-goal-arg", {
+        familyId: "goal-arg",
+        kind: "var.stands",
+        targetFamilyId: "goal-arg",
+        team: null,
+      }),
+      canonicalFact(fixtureId, "half-time", {
+        kind: "phase.half_time",
+        minute: "45'",
+        team: null,
+      }),
+      canonicalFact(fixtureId, "second-half", {
+        kind: "phase.second_half_start",
+        minute: "46'",
+        team: null,
+      }),
+      canonicalFact(fixtureId, "full-time", {
+        kind: "phase.full_time",
+        minute: "90'",
+        team: null,
+      }),
+    ]) {
+      expect(runtime.acceptSourceFact(fact).kind).toBe("accepted");
+    }
+    await runtime.waitForCommentary();
+
+    const narratedKinds = generate.mock.calls.map(
+      ([input]) => input.event.kind,
+    );
+    expect(narratedKinds).toEqual([
+      "phase.kickoff",
+      "card.red",
+      "goal",
+      "var.started",
+      "var.stands",
+      "phase.half_time",
+      "phase.second_half_start",
+      "phase.full_time",
+    ]);
+    expect(transcodeCommentary).toHaveBeenCalledTimes(narratedKinds.length);
+    expect(Buffer.concat(listener.chunks).toString()).toContain("radio-voice");
+    expect(
+      stream
+        .filter((event) => event.event === "commentary.ready")
+        .map((event) => event.commentary?.text),
+    ).toEqual(
+      expect.arrayContaining([
+        "Red card for France in the 18th minute.",
+        "VAR review underway for Argentina. The decision is being checked. Celebration held.",
+        "Full-time. Argentina 1–0 France.",
+      ]),
+    );
+    expect(notifyMoment).toHaveBeenCalledTimes(2);
+    runtime.close();
+  });
+
+  it("delivers generated speech in canonical order even when a later synthesis finishes first", async () => {
+    const fixtureId = "ordered-radio";
+    const pipeline = createCommentaryPipeline({ env: {}, fetchImpl: vi.fn() });
+    const generateArtifact = pipeline.generate.bind(pipeline);
+    let releaseRedCard: (() => void) | undefined;
+    const redCardGate = new Promise<void>((resolve) => {
+      releaseRedCard = resolve;
+    });
+    const generate = vi
+      .spyOn(pipeline, "generate")
+      .mockImplementation(async (input) => {
+        if (input.event.kind === "card.red") await redCardGate;
+        const result = await generateArtifact(input);
+        return {
+          ...result,
+          artifact: {
+            ...result.artifact,
+            audio: {
+              ...result.artifact.audio,
+              bytes: Buffer.from(`[${input.event.kind}]`),
+            },
+          },
+        };
+      });
+    const transcodeCommentary = vi.fn(async (bytes: Buffer) => bytes);
+    const runtime = createProductRuntime({
+      commentaryPipeline: pipeline,
+      cueBytes: Buffer.from("goal-cue"),
+      fixture: {
+        awayTeam: "FRA",
+        fixtureId,
+        homeTeam: "ARG",
+        kickoffAt: "2026-07-16T18:00:00.000Z",
+        provenance: "live_txline",
+      },
+      silenceBytes: Buffer.from("silence"),
+      transcodeCommentary,
+      writeIntervalMs: 60_000,
+    });
+    const session = runtime.createListeningSession(fixtureId, "ARG")!;
+    const listener = new ListeningClient();
+    runtime.attachListeningClient(session.id, listener);
+
+    runtime.acceptSourceFact(
+      canonicalFact(fixtureId, "red-first", {
+        kind: "card.red",
+        team: "FRA",
+      }),
+    );
+    runtime.acceptSourceFact(
+      canonicalFact(fixtureId, "corner-second", {
+        kind: "corner",
+        minute: "24'",
+      }),
+    );
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(transcodeCommentary).toHaveBeenCalledOnce());
+    releaseRedCard?.();
+    await runtime.waitForCommentary();
+
+    const delivered = Buffer.concat(listener.chunks).toString();
+    expect(delivered.indexOf("[card.red]")).toBeGreaterThanOrEqual(0);
+    expect(delivered.indexOf("[corner]")).toBeGreaterThan(
+      delivered.indexOf("[card.red]"),
+    );
     runtime.close();
   });
 });

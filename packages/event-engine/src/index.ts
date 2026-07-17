@@ -256,6 +256,7 @@ const PHASE_TRANSITIONS: Partial<
   },
   "phase.full_time": {
     from: [
+      "scheduled",
       "second_half",
       "regulation_end",
       "extra_time_second_half",
@@ -401,6 +402,7 @@ function reduceScoreSnapshot(
     nextScores = addScores(scores, effect.scores);
     eventEffects[familyId] = effect;
     moment = {
+      celebratesGoal: true,
       eventTeam: team,
       familyId,
       fixtureId: current.fixtureId,
@@ -576,7 +578,17 @@ function reduceCanonicalEvent(
     fact.kind === "phase.full_time"
       ? decisionAtFullTime(current.phase)
       : (current.decidedBy ?? null);
+  const status = statusFor(fact);
+  const effect = eventEffects[familyId];
+  const celebratesGoal = Boolean(
+    status === "confirmed" &&
+    effectiveTeam &&
+    effect?.active &&
+    effect.kind === "goal" &&
+    (fact.kind === "goal" || fact.kind === "var.stands"),
+  );
   const moment: CanonicalMoment = {
+    celebratesGoal,
     eventTeam: effectiveTeam,
     familyId,
     fixtureId: current.fixtureId,
@@ -594,7 +606,7 @@ function reduceCanonicalEvent(
     sourceEnvelopeId: fact.sourceEnvelopeId,
     sourceEventId: fact.sourceEventId,
     stats: copyStats(stats),
-    status: statusFor(fact),
+    status,
     team: effectiveTeam,
     targetFamilyId: fact.targetFamilyId ?? null,
   };

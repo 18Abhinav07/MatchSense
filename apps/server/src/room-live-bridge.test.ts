@@ -114,6 +114,7 @@ describe("canonical match events drive Rooms", () => {
       status: "LIVE",
     });
     const moment = {
+      celebratesGoal: true,
       eventTeam: "FRA",
       familyId: "txline:18237038:goal:551",
       fixtureId: fixture.fixtureId,
@@ -220,6 +221,7 @@ describe("canonical match events drive Rooms", () => {
     });
     now = Date.parse("2026-07-16T18:22:00.000Z");
     const moment = {
+      celebratesGoal: true,
       eventTeam: "FRA",
       familyId: "arg-fra-demo:score:1-0",
       fixtureId: replayFixture.fixtureId,

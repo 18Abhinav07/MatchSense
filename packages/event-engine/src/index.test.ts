@@ -590,6 +590,65 @@ describe("canonical fixture reducer", () => {
     });
   });
 
+  it("signals a goal celebration for VAR stands only when the reviewed family is a goal", () => {
+    const cold = createFixtureProjection({
+      awayTeam: "FRA",
+      fixtureId: "fixture-1",
+      homeTeam: "ARG",
+      kickoffAt: "2026-07-16T18:00:00.000Z",
+      observedAt: "2026-07-16T17:59:00.000Z",
+      provenance: "live_txline",
+    });
+    const goal = reduce(
+      cold,
+      canonicalFact({ familyId: "goal-under-review", status: "under_review" }),
+    );
+    const goalStands = reduce(
+      goal.projection,
+      canonicalFact({
+        familyId: "goal-under-review",
+        kind: "var.stands",
+        sourceEnvelopeId: "goal-stands-envelope",
+        sourceEventId: "goal-stands",
+        targetFamilyId: "goal-under-review",
+        team: null,
+      }),
+    );
+    const card = reduce(
+      goalStands.projection,
+      canonicalFact({
+        familyId: "card-under-review",
+        kind: "card.red",
+        sourceEnvelopeId: "card-envelope",
+        sourceEventId: "card",
+        status: "under_review",
+      }),
+    );
+    const cardStands = reduce(
+      card.projection,
+      canonicalFact({
+        familyId: "card-under-review",
+        kind: "var.stands",
+        sourceEnvelopeId: "card-stands-envelope",
+        sourceEventId: "card-stands",
+        targetFamilyId: "card-under-review",
+        team: null,
+      }),
+    );
+
+    expect(goal.moment).toMatchObject({ celebratesGoal: false, kind: "goal" });
+    expect(goalStands.moment).toMatchObject({
+      celebratesGoal: true,
+      eventTeam: "ARG",
+      kind: "var.stands",
+      status: "confirmed",
+    });
+    expect(cardStands.moment).toMatchObject({
+      celebratesGoal: false,
+      kind: "var.stands",
+    });
+  });
+
   it("changes halves only on explicit phase events and keeps teamless events honest", () => {
     let projection = createFixtureProjection({
       awayTeam: "FRA",

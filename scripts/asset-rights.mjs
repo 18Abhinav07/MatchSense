@@ -28,7 +28,12 @@ const productAssetExtensions = new Set([
   ".woff2",
 ]);
 
-const excludedDirectories = new Set([".git", "dist", "node_modules"]);
+const excludedDirectories = new Set([
+  ".git",
+  ".worktrees",
+  "dist",
+  "node_modules",
+]);
 
 function normalizedRelativePath(root, absolutePath) {
   return path.relative(root, absolutePath).split(path.sep).join("/");

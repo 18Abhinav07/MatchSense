@@ -14,7 +14,7 @@
       value.schemaVersion !== 1 ||
       value.type !== "matchsense.moment" ||
       !isNonEmptyString(value.fixtureId, 80) ||
-      !/^[A-Za-z0-9_-]+$/u.test(value.fixtureId) ||
+      !/^[A-Za-z0-9_-]+(?::[A-Za-z0-9_-]+)*$/u.test(value.fixtureId) ||
       !isNonEmptyString(value.momentId, 240) ||
       !Number.isSafeInteger(revision) ||
       revision <= 0 ||

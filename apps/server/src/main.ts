@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
@@ -5,14 +6,28 @@ import { pathToFileURL } from "node:url";
 import { createCommentaryPipeline } from "@matchsense/commentary";
 import {
   createPostgresDatabase,
+  type ExperienceRepository,
+  type FanRepository,
+  type FixtureTruthRepository,
+  type MemoryRepository,
   type OutboxRepository,
   type PersistenceMode,
+  type PushDeviceRepository,
+  type RoomAggregateRepository,
+  type SourceFence,
+  type SourceLeaseRecord,
+  type SourceStateRepository,
 } from "@matchsense/db";
-import type { TeamCode, TeamSummary } from "@matchsense/contracts";
+import type {
+  FixtureStreamEvent,
+  TeamCode,
+  TeamSummary,
+} from "@matchsense/contracts";
 import {
   createTxlineAuthenticatedClient,
   createTxlineLiveScoreSource,
   fetchTxlineWorldCupSchedule,
+  type TxlineCanonicalEvent,
   type TxlineFixtureContext,
   type TxlineScheduleFixture,
 } from "@matchsense/txline-adapter";
@@ -21,16 +36,36 @@ import type { FastifyInstance } from "fastify";
 import { buildApp, type ReadinessProbe } from "./app.js";
 import { transcodeWavToStreamMp3 } from "./audio-transcoder.js";
 import { parseServerEnv } from "./config.js";
+import { createDurablePushService } from "./durable-push.js";
+import {
+  createDurableRoomService,
+  type DurableRoomAggregate,
+} from "./durable-room-service.js";
+import {
+  createExperienceRuntime,
+  type ExperienceRuntime,
+} from "./experience-runtime.js";
+import {
+  createFixtureProcessor,
+  restoreFixtureProjection,
+} from "./fixture-processor.js";
+import { createFanSessionService } from "./fan-session.js";
 import { inspectMp3 } from "./mp3.js";
+import {
+  createMatchMemoryService,
+  type MatchMemoryPayload,
+} from "./memory-service.js";
 import { createOutboxWorker, type OutboxWorker } from "./outbox-worker.js";
 import { deliverMomentPush } from "./push-delivery.js";
+import { createPushSubscriptionCipher } from "./push-crypto.js";
 import { InMemoryPushSubscriptionStore } from "./push-subscriptions.js";
 import {
   DEFAULT_TEAMS,
   createProductRuntime,
-  isConfirmedGoalMoment,
+  type ProductFixture,
   type ProductRuntime,
 } from "./product-runtime.js";
+import { productFactsFromTxlineEvent } from "./txline-product-facts.js";
 import {
   createShutdownFailureReporter,
   registerShutdownSignals,
@@ -40,16 +75,112 @@ import { createVapidWebPushSender } from "./web-push-sender.js";
 
 interface ServerDatabaseRuntime extends ReadinessProbe {
   close(): Promise<void>;
+  experiences?: ExperienceRepository;
+  fans?: FanRepository;
+  fixtureTruth?: FixtureTruthRepository;
+  memories?: MemoryRepository<MatchMemoryPayload>;
   migrate(): Promise<unknown>;
   outbox: OutboxRepository;
+  pushDevices?: PushDeviceRepository;
+  rooms?: RoomAggregateRepository<DurableRoomAggregate>;
+  sourceState?: SourceStateRepository;
 }
+
+const TXLINE_LEASE_DURATION_MS = 60_000;
+const TXLINE_LEASE_RENEW_MS = 20_000;
+const TXLINE_LEASE_RETRY_MS = 5_000;
+const TXLINE_STREAM = {
+  mode: "live" as const,
+  source: "txline_live",
+  streamKey: "world-cup-live-scores",
+};
 
 const WORLD_CUP_CATALOG_START_EPOCH_DAY = Math.floor(
   Date.UTC(2026, 5, 11) / 86_400_000,
 );
 
+function fixtureStreamEventsFrom(
+  records: readonly { payload: unknown }[],
+): FixtureStreamEvent[] {
+  return records.flatMap(({ payload }) => {
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      typeof (payload as { event?: unknown }).event !== "string" ||
+      typeof (payload as { id?: unknown }).id !== "string" ||
+      !(payload as { snapshot?: unknown }).snapshot
+    ) {
+      return [];
+    }
+    return [payload as FixtureStreamEvent];
+  });
+}
+
 const KNOWN_TEAMS_BY_NAME = new Map(
   DEFAULT_TEAMS.map((team) => [team.name.trim().toLowerCase(), team] as const),
+);
+
+const FIFA_CODE_BY_NAME = new Map<string, string>(
+  Object.entries({
+    Algeria: "ALG",
+    Australia: "AUS",
+    Austria: "AUT",
+    Belgium: "BEL",
+    Bolivia: "BOL",
+    Cameroon: "CMR",
+    Canada: "CAN",
+    "Cape Verde": "CPV",
+    Chile: "CHI",
+    Colombia: "COL",
+    "Costa Rica": "CRC",
+    "Cote d'Ivoire": "CIV",
+    Croatia: "CRO",
+    Curacao: "CUW",
+    Curaçao: "CUW",
+    Denmark: "DEN",
+    "Democratic Republic of the Congo": "COD",
+    "DR Congo": "COD",
+    Ecuador: "ECU",
+    Egypt: "EGY",
+    Finland: "FIN",
+    Germany: "GER",
+    Ghana: "GHA",
+    Haiti: "HAI",
+    Iceland: "ISL",
+    Iran: "IRN",
+    Iraq: "IRQ",
+    "Ivory Coast": "CIV",
+    Jamaica: "JAM",
+    Jordan: "JOR",
+    "Korea Republic": "KOR",
+    Mexico: "MEX",
+    Morocco: "MAR",
+    Netherlands: "NED",
+    "New Zealand": "NZL",
+    Nigeria: "NGA",
+    Norway: "NOR",
+    Panama: "PAN",
+    Paraguay: "PAR",
+    Poland: "POL",
+    Portugal: "POR",
+    Qatar: "QAT",
+    "Saudi Arabia": "KSA",
+    Scotland: "SCO",
+    Senegal: "SEN",
+    Serbia: "SRB",
+    "South Africa": "RSA",
+    "South Korea": "KOR",
+    Sweden: "SWE",
+    Switzerland: "SUI",
+    Tunisia: "TUN",
+    Turkey: "TUR",
+    Türkiye: "TUR",
+    Ukraine: "UKR",
+    "United States": "USA",
+    Uruguay: "URU",
+    Uzbekistan: "UZB",
+    Wales: "WAL",
+  }).map(([name, code]) => [name.toLowerCase(), code]),
 );
 
 function normalizedCodeBase(name: string) {
@@ -108,11 +239,14 @@ export function teamCatalogFromTxline(
     (left, right) =>
       left.name.localeCompare(right.name) || left.id.localeCompare(right.id),
   );
-  const knownCodes = new Set(DEFAULT_TEAMS.map(({ code }) => code));
+  const knownCodes = new Set([
+    ...DEFAULT_TEAMS.map(({ code }) => code),
+    ...FIFA_CODE_BY_NAME.values(),
+  ]);
   const bases = new Map<string, number>();
   for (const participant of entries) {
-    if (KNOWN_TEAMS_BY_NAME.has(participant.name.trim().toLowerCase()))
-      continue;
+    const name = participant.name.trim().toLowerCase();
+    if (KNOWN_TEAMS_BY_NAME.has(name) || FIFA_CODE_BY_NAME.has(name)) continue;
     const base = normalizedCodeBase(participant.name);
     bases.set(base, (bases.get(base) ?? 0) + 1);
   }
@@ -124,6 +258,17 @@ export function teamCatalogFromTxline(
       return {
         ...known,
         colors: { ...known.colors },
+        participantId: participant.id,
+      };
+    }
+    const fifaCode = FIFA_CODE_BY_NAME.get(
+      participant.name.trim().toLowerCase(),
+    );
+    if (fifaCode) {
+      return {
+        code: fifaCode,
+        colors: deterministicColors(participant.id),
+        name: participant.name,
         participantId: participant.id,
       };
     }
@@ -201,6 +346,7 @@ export interface StartServerOptions {
   outboxWorkerFactory?: (mode: PersistenceMode) => OutboxWorker;
   readinessProbe?: ReadinessProbe;
   shutdownTimeoutMs?: number;
+  experienceRuntime?: ExperienceRuntime;
   productRuntime?: ProductRuntime;
   signalSource?: ShutdownSignalSource;
   txlineScheduleFetcher?: (
@@ -258,24 +404,48 @@ export async function startServer(options: StartServerOptions = {}) {
     options.databaseRuntime ??
     (options.databaseFactory ?? createPostgresDatabase)(config.databaseUrl);
   let productRuntime: ProductRuntime | undefined;
+  let experienceRuntime: ExperienceRuntime | undefined;
   let app: FastifyInstance | undefined;
   let outboxWorkers: OutboxWorker[] = [];
   let txlineAbort: AbortController | null = null;
   let txlineTask: Promise<void> | null = null;
+  let txlineLease: SourceLeaseRecord | null = null;
+  let txlineLeaseRenewal: ReturnType<typeof setInterval> | null = null;
+  let txlineLeaseRetry: ReturnType<typeof setInterval> | null = null;
   let txlineFixtureContexts: readonly TxlineFixtureContext[] = [];
+  let txlineProductFixtures = new Map<string, ProductFixture>();
   let txlineScheduleError: string | null = null;
   let txlineSourceDetail: string | null = null;
   let unregisterSignals: () => void = () => undefined;
+  let closing = false;
 
   try {
     await databaseRuntime.migrate();
-    const push = config.vapid
-      ? {
-          applicationServerKey: config.vapid.publicKey,
-          sender: createVapidWebPushSender(config.vapid),
-          store: new InMemoryPushSubscriptionStore(),
-        }
+    const fanSessions = databaseRuntime.fans
+      ? createFanSessionService({ repository: databaseRuntime.fans })
       : null;
+    const pushSender = config.vapid
+      ? createVapidWebPushSender(config.vapid)
+      : null;
+    const durablePushService =
+      pushSender && databaseRuntime.fans && databaseRuntime.pushDevices
+        ? createDurablePushService({
+            cipher: createPushSubscriptionCipher({
+              secret: config.vapid!.privateKey,
+            }),
+            devices: databaseRuntime.pushDevices,
+            fans: databaseRuntime.fans,
+            sender: pushSender,
+          })
+        : null;
+    const push =
+      config.vapid && pushSender && !durablePushService
+        ? {
+            applicationServerKey: config.vapid.publicKey,
+            sender: pushSender,
+            store: new InMemoryPushSubscriptionStore(),
+          }
+        : null;
     productRuntime = options.productRuntime;
     if (!productRuntime) {
       const cueBytes = await readFile(
@@ -283,6 +453,7 @@ export async function startServer(options: StartServerOptions = {}) {
       );
       const streamContract = inspectMp3(cueBytes);
       let liveFixtures: ReturnType<typeof productFixtureFromTxline>[] = [];
+      let currentLiveFixtureIds = new Set<string>();
       let liveTeamCatalog: readonly TeamSummary[] | undefined;
       if (config.dataRightsMode === "txline_hackathon") {
         const authenticatedClient = options.txlineScheduleFetcher
@@ -307,6 +478,9 @@ export async function startServer(options: StartServerOptions = {}) {
           catalogResult.status === "fulfilled" ? catalogResult.value : [];
         const currentSchedule =
           currentResult.status === "fulfilled" ? currentResult.value : [];
+        currentLiveFixtureIds = new Set(
+          currentSchedule.map(({ fixtureId }) => fixtureId),
+        );
         const mergedSchedule = new Map<string, TxlineScheduleFixture>();
         for (const fixture of [...catalogSchedule, ...currentSchedule]) {
           const existing = mergedSchedule.get(fixture.fixtureId);
@@ -319,9 +493,15 @@ export async function startServer(options: StartServerOptions = {}) {
         }
         liveTeamCatalog = teamCatalogFromTxline([...mergedSchedule.values()]);
         if (currentResult.status === "fulfilled") {
-          liveFixtures = currentSchedule.map((fixture) =>
-            productFixtureFromTxline(fixture, liveTeamCatalog),
-          );
+          liveFixtures = [...mergedSchedule.values()]
+            .sort(
+              (left, right) =>
+                left.startTimeMs - right.startTimeMs ||
+                left.fixtureId.localeCompare(right.fixtureId),
+            )
+            .map((fixture) =>
+              productFixtureFromTxline(fixture, liveTeamCatalog),
+            );
           if (currentSchedule.length === 0) {
             txlineScheduleError =
               "No World Cup fixtures are currently available from TxLINE";
@@ -337,9 +517,44 @@ export async function startServer(options: StartServerOptions = {}) {
         }
       }
       const supportedLiveFixtures = liveFixtures;
-      txlineFixtureContexts = supportedLiveFixtures.map(
-        ({ context }) => context,
+      txlineProductFixtures = new Map(
+        supportedLiveFixtures.map(({ product }) => [
+          product.fixtureId,
+          product,
+        ]),
       );
+      txlineFixtureContexts = supportedLiveFixtures
+        .filter(({ product }) => currentLiveFixtureIds.has(product.fixtureId))
+        .map(({ context }) => context);
+      if (databaseRuntime.fixtureTruth) {
+        const projectionReader = databaseRuntime.fixtureTruth as Partial<
+          Pick<FixtureTruthRepository, "getLatestProjection">
+        >;
+        await Promise.all(
+          supportedLiveFixtures.map(async ({ product }) => {
+            // Never let a schedule refresh downgrade canonical match truth
+            // (for example, full-time back to scheduled) after a restart.
+            const existingProjection =
+              typeof projectionReader.getLatestProjection === "function"
+                ? await projectionReader.getLatestProjection({
+                    fixtureId: product.fixtureId,
+                    mode: "live",
+                  })
+                : null;
+            if (existingProjection) return;
+            await databaseRuntime.fixtureTruth!.upsert({
+              awayTeamId: product.awayTeam,
+              homeTeamId: product.homeTeam,
+              id: product.fixtureId,
+              metadata: { source: "txline_world_cup_schedule" },
+              mode: "live",
+              provenance: "live_txline",
+              scheduledAt: product.kickoffAt,
+              status: "scheduled",
+            });
+          }),
+        );
+      }
       const teamNameByCode = new Map(
         (liveTeamCatalog ?? DEFAULT_TEAMS).map(({ code, name }) => [
           code,
@@ -354,23 +569,21 @@ export async function startServer(options: StartServerOptions = {}) {
         ...(push
           ? {
               notifyMoment: async (moment, fixtureSnapshot) => {
-                if (!isConfirmedGoalMoment(moment)) return;
                 const eventTeam = moment.eventTeam;
                 const eventTeamLabel =
                   eventTeam === null
                     ? "MATCH"
                     : (teamNameByCode.get(eventTeam) ?? eventTeam);
-                await deliverMomentPush(
-                  {
-                    body: `${eventTeamLabel} change the match. Tap to feel the Moment and hear the live call.`,
-                    fixtureId: moment.fixtureId,
-                    momentId: moment.id,
-                    occurredAt: fixtureSnapshot.updatedAt,
-                    revision: moment.revision,
-                    title: `⚽ GOAL — ${eventTeamLabel} ${moment.score.home}–${moment.score.away}, ${moment.minute}`,
-                  },
-                  push,
-                );
+                const input = {
+                  body: `${eventTeamLabel} change the match. Tap to feel the Moment and hear the live call.`,
+                  eventKind: "goal" as const,
+                  fixtureId: moment.fixtureId,
+                  momentId: moment.id,
+                  occurredAt: fixtureSnapshot.updatedAt,
+                  revision: moment.revision,
+                  title: `⚽ GOAL — ${eventTeamLabel} ${moment.score.home}–${moment.score.away}, ${moment.minute}`,
+                };
+                await deliverMomentPush(input, push);
               },
             }
           : {}),
@@ -389,6 +602,47 @@ export async function startServer(options: StartServerOptions = {}) {
           transcodeWavToStreamMp3(wavBytes, { expected: streamContract }),
         writeIntervalMs: 940,
       });
+      const hydrationRepository = databaseRuntime.fixtureTruth as unknown as
+        | Partial<
+            Pick<FixtureTruthRepository, "eventsAfter" | "getLatestProjection">
+          >
+        | undefined;
+      if (
+        hydrationRepository &&
+        typeof hydrationRepository.getLatestProjection === "function" &&
+        typeof hydrationRepository.eventsAfter === "function"
+      ) {
+        const getLatestProjection =
+          hydrationRepository.getLatestProjection.bind(hydrationRepository);
+        const eventsAfter =
+          hydrationRepository.eventsAfter.bind(hydrationRepository);
+        await Promise.all(
+          supportedLiveFixtures.map(async ({ product }) => {
+            const [projectionRecord, eventRecords] = await Promise.all([
+              getLatestProjection({
+                fixtureId: product.fixtureId,
+                mode: "live",
+              }),
+              eventsAfter({
+                afterSequence: 0,
+                fixtureId: product.fixtureId,
+                limit: 1_000,
+                mode: "live",
+              }),
+            ]);
+            if (!projectionRecord) return;
+            productRuntime!.registerFixture(product, {
+              events: fixtureStreamEventsFrom(eventRecords),
+              projection: restoreFixtureProjection({
+                fixture: product,
+                provenance: "live_txline",
+                record: projectionRecord,
+              }),
+              public: true,
+            });
+          }),
+        );
+      }
       if (txlineScheduleError) {
         productRuntime.setSourceHealth("error", txlineScheduleError);
       } else if (txlineSourceDetail) {
@@ -396,26 +650,266 @@ export async function startServer(options: StartServerOptions = {}) {
       }
     }
     const runtime = productRuntime;
+    const liveFixtureProcessor = databaseRuntime.fixtureTruth
+      ? createFixtureProcessor({ repository: databaseRuntime.fixtureTruth })
+      : null;
+    experienceRuntime =
+      options.experienceRuntime ??
+      (databaseRuntime.experiences && databaseRuntime.fixtureTruth
+        ? createExperienceRuntime({
+            countdownMs: 10_000,
+            persistFixture: async (fixture) => {
+              await databaseRuntime.fixtureTruth!.upsert({
+                awayTeamId: fixture.awayTeam,
+                homeTeamId: fixture.homeTeam,
+                id: fixture.fixtureId,
+                metadata: {
+                  journey: "experience_match",
+                  template: "five-minute-match",
+                },
+                mode: "demo",
+                provenance: "synthetic_txline_shaped",
+                scheduledAt: fixture.kickoffAt,
+                status: "scheduled",
+              });
+            },
+            processor: createFixtureProcessor({
+              repository: databaseRuntime.fixtureTruth,
+            }),
+            productRuntime: runtime,
+            recoverRun: async (run) => {
+              const fixtureRecord = await databaseRuntime.fixtureTruth!.get({
+                fixtureId: run.fixtureId,
+                mode: "demo",
+              });
+              if (!fixtureRecord) return null;
+              const fixture = {
+                awayTeam: fixtureRecord.awayTeamId,
+                fixtureId: fixtureRecord.id,
+                homeTeam: fixtureRecord.homeTeamId,
+                kickoffAt: fixtureRecord.scheduledAt,
+                provenance: "synthetic_txline_shaped" as const,
+              };
+              const [projectionRecord, eventRecords] = await Promise.all([
+                databaseRuntime.fixtureTruth!.getLatestProjection({
+                  fixtureId: run.fixtureId,
+                  mode: "demo",
+                }),
+                databaseRuntime.fixtureTruth!.eventsAfter({
+                  afterSequence: 0,
+                  fixtureId: run.fixtureId,
+                  limit: 100,
+                  mode: "demo",
+                }),
+              ]);
+              const events = fixtureStreamEventsFrom(eventRecords);
+              return {
+                events,
+                fixture,
+                projection: projectionRecord
+                  ? restoreFixtureProjection({
+                      fixture,
+                      provenance: "synthetic_txline_shaped",
+                      record: projectionRecord,
+                    })
+                  : null,
+              };
+            },
+            repository: databaseRuntime.experiences,
+          })
+        : undefined);
+    const durableRoomService =
+      databaseRuntime.rooms && fanSessions
+        ? createDurableRoomService({
+            fixture: (fixtureId) => runtime.fixture(fixtureId),
+            repository:
+              databaseRuntime.rooms as RoomAggregateRepository<DurableRoomAggregate>,
+          })
+        : null;
+    const memoryService =
+      databaseRuntime.experiences &&
+      databaseRuntime.fans &&
+      databaseRuntime.fixtureTruth &&
+      databaseRuntime.memories &&
+      fanSessions
+        ? createMatchMemoryService({
+            experiences: databaseRuntime.experiences,
+            fans: databaseRuntime.fans,
+            fixtureTruth: databaseRuntime.fixtureTruth,
+            memories:
+              databaseRuntime.memories as MemoryRepository<MatchMemoryPayload>,
+          })
+        : null;
+    const persistedEvent = (payload: unknown) => {
+      if (!payload || typeof payload !== "object") return null;
+      const value = payload as {
+        celebratesGoal?: unknown;
+        event?: unknown;
+      };
+      const event = value.event;
+      if (
+        !event ||
+        typeof event !== "object" ||
+        typeof (event as { id?: unknown }).id !== "string" ||
+        !(event as { snapshot?: unknown }).snapshot
+      ) {
+        return null;
+      }
+      return {
+        celebratesGoal: value.celebratesGoal === true,
+        event: event as FixtureStreamEvent,
+      };
+    };
+    const publishPersisted = (
+      persisted: NonNullable<ReturnType<typeof persistedEvent>>,
+    ) => {
+      runtime.publishPersistedEvent(persisted.event, persisted);
+    };
     const workerFactory =
       options.outboxWorkerFactory ??
       ((mode: PersistenceMode) =>
         createOutboxWorker({
+          batchSize: 50,
           consumer: "product",
-          handlers: {},
+          handlers: {
+            "commentary.prepare": async (message) => {
+              const persisted = persistedEvent(message.payload);
+              if (persisted) publishPersisted(persisted);
+            },
+            "fixture.broadcast": async (message) => {
+              const persisted = persistedEvent(message.payload);
+              if (persisted) publishPersisted(persisted);
+            },
+            "fixture.reconcile": async (message) => {
+              const persisted = persistedEvent(message.payload);
+              if (persisted) publishPersisted(persisted);
+            },
+            ...(memoryService
+              ? {
+                  "memory.project": async (message) => {
+                    const persisted = persistedEvent(message.payload);
+                    if (!persisted) return;
+                    await memoryService.projectFixture({
+                      fixtureId: persisted.event.snapshot.fixtureId,
+                      mode,
+                    });
+                  },
+                  "memory.reconcile": async (message) => {
+                    const persisted = persistedEvent(message.payload);
+                    if (!persisted) return;
+                    await memoryService.projectFixture({
+                      fixtureId: persisted.event.snapshot.fixtureId,
+                      mode,
+                    });
+                  },
+                }
+              : {}),
+            ...(durableRoomService
+              ? {
+                  "room.project": async (message) => {
+                    const persisted = persistedEvent(message.payload);
+                    if (persisted) {
+                      await durableRoomService.projectFixture(
+                        persisted.event.snapshot,
+                      );
+                    }
+                  },
+                  "room.reconcile": async (message) => {
+                    const persisted = persistedEvent(message.payload);
+                    if (persisted) {
+                      await durableRoomService.projectFixture(
+                        persisted.event.snapshot,
+                      );
+                    }
+                  },
+                }
+              : {}),
+            ...(durablePushService
+              ? {
+                  "push.candidate": async (message) => {
+                    const persisted = persistedEvent(message.payload);
+                    const moment = persisted?.event.moment;
+                    if (!persisted || !moment) return;
+                    const eventKind = moment.celebratesGoal
+                      ? ("goal" as const)
+                      : moment.kind === "card.red"
+                        ? ("card.red" as const)
+                        : moment.kind === "phase.full_time"
+                          ? ("phase.full_time" as const)
+                          : null;
+                    if (!eventKind) return;
+                    const team = moment.eventTeam ?? "MATCH";
+                    const title =
+                      eventKind === "goal"
+                        ? `⚽ GOAL — ${team} ${moment.score.home}–${moment.score.away}, ${moment.minute}`
+                        : eventKind === "card.red"
+                          ? `🟥 RED CARD — ${team}, ${moment.minute}`
+                          : `FULL TIME — ${moment.score.home}–${moment.score.away}`;
+                    const body =
+                      eventKind === "phase.full_time"
+                        ? "The result is final. Tap for your Match Memory."
+                        : `${team} change the match. Tap to feel the Moment and hear the live call.`;
+                    await durablePushService.deliverToFixture(
+                      {
+                        body,
+                        eventKind,
+                        fixtureId: moment.fixtureId,
+                        momentId: moment.id,
+                        occurredAt: persisted.event.snapshot.updatedAt,
+                        revision: moment.revision,
+                        title,
+                      },
+                      mode,
+                    );
+                  },
+                }
+              : {}),
+          },
           mode,
           outbox: databaseRuntime.outbox,
+          pollIntervalMs: 250,
         }));
     outboxWorkers = options.outboxWorker
       ? [options.outboxWorker]
       : (["live", "demo"] as const).map(workerFactory);
     app = buildApp({
+      ...(durablePushService && config.vapid && fanSessions
+        ? {
+            durablePush: {
+              applicationServerKey: config.vapid.publicKey,
+              service: durablePushService,
+              sessions: fanSessions,
+            },
+          }
+        : {}),
       ...(push ? { push } : {}),
+      ...(durableRoomService && fanSessions
+        ? {
+            durableRooms: {
+              service: durableRoomService,
+              sessions: fanSessions,
+            },
+          }
+        : {}),
+      ...(experienceRuntime ? { experience: experienceRuntime } : {}),
+      ...(databaseRuntime.fans && fanSessions
+        ? {
+            fan: {
+              repository: databaseRuntime.fans,
+              sessions: fanSessions,
+            },
+          }
+        : {}),
+      ...(memoryService && fanSessions
+        ? { memory: { service: memoryService, sessions: fanSessions } }
+        : {}),
       manageRuntimeLifecycle: false,
       readinessProbe: options.readinessProbe ?? databaseRuntime,
       runtime,
       webDistPath,
     });
     app.addHook("onClose", async () => {
+      closing = true;
       const failures: unknown[] = [];
       try {
         unregisterSignals();
@@ -426,6 +920,14 @@ export async function startServer(options: StartServerOptions = {}) {
         txlineAbort?.abort();
       } catch (error) {
         failures.push(error);
+      }
+      if (txlineLeaseRenewal) {
+        clearInterval(txlineLeaseRenewal);
+        txlineLeaseRenewal = null;
+      }
+      if (txlineLeaseRetry) {
+        clearInterval(txlineLeaseRetry);
+        txlineLeaseRetry = null;
       }
       failures.push(
         ...(await settleCleanupStage(
@@ -443,7 +945,22 @@ export async function startServer(options: StartServerOptions = {}) {
       );
       failures.push(
         ...(await settleCleanupStage(
-          [{ action: () => runtime.close(), label: "product runtime" }],
+          [
+            { action: () => runtime.close(), label: "product runtime" },
+            ...(txlineLease && databaseRuntime.sourceState
+              ? [
+                  {
+                    action: () =>
+                      databaseRuntime.sourceState!.releaseLease({
+                        fencingToken: txlineLease!.fencingToken,
+                        holderId: txlineLease!.holderId,
+                        ...TXLINE_STREAM,
+                      }),
+                    label: "TxLINE source lease",
+                  },
+                ]
+              : []),
+          ],
           shutdownTimeoutMs,
         )),
       );
@@ -471,32 +988,189 @@ export async function startServer(options: StartServerOptions = {}) {
     for (const worker of outboxWorkers) {
       worker.start();
     }
+    await experienceRuntime?.start();
     if (
       config.dataRightsMode === "txline_hackathon" &&
       (txlineFixtureContexts.length > 0 || options.productRuntime !== undefined)
     ) {
-      txlineAbort = new AbortController();
       const sourceFactory =
         options.txlineSourceFactory ?? createTxlineLiveScoreSource;
-      const source = sourceFactory({
-        apiToken: config.txlineApiToken!,
-        fixtures: txlineFixtureContexts,
-        onEvent: (event) => {
-          runtime.acceptTxlineEvent(event);
-        },
-        onState: ({ state }) => {
-          runtime.setSourceHealth(
-            state === "replay" ? "live" : state,
-            txlineSourceDetail,
-          );
-        },
-      });
-      txlineTask = source.run(txlineAbort.signal).catch(() => {
+      const startSource = () => {
+        if (closing || txlineTask || txlineAbort) return;
+        txlineAbort = new AbortController();
+        const source = sourceFactory({
+          apiToken: config.txlineApiToken!,
+          fixtures: txlineFixtureContexts,
+          onEvent: async (event: TxlineCanonicalEvent) => {
+            const fixture = txlineProductFixtures.get(event.fixtureId);
+            const current = runtime.fixture(event.fixtureId);
+            if (liveFixtureProcessor && fixture && current) {
+              const sourceFence: SourceFence | undefined = txlineLease
+                ? {
+                    fencingToken: txlineLease.fencingToken,
+                    holderId: txlineLease.holderId,
+                    source: TXLINE_STREAM.source,
+                    streamKey: TXLINE_STREAM.streamKey,
+                  }
+                : undefined;
+              const facts = productFactsFromTxlineEvent(
+                event,
+                fixture,
+                current,
+              );
+              for (const [index, fact] of facts.entries()) {
+                const persisted = await liveFixtureProcessor.process({
+                  deliveryIntent:
+                    event.delivery === "reconciliation"
+                      ? "reconcile"
+                      : "realtime",
+                  fact,
+                  fixture,
+                  mode: "live",
+                  ...(sourceFence ? { sourceFence } : {}),
+                  raw: {
+                    dedupeKey: fact.sourceEnvelopeId,
+                    id: fact.sourceEnvelopeId,
+                    payload: event,
+                    payloadHash: event.source.payloadHash,
+                    receivedAt: event.receivedAt,
+                    source: "txline_live",
+                    sourceRecordId:
+                      event.actionId ?? event.source.actionId ?? null,
+                    sourceSequence: `${event.source.observedSeq ?? event.revision}:${index}`,
+                  },
+                });
+                if (persisted.kind === "fenced") {
+                  throw new Error("TxLINE fixture persistence was fenced");
+                }
+                if (persisted.kind === "committed") {
+                  if (!persisted.event) {
+                    throw new Error("Committed TxLINE event is unavailable");
+                  }
+                  runtime.publishPersistedEvent(persisted.event, {
+                    celebratesGoal:
+                      persisted.event.moment?.celebratesGoal === true,
+                  });
+                }
+              }
+            }
+          },
+          onState: ({ state }) => {
+            runtime.setSourceHealth(
+              state === "replay" ? "live" : state,
+              txlineSourceDetail,
+            );
+          },
+        });
+        const sourceSignal = txlineAbort.signal;
+        txlineTask = source
+          .run(sourceSignal)
+          .catch(() => {
+            if (!sourceSignal.aborted) {
+              runtime.setSourceHealth(
+                "error",
+                "TxLINE live updates are temporarily unavailable",
+              );
+            }
+          })
+          .finally(() => {
+            txlineTask = null;
+            txlineAbort = null;
+          });
+      };
+
+      const sourceState = databaseRuntime.sourceState;
+      const leaseHolderId = `matchsense:${randomUUID()}`;
+      let leaseAttemptInFlight = false;
+      const acquireLeaseAndStart = async () => {
+        if (closing || leaseAttemptInFlight || txlineLease) {
+          if (txlineLease && !txlineTask) startSource();
+          return;
+        }
+        if (!sourceState) {
+          startSource();
+          return;
+        }
+        leaseAttemptInFlight = true;
+        try {
+          txlineLease = await sourceState.acquireLease({
+            holderId: leaseHolderId,
+            leaseUntil: new Date(
+              Date.now() + TXLINE_LEASE_DURATION_MS,
+            ).toISOString(),
+            ...TXLINE_STREAM,
+          });
+          if (txlineLease) {
+            startSource();
+          } else {
+            runtime.setSourceHealth(
+              "reconnecting",
+              "Another healthy MatchSense instance currently owns the TxLINE stream",
+            );
+          }
+        } finally {
+          leaseAttemptInFlight = false;
+        }
+      };
+
+      if (sourceState) {
+        let renewalInFlight = false;
+        txlineLeaseRenewal = setInterval(() => {
+          if (closing || renewalInFlight || !txlineLease) return;
+          renewalInFlight = true;
+          void sourceState
+            .renewLease({
+              fencingToken: txlineLease.fencingToken,
+              holderId: txlineLease.holderId,
+              leaseUntil: new Date(
+                Date.now() + TXLINE_LEASE_DURATION_MS,
+              ).toISOString(),
+              ...TXLINE_STREAM,
+            })
+            .then((renewed) => {
+              if (renewed) {
+                txlineLease = renewed;
+                return;
+              }
+              txlineLease = null;
+              txlineAbort?.abort();
+              runtime.setSourceHealth(
+                "reconnecting",
+                "TxLINE stream ownership changed; reconnecting safely",
+              );
+            })
+            .catch(() => {
+              txlineLease = null;
+              txlineAbort?.abort();
+              runtime.setSourceHealth(
+                "error",
+                "TxLINE stream lease renewal failed",
+              );
+            })
+            .finally(() => {
+              renewalInFlight = false;
+            });
+        }, TXLINE_LEASE_RENEW_MS);
+        txlineLeaseRenewal.unref?.();
+      }
+
+      await acquireLeaseAndStart().catch(() => {
         runtime.setSourceHealth(
           "error",
-          "TxLINE live updates are temporarily unavailable",
+          "TxLINE stream ownership is temporarily unavailable",
         );
       });
+      txlineLeaseRetry = setInterval(() => {
+        if (!txlineLease || !txlineTask) {
+          void acquireLeaseAndStart().catch(() => {
+            runtime.setSourceHealth(
+              "error",
+              "TxLINE stream ownership is temporarily unavailable",
+            );
+          });
+        }
+      }, TXLINE_LEASE_RETRY_MS);
+      txlineLeaseRetry.unref?.();
     }
   } catch (error) {
     const cleanupFailures: unknown[] = [];

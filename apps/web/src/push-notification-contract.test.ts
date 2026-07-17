@@ -57,6 +57,46 @@ describe("service-worker push presentation contract", () => {
     });
   });
 
+  it("preserves an Experience fixture id with a colon in the exact Moment route", () => {
+    const experienceEnvelope = {
+      ...envelope,
+      fixtureId: "experience:run_abc123",
+      identity: "run_abc123:event:opening-goal:4",
+      momentId: "run_abc123:event:opening-goal",
+      revision: 4,
+    };
+
+    const presentation = contract.notificationFor(experienceEnvelope);
+
+    expect(presentation.title).toBe("GOAL — ARGENTINA");
+    expect(presentation.options.data).toMatchObject({
+      fixtureId: "experience:run_abc123",
+      identity: "run_abc123:event:opening-goal:4",
+      url: "/matches/experience%3Arun_abc123/moments/run_abc123%3Aevent%3Aopening-goal%3A4",
+    });
+    expect(
+      contract.routeFromNotificationData(presentation.options.data),
+    ).toMatchObject({
+      fixtureId: "experience:run_abc123",
+      url: "/matches/experience%3Arun_abc123/moments/run_abc123%3Aevent%3Aopening-goal%3A4",
+    });
+  });
+
+  it.each([
+    "experience/../../rooms",
+    "experience:..",
+    "experience:%2Frooms",
+    "experience\\rooms",
+  ])("rejects unsafe fixture id %s", (fixtureId) => {
+    const presentation = contract.notificationFor({
+      ...envelope,
+      fixtureId,
+    });
+
+    expect(presentation.title).toBe("MatchSense update");
+    expect(presentation.options.data).toEqual({ url: "/" });
+  });
+
   it("refuses a mismatched identity and never trusts a supplied URL", () => {
     const presentation = contract.notificationFor({
       ...envelope,

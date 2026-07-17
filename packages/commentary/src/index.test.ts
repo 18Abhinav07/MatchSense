@@ -84,6 +84,148 @@ function successfulProviderFetch(options?: {
 }
 
 describe("shared commentary pipeline", () => {
+  it.each([
+    {
+      event: { kind: "goal", status: "provisional" },
+      expected:
+        "Possible goal for Argentina, but it is not confirmed yet. Celebration held.",
+    },
+    {
+      event: { kind: "goal", status: "under_review" },
+      expected:
+        "Argentina's possible goal is under review. Celebration held until the decision is confirmed.",
+    },
+    {
+      event: { kind: "var.started", status: "under_review" },
+      expected:
+        "VAR review underway for Argentina. The decision is being checked. Celebration held.",
+    },
+    {
+      event: { kind: "var.stands", status: "confirmed" },
+      expected: "VAR check complete. The decision for Argentina stands.",
+    },
+    {
+      event: { kind: "var.overturned", status: "confirmed" },
+      expected: "VAR overturns the decision for Argentina. No celebration.",
+    },
+    {
+      event: { kind: "card.yellow", status: "confirmed" },
+      expected: "Yellow card for Argentina in the 23rd minute.",
+    },
+    {
+      event: { kind: "card.red", status: "confirmed" },
+      expected: "Red card for Argentina in the 23rd minute.",
+    },
+    {
+      event: { kind: "corner", status: "confirmed" },
+      expected: "Corner to Argentina in the 23rd minute.",
+    },
+    {
+      event: {
+        eventTeamId: null,
+        kind: "phase.kickoff",
+        status: "confirmed",
+      },
+      expected: "Kickoff. Argentina against France is underway.",
+    },
+    {
+      event: {
+        eventTeamId: null,
+        kind: "phase.half_time",
+        status: "confirmed",
+      },
+      expected: "Half-time. Argentina 1–0 France.",
+    },
+    {
+      event: {
+        eventTeamId: null,
+        kind: "phase.second_half_start",
+        status: "confirmed",
+      },
+      expected: "The second half is underway. Argentina 1–0 France.",
+    },
+    {
+      event: {
+        eventTeamId: null,
+        kind: "phase.regulation_end",
+        status: "confirmed",
+      },
+      expected: "Regulation time is over. Argentina 1–0 France.",
+    },
+    {
+      event: {
+        eventTeamId: null,
+        kind: "phase.full_time",
+        status: "confirmed",
+      },
+      expected: "Full-time. Argentina 1–0 France.",
+    },
+  ])(
+    "narrates $event.kind without inventing facts",
+    async ({ event, expected }) => {
+      const pipeline = createCommentaryPipeline({
+        env: {},
+        fetchImpl: vi.fn(),
+      });
+
+      const result = await pipeline.generate({
+        ...baseInput,
+        event: { ...baseInput.event, ...event },
+      });
+
+      expect(result.artifact.transcript).toBe(expected);
+      expect(result.artifact.transcript).not.toMatch(/Messi|assist|header/i);
+    },
+  );
+
+  it("accepts a neutral VAR event without assigning it to either team", async () => {
+    const pipeline = createCommentaryPipeline({ env: {}, fetchImpl: vi.fn() });
+
+    const result = await pipeline.generate({
+      ...baseInput,
+      event: {
+        ...baseInput.event,
+        eventTeamId: null,
+        kind: "var.started",
+        status: "under_review",
+      },
+    });
+
+    expect(result.artifact.transcript).toBe(
+      "VAR review underway. The decision is being checked. Celebration held.",
+    );
+  });
+
+  it("uses deterministic event facts and spends no Groq request on non-goal narration", async () => {
+    const fetchImpl = successfulProviderFetch();
+    const pipeline = createCommentaryPipeline({
+      env: {
+        GEMINI_API_KEY: "fixture-gemini-key",
+        GROQ_API_KEY: "fixture-groq-key",
+      },
+      fetchImpl,
+    });
+
+    const result = await pipeline.generate({
+      ...baseInput,
+      event: { ...baseInput.event, kind: "card.red", minute: "41'" },
+    });
+
+    expect(result.artifact.transcript).toBe(
+      "Red card for Argentina in the 41st minute.",
+    );
+    expect(
+      fetchImpl.mock.calls.filter(([url]) =>
+        String(url).includes("api.groq.com"),
+      ),
+    ).toHaveLength(0);
+    expect(
+      fetchImpl.mock.calls.filter(([url]) =>
+        String(url).includes("generativelanguage.googleapis.com"),
+      ),
+    ).toHaveLength(1);
+  });
+
   it("shares one production cache identity across team perspectives", () => {
     const first = createCommentaryCacheKey(baseInput);
 

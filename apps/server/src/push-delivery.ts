@@ -10,11 +10,12 @@ const registrationBody = z.object({ subscription: z.unknown() }).strict();
 const momentPushInput = z
   .object({
     body: z.string().trim().min(1).max(300),
+    eventKind: z.enum(["goal", "card.red", "phase.full_time"]).optional(),
     fixtureId: z
       .string()
       .min(1)
       .max(80)
-      .regex(/^[A-Za-z0-9_-]+$/u),
+      .regex(/^[A-Za-z0-9_:-]+$/u),
     momentId: z.string().min(1).max(240),
     occurredAt: z.iso.datetime({ offset: true }),
     revision: z.number().int().positive().safe(),
@@ -23,6 +24,10 @@ const momentPushInput = z
   .strict();
 
 export type MomentPushInput = z.infer<typeof momentPushInput>;
+
+export function parseMomentPushInput(input: unknown): MomentPushInput {
+  return momentPushInput.parse(input);
+}
 
 export interface MomentPushEnvelope extends MomentPushInput {
   identity: string;

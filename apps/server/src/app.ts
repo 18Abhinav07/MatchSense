@@ -1,7 +1,12 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 import fastifyStatic from "@fastify/static";
-import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import Fastify, {
+  type FastifyInstance,
+  type FastifyReply,
+  type FastifyRequest,
+} from "fastify";
 import { z } from "zod";
 
 import {
@@ -16,6 +21,25 @@ import {
   createDemoSessionRuntime,
   type DemoSessionRuntime,
 } from "./demo-runtime.js";
+import {
+  type DurablePushRouteDependencies,
+  registerDurablePushRoutes,
+} from "./durable-push.js";
+import {
+  type DurableRoomRouteDependencies,
+  registerDurableRoomRoutes,
+} from "./durable-room-routes.js";
+import type { ExperienceRuntime } from "./experience-runtime.js";
+import {
+  type FanRouteDependencies,
+  registerFanRoutes,
+  requireFanMutationSession,
+} from "./fan-routes.js";
+import type { FanSessionService } from "./fan-session.js";
+import {
+  type MemoryRouteDependencies,
+  registerMemoryRoutes,
+} from "./memory-routes.js";
 import type { ProductRuntime } from "./product-runtime.js";
 import {
   type PushRouteDependencies,
@@ -35,8 +59,13 @@ export interface ReadinessProbe {
 
 export interface BuildAppOptions {
   demo?: DemoSessionRuntime | false;
+  durablePush?: DurablePushRouteDependencies;
+  durableRooms?: DurableRoomRouteDependencies;
+  experience?: ExperienceRuntime;
+  fan?: FanRouteDependencies;
   manageRuntimeLifecycle?: boolean;
   readinessProbe: ReadinessProbe;
+  memory?: MemoryRouteDependencies;
   webDistPath: string;
   runtime?: ProductRuntime;
   push?: PushRouteDependencies;
@@ -153,31 +182,59 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
       });
     }
   }
-  if (options.push) {
+  if (options.experience) {
+    registerExperienceRoutes(app, options.experience, options.fan?.sessions);
+    app.addHook("preClose", () => options.experience?.close());
+  }
+  if (options.fan) {
+    registerFanRoutes(app, options.fan);
+  }
+  if (options.durablePush) {
+    registerDurablePushRoutes(app, options.durablePush);
+  } else if (options.push) {
     registerPushRoutes(app, options.push);
   }
-  const rooms =
-    options.rooms ??
-    (options.runtime
-      ? createRoomService({
-          fixture: (fixtureId) => options.runtime?.fixture(fixtureId) ?? null,
-        })
-      : null);
+  if (options.memory) {
+    registerMemoryRoutes(app, options.memory);
+  }
+  if (options.durableRooms) {
+    registerDurableRoomRoutes(app, options.durableRooms);
+  }
+  const rooms = options.durableRooms
+    ? null
+    : (options.rooms ??
+      (options.runtime
+        ? createRoomService({
+            fixture: (fixtureId) => options.runtime?.fixture(fixtureId) ?? null,
+          })
+        : null));
   if (rooms) {
     registerRoomRoutes(app, rooms);
     if (options.runtime) {
+      const productRuntime = options.runtime;
       const unsubscribeRooms: (() => void)[] = [];
-      for (const fixture of options.runtime.fixtures()) {
-        const unsubscribeCanonical = options.runtime.subscribeCanonicalEvent(
-          fixture.fixtureId,
+      const subscribedFixtures = new Set<string>();
+      const subscribeRoomFixture = (fixtureId: string) => {
+        if (subscribedFixtures.has(fixtureId)) return;
+        subscribedFixtures.add(fixtureId);
+        const unsubscribeCanonical = productRuntime.subscribeCanonicalEvent(
+          fixtureId,
           (event) => rooms.applyCanonicalEvent(event),
         );
-        const unsubscribeFixture = options.runtime.subscribeFixture(
-          fixture.fixtureId,
+        const unsubscribeFixture = productRuntime.subscribeFixture(
+          fixtureId,
           (event) => rooms.applyFixtureEvent(event),
         );
         if (unsubscribeCanonical) unsubscribeRooms.push(unsubscribeCanonical);
         if (unsubscribeFixture) unsubscribeRooms.push(unsubscribeFixture);
+      };
+      for (const fixture of productRuntime.fixtures()) {
+        subscribeRoomFixture(fixture.fixtureId);
+      }
+      if (typeof productRuntime.onFixtureRegistered === "function") {
+        unsubscribeRooms.push(
+          productRuntime.onFixtureRegistered(subscribeRoomFixture),
+        );
       }
       app.addHook("preClose", () => {
         for (const unsubscribe of unsubscribeRooms) unsubscribe();
@@ -229,6 +286,12 @@ const replayCommandBody = z
   })
   .strict();
 const listeningSessionBody = z.object({ perspectiveTeam: teamCode }).strict();
+const experienceRunBody = z
+  .object({
+    awayTeam: teamCode,
+    homeTeam: teamCode,
+  })
+  .strict();
 
 function formatSse(event: FixtureStreamEvent) {
   return `id: ${event.id}\nevent: ${event.event}\ndata: ${JSON.stringify(event)}\n\n`;
@@ -238,6 +301,55 @@ function invalidRequest(reply: FastifyReply) {
   return reply.code(400).send({
     error: { code: "INVALID_REQUEST", message: "Request is invalid" },
   });
+}
+
+function registerExperienceRoutes(
+  app: FastifyInstance,
+  experience: ExperienceRuntime,
+  fanSessions?: FanSessionService,
+) {
+  const startRun = async (request: FastifyRequest, reply: FastifyReply) => {
+    const session = fanSessions
+      ? await requireFanMutationSession(request, reply, fanSessions)
+      : null;
+    if (fanSessions && !session) return;
+    const body = experienceRunBody.safeParse(request.body);
+    if (!body.success || body.data.homeTeam === body.data.awayTeam) {
+      return invalidRequest(reply);
+    }
+    const rawIdempotencyKey = request.headers["idempotency-key"];
+    const idempotencyKey = Array.isArray(rawIdempotencyKey)
+      ? rawIdempotencyKey[0]
+      : rawIdempotencyKey;
+    if (
+      idempotencyKey !== undefined &&
+      !/^[A-Za-z0-9_.:-]{8,120}$/u.test(idempotencyKey)
+    ) {
+      return invalidRequest(reply);
+    }
+    const runId = idempotencyKey
+      ? `run_${createHash("sha256")
+          .update(`${session?.fan.id ?? "anonymous"}|${idempotencyKey}`)
+          .digest("hex")
+          .slice(0, 32)}`
+      : undefined;
+    const run = await experience.startRun({
+      awayTeam: body.data.awayTeam,
+      homeTeam: body.data.homeTeam,
+      ownerFanId: session?.fan.id ?? null,
+      ...(runId ? { runId } : {}),
+    });
+    return reply.code(201).send({ run });
+  };
+  app.post("/api/v1/experience/runs", startRun);
+  app.post("/api/v1/experience/runs/start", startRun);
+  app.get<{ Params: { runId: string } }>(
+    "/api/v1/experience/runs/:runId",
+    async (request, reply) => {
+      const run = await experience.getRun(request.params.runId);
+      return run ? reply.send({ run }) : notFound(reply);
+    },
+  );
 }
 
 function registerProductRoutes(app: FastifyInstance, runtime: ProductRuntime) {
@@ -254,6 +366,18 @@ function registerProductRoutes(app: FastifyInstance, runtime: ProductRuntime) {
     async (request, reply) => {
       const fixture = runtime.fixture(request.params.fixtureId);
       return fixture ? reply.send(fixture) : notFound(reply);
+    },
+  );
+  app.get<{ Params: { fixtureId: string; identity: string } }>(
+    "/api/v1/fixtures/:fixtureId/moments/:identity",
+    async (request, reply) => {
+      const resolved = runtime.resolveMoment(
+        request.params.fixtureId,
+        request.params.identity,
+      );
+      return resolved
+        ? reply.header("Cache-Control", "no-store").send(resolved)
+        : notFound(reply);
     },
   );
   app.get<{ Params: { fixtureId: string } }>(

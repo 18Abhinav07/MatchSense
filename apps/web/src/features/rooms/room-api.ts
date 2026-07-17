@@ -6,7 +6,6 @@ import type {
   RoomMember,
   RoomMoment,
   RoomReactionReceipt,
-  RoomReplayStage,
   RoomTeam,
   RoomView,
   SenseLeaderboardRow,
@@ -31,12 +30,25 @@ export interface RoomEventSource {
 }
 
 export interface CreateRoomApiOptions {
+  readonly cookieSource?: (() => string) | undefined;
   readonly eventSourceFactory?: (url: string) => RoomEventSource;
   readonly fanId: string;
   readonly favoriteTeam: string | null;
   readonly fetchImpl?: typeof fetch;
   readonly origin: string;
-  readonly wait?: (milliseconds: number) => Promise<void>;
+}
+
+function csrfFromCookie(cookie: string) {
+  const item = cookie
+    .split(";")
+    .map((entry) => entry.trim())
+    .find((entry) => entry.startsWith("matchsense_csrf="));
+  if (!item) return null;
+  try {
+    return decodeURIComponent(item.slice("matchsense_csrf=".length));
+  } catch {
+    return null;
+  }
 }
 
 const TEAM_DETAILS: Readonly<Record<string, Omit<RoomTeam, "code">>> = {
@@ -385,12 +397,11 @@ export function createRoomApi(options: CreateRoomApiOptions): RoomApi {
     ? teamCode(options.favoriteTeam)
     : null;
   const fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
+  const cookieSource =
+    options.cookieSource ??
+    (() => (typeof document === "undefined" ? "" : document.cookie));
   const eventSourceFactory =
     options.eventSourceFactory ?? defaultEventSourceFactory;
-  const wait =
-    options.wait ??
-    ((ms: number) =>
-      new Promise<void>((resolve) => globalThis.setTimeout(resolve, ms)));
   const invites = new Map<string, string>();
 
   const request = async (
@@ -399,10 +410,17 @@ export function createRoomApi(options: CreateRoomApiOptions): RoomApi {
   ): Promise<unknown> => {
     let response: Response;
     try {
+      const csrf =
+        init?.method && init.method !== "GET"
+          ? csrfFromCookie(cookieSource())
+          : null;
       response = await fetchImpl(new URL(path, origin), {
         ...init,
         credentials: "same-origin",
-        headers: { ...init?.headers, "x-matchsense-fan-id": fanId },
+        headers: {
+          ...init?.headers,
+          ...(csrf ? { "x-matchsense-csrf": csrf } : {}),
+        },
       });
     } catch {
       throw new SafeRoomApiError("The room could not connect. Try again.");
@@ -464,23 +482,6 @@ export function createRoomApi(options: CreateRoomApiOptions): RoomApi {
     };
   };
 
-  const replayStep = async (
-    roomId: string,
-    action: string,
-    body: unknown,
-    stage: RoomReplayStage,
-    onUpdate?: (update: { room: RoomView; stage: RoomReplayStage }) => void,
-  ) => {
-    const room = mapRoom(
-      await request(
-        `/api/v1/rooms/${encodeURIComponent(roomId)}/demo/${action}`,
-        json("POST", body),
-      ),
-    );
-    onUpdate?.({ room, stage });
-    return room;
-  };
-
   return {
     async createRoom(input) {
       const result = record(
@@ -537,41 +538,14 @@ export function createRoomApi(options: CreateRoomApiOptions): RoomApi {
         ),
       );
     },
-    async playReplay(roomId, onUpdate) {
+    async startExperience(roomId) {
       const safeId = id(roomId, 120);
-      const started = await replayStep(
-        safeId,
-        "start",
-        {},
-        "kickoff",
-        onUpdate,
+      return mapRoom(
+        await request(
+          `/api/v1/rooms/${encodeURIComponent(safeId)}/start`,
+          json("POST", {}),
+        ),
       );
-      const momentId = `${started.fixture.id}:replay:goal`;
-      await wait(300);
-      await replayStep(
-        safeId,
-        "resolve-stats",
-        { cards: "NO", corners: "YES", goals: "YES", revision: 1 },
-        "calls_resolved",
-        onUpdate,
-      );
-      await wait(300);
-      await replayStep(
-        safeId,
-        "register-moment",
-        { momentId, revision: 7, varState: "HOLD" },
-        "under_review",
-        onUpdate,
-      );
-      await wait(500);
-      await replayStep(
-        safeId,
-        "resolve-moment",
-        { momentId, resolution: "CONFIRMED", revision: 7 },
-        "confirmed",
-        onUpdate,
-      );
-      return replayStep(safeId, "finalise", {}, "final", onUpdate);
     },
     async previewInvite(inviteCode) {
       const raw = record(
@@ -623,7 +597,6 @@ export function createRoomApi(options: CreateRoomApiOptions): RoomApi {
         `/api/v1/rooms/${encodeURIComponent(safeId)}/stream`,
         origin,
       );
-      url.searchParams.set("fanId", fanId);
       const source = eventSourceFactory(url.href);
       let closed = false;
       let latest = -1;

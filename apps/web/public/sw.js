@@ -1,6 +1,6 @@
 importScripts("/push-notification.js");
 
-const CACHE = "matchsense-shell-v2";
+const CACHE = "matchsense-shell-v3";
 const SHELL = [
   "/",
   "/manifest.webmanifest",
@@ -84,7 +84,6 @@ self.addEventListener("notificationclick", (event) => {
   const route = self.MatchSensePush.routeFromNotificationData(
     event.notification.data,
   );
-  const target = new URL(route.url, self.location.origin).href;
   event.waitUntil(
     self.clients
       .matchAll({ includeUncontrolled: true, type: "window" })
@@ -95,20 +94,17 @@ self.addEventListener("notificationclick", (event) => {
         if (!existing) {
           return self.clients.openWindow(route.url);
         }
-        const navigated = existing.navigate
-          ? await existing.navigate(target)
-          : existing;
-        const client = navigated || existing;
         if (route.momentIdentity) {
-          client.postMessage({
+          existing.postMessage({
             fixtureId: route.fixtureId,
             momentId: route.momentId,
             momentIdentity: route.momentIdentity,
             revision: route.revision,
             type: "matchsense:open-moment",
+            url: route.url,
           });
         }
-        return client.focus();
+        return existing.focus();
       }),
   );
 });

@@ -786,11 +786,11 @@ export interface SenseSlate {
 }
 
 export interface SenseOutcomes {
-  readonly winner: "HOME" | "DRAW" | "AWAY";
-  readonly goals_2_5: "OVER" | "UNDER";
-  readonly cards_4_5: "OVER" | "UNDER";
-  readonly corners_9_5: "OVER" | "UNDER";
-  readonly btts: "YES" | "NO";
+  readonly winner: "HOME" | "DRAW" | "AWAY" | "VOID";
+  readonly goals_2_5: "OVER" | "UNDER" | "VOID";
+  readonly cards_4_5: "OVER" | "UNDER" | "VOID";
+  readonly corners_9_5: "OVER" | "UNDER" | "VOID";
+  readonly btts: "YES" | "NO" | "VOID";
 }
 
 export interface SenseLeaderboardEntry {
@@ -925,7 +925,12 @@ export function scoreSenseSlates(input: {
     let returnedSense = 0;
     for (const marketId of SENSE_MARKET_IDS) {
       const pick = slate.picks[marketId];
-      if (pick.selection !== input.outcomes[marketId]) continue;
+      const outcome = input.outcomes[marketId];
+      if (outcome === "VOID") {
+        returnedSense += pick.allocation;
+        continue;
+      }
+      if (pick.selection !== outcome) continue;
       correctCount += 1;
       const market = senseMarketById.get(marketId)!;
       const selection = market.selections.find(

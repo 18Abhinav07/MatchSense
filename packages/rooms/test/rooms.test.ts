@@ -539,3 +539,28 @@ test("100-Sense leaderboard uses returned Sense then earliest lock", () => {
   assert.equal(leaderboard[0]?.correctCount, 5);
   assert.equal(leaderboard[0]?.returnedSense, 206);
 });
+
+test("100-Sense returns VOID market allocations at 1x without counting them correct", () => {
+  const picks = [
+    { allocation: 20, marketId: "winner", selection: "HOME" },
+    { allocation: 20, marketId: "goals_2_5", selection: "OVER" },
+    { allocation: 20, marketId: "cards_4_5", selection: "UNDER" },
+    { allocation: 20, marketId: "corners_9_5", selection: "OVER" },
+    { allocation: 20, marketId: "btts", selection: "YES" },
+  ] as const;
+
+  const leaderboard = scoreSenseSlates({
+    members: [{ id: "fan-1", nickname: "A" }],
+    outcomes: {
+      btts: "YES",
+      cards_4_5: "VOID",
+      corners_9_5: "VOID",
+      goals_2_5: "OVER",
+      winner: "HOME",
+    },
+    slates: { "fan-1": validateSensePicks("fan-1", picks, 10) },
+  });
+
+  assert.equal(leaderboard[0]?.correctCount, 3);
+  assert.equal(leaderboard[0]?.returnedSense, 170);
+});

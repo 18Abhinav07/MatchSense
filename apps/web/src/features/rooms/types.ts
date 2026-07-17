@@ -8,6 +8,7 @@ export type SenseSelection =
 
 export interface RoomTeam {
   readonly code: string;
+  readonly flagUrl?: string;
   readonly foreground?: string;
   readonly name: string;
   readonly primary: string;
@@ -130,14 +131,6 @@ export interface SendReactionInput {
   readonly type: ReactionType;
 }
 
-export type RoomReplayStage =
-  "kickoff" | "calls_resolved" | "under_review" | "confirmed" | "final";
-
-export interface RoomReplayUpdate {
-  readonly room: RoomView;
-  readonly stage: RoomReplayStage;
-}
-
 export interface RoomApi {
   createRoom(
     input: CreateRoomInput,
@@ -147,16 +140,13 @@ export interface RoomApi {
     input: JoinRoomInput,
   ): Promise<{ readonly lateJoin: boolean; readonly room: RoomView }>;
   openPicks(roomId: string): Promise<RoomView>;
-  playReplay(
-    roomId: string,
-    onUpdate?: (update: RoomReplayUpdate) => void,
-  ): Promise<RoomView>;
   previewInvite(inviteCode: string): Promise<RoomInvitePreview>;
   savePicks(roomId: string, picks: readonly SensePick[]): Promise<RoomView>;
   sendReaction(
     roomId: string,
     input: SendReactionInput,
   ): Promise<{ readonly receiptId: string; readonly room: RoomView }>;
+  startExperience(roomId: string): Promise<RoomView>;
   subscribeRoom(
     roomId: string,
     viewerMemberId: string,

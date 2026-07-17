@@ -79,11 +79,23 @@ describe("TxLINE canonical source to product runtime", () => {
 
     expect(accepted).toMatchObject({
       kind: "accepted",
-      moment: { eventTeam: "ESP", minute: "—" },
+      moment: {
+        eventTeam: "ESP",
+        familyId: "txline:18237038:action:551",
+        identity: "txline:18237038:action:551:2",
+        minute: "—",
+        player: { displayName: null, id: "907005" },
+        status: "confirmed",
+      },
       snapshot: {
+        phase: "first_half",
         provenance: "live_txline",
         score: { away: 2, home: 0 },
         sourceLabel: "TXLINE · DEVNET SOURCE",
+        stats: {
+          away: { redCards: 0, yellowCards: 0 },
+          home: { redCards: 0, yellowCards: 1 },
+        },
       },
     });
     expect(events.at(-1)).toMatchObject({
@@ -95,7 +107,7 @@ describe("TxLINE canonical source to product runtime", () => {
     runtime.close();
   });
 
-  it("publishes every accepted canonical action once for downstream fan products", () => {
+  it("turns game_finalised into the canonical full-time Moment and snapshot", () => {
     const runtime = createProductRuntime({
       cueBytes: Buffer.from("goal-cue"),
       fixture: {
@@ -157,10 +169,179 @@ describe("TxLINE canonical source to product runtime", () => {
 
     expect(runtime.acceptTxlineEvent(finalEvent)).toMatchObject({
       kind: "accepted",
-      moment: null,
+      moment: {
+        kind: "phase.full_time",
+        score: { away: 1, home: 2 },
+        status: "confirmed",
+      },
+      snapshot: {
+        phase: "full_time",
+        score: { away: 1, home: 2 },
+        stats: {
+          away: { corners: 5, redCards: 1, yellowCards: 2 },
+          home: { corners: 6, redCards: 0, yellowCards: 3 },
+        },
+      },
     });
     expect(runtime.acceptTxlineEvent(finalEvent).kind).toBe("duplicate");
     expect(actions).toEqual(["game_finalised"]);
+    runtime.close();
+  });
+
+  it("turns halftime_finalised into a canonical half-time boundary", () => {
+    const runtime = createProductRuntime({
+      cueBytes: Buffer.from("goal-cue"),
+      fixture: {
+        awayTeam: "ESP",
+        fixtureId: "half-time-fixture",
+        homeTeam: "FRA",
+        kickoffAt: "2026-07-17T18:00:00.000Z",
+        participant1IsHome: true,
+        provenance: "live_txline",
+      },
+      silenceBytes: Buffer.from("silence"),
+      writeIntervalMs: 60_000,
+    });
+    const accepted = runtime.acceptTxlineEvent({
+      action: "halftime_finalised",
+      actionId: "half-1",
+      clockSeconds: 0,
+      confirmed: true,
+      delivery: "live",
+      fixtureId: "half-time-fixture",
+      participant: null,
+      participantScore: { participant1: 1, participant2: 0 },
+      participantStats: null,
+      playerId: null,
+      provenance: "live_txline",
+      receivedAt: "2026-07-17T18:50:00.000Z",
+      revision: 4,
+      score: { away: 0, home: 1 },
+      source: {
+        actionId: "half-1",
+        observedSeq: "400",
+        payloadHash: "half-hash",
+        sourceTimestampMs: 1_784_313_000_000,
+        sseEventId: "400",
+      },
+      statusId: 50,
+      supersedesRevision: null,
+      varOutcome: null,
+      varReviewType: null,
+    });
+
+    expect(accepted).toMatchObject({
+      kind: "accepted",
+      moment: { kind: "phase.half_time", minute: "HT" },
+      snapshot: { phase: "half_time", score: { away: 0, home: 1 } },
+    });
+    runtime.close();
+  });
+
+  it("turns a TxLINE VAR action into an honest under-review Moment", () => {
+    const runtime = createProductRuntime({
+      cueBytes: Buffer.from("goal-cue"),
+      fixture: {
+        awayTeam: "ESP",
+        fixtureId: "var-fixture",
+        homeTeam: "FRA",
+        kickoffAt: "2026-07-17T18:00:00.000Z",
+        participant1IsHome: true,
+        provenance: "live_txline",
+      },
+      silenceBytes: Buffer.from("silence"),
+      writeIntervalMs: 60_000,
+    });
+    const accepted = runtime.acceptTxlineEvent({
+      action: "var",
+      actionId: "var-22",
+      clockSeconds: 3_600,
+      confirmed: null,
+      delivery: "live",
+      fixtureId: "var-fixture",
+      participant: null,
+      participantScore: { participant1: 1, participant2: 0 },
+      participantStats: null,
+      playerId: null,
+      provenance: "live_txline",
+      receivedAt: "2026-07-17T19:00:00.000Z",
+      revision: 7,
+      score: { away: 0, home: 1 },
+      source: {
+        actionId: "var-22",
+        observedSeq: "700",
+        payloadHash: "var-hash",
+        sourceTimestampMs: 1_784_313_600_000,
+        sseEventId: "700",
+      },
+      statusId: 4,
+      supersedesRevision: null,
+      varOutcome: null,
+      varReviewType: "goal",
+    });
+
+    expect(accepted).toMatchObject({
+      kind: "accepted",
+      moment: {
+        kind: "var.started",
+        status: "under_review",
+      },
+      snapshot: { phase: "first_half" },
+    });
+    runtime.close();
+  });
+
+  it("resolves a TxLINE VAR overturn without inventing a goal celebration", () => {
+    const runtime = createProductRuntime({
+      cueBytes: Buffer.from("goal-cue"),
+      fixture: {
+        awayTeam: "ESP",
+        fixtureId: "var-end-fixture",
+        homeTeam: "FRA",
+        kickoffAt: "2026-07-17T18:00:00.000Z",
+        participant1IsHome: true,
+        provenance: "live_txline",
+      },
+      silenceBytes: Buffer.from("silence"),
+      writeIntervalMs: 60_000,
+    });
+    const accepted = runtime.acceptTxlineEvent({
+      action: "var_end",
+      actionId: "var-end-22",
+      clockSeconds: 3_620,
+      confirmed: true,
+      delivery: "live",
+      fixtureId: "var-end-fixture",
+      participant: null,
+      participantScore: { participant1: 0, participant2: 0 },
+      participantStats: null,
+      playerId: null,
+      provenance: "live_txline",
+      receivedAt: "2026-07-17T19:00:20.000Z",
+      revision: 8,
+      score: { away: 0, home: 0 },
+      source: {
+        actionId: "var-end-22",
+        observedSeq: "701",
+        payloadHash: "var-end-hash",
+        sourceTimestampMs: 1_784_313_620_000,
+        sseEventId: "701",
+      },
+      statusId: 4,
+      supersedesRevision: null,
+      varOutcome: "overturned",
+      varReviewType: "goal",
+    });
+
+    expect(accepted).toMatchObject({
+      kind: "accepted",
+      moment: {
+        celebratesGoal: false,
+        kind: "var.overturned",
+        status: "overturned",
+      },
+      snapshot: { score: { away: 0, home: 0 } },
+    });
     runtime.close();
   });
 });

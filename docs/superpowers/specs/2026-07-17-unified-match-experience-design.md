@@ -2,7 +2,17 @@
 created: 2026-07-17
 project: matchsense
 ecosystem: full-stack
-tags: [design, architecture, pwa, txline, experience-match, rooms, notifications, commentary]
+tags:
+  [
+    design,
+    architecture,
+    pwa,
+    txline,
+    experience-match,
+    rooms,
+    notifications,
+    commentary,
+  ]
 status: approved-pending-written-review
 ---
 
@@ -16,11 +26,11 @@ MatchSense is an installable PWA that turns a canonical football event into one 
 
 The product has three journeys backed by one engine:
 
-| Journey | Purpose | Rooms | Source |
-|---|---|---:|---|
-| Guided Demo | Five-minute solo proof of Moments, push, commentary, VAR, catch-up, and Memory | No | Synthetic TxLINE-shaped events |
-| Experience Match | Always-available complete accelerated match for solo or friend use | Yes | Synthetic TxLINE-shaped events |
-| Standard Match | Real live fixture or authorised historical replay | Upcoming/live: yes; historical replay: no new Room | Live or authorised recorded TxLINE data |
+| Journey          | Purpose                                                                        |                                              Rooms | Source                                  |
+| ---------------- | ------------------------------------------------------------------------------ | -------------------------------------------------: | --------------------------------------- |
+| Guided Demo      | Five-minute solo proof of Moments, push, commentary, VAR, catch-up, and Memory |                                                 No | Synthetic TxLINE-shaped events          |
+| Experience Match | Always-available complete accelerated match for solo or friend use             |                                                Yes | Synthetic TxLINE-shaped events          |
+| Standard Match   | Real live fixture or authorised historical replay                              | Upcoming/live: yes; historical replay: no new Room | Live or authorised recorded TxLINE data |
 
 The journeys differ only in source and guidance. They share canonical truth, routes, notifications, commentary, History, and Memory implementations. Experience and genuinely upcoming/live matches also share the Room implementation; a completed historical replay cannot open a new prediction Room because its outcome is already known.
 
@@ -201,9 +211,7 @@ Journey and truth source are independent:
 type Journey = "guided_demo" | "experience_match" | "standard_match";
 
 type Provenance =
-  | "synthetic_txline_shaped"
-  | "live_txline"
-  | "recorded_txline_authorised";
+  "synthetic_txline_shaped" | "live_txline" | "recorded_txline_authorised";
 ```
 
 Every consumer response contains exact provenance. Replay and simulation never claim `LIVE`.
@@ -395,21 +403,21 @@ All mutations use server session identity, CSRF protection, strict input validat
 
 ## 10. Failure behavior
 
-| Failure | Required behavior |
-|---|---|
-| TxLINE disconnect | Remove `LIVE`, show exact age, reconcile before media |
-| Missed events | Return one ordered catch-up packet |
-| Duplicate input | No duplicate truth, push, commentary, or Room result |
-| Railway restart | Resume Experience cursor and outbox work |
-| Database unavailable | Fail readiness; PWA may show explicitly stale cached truth |
-| Push denied | Match remains complete; show non-looping recovery guidance |
-| Push endpoint 404/410 | Invalidate device and resync on next launch |
-| TTS/model failure | Preserve truth/push; use cue/transcript fallback |
-| Audio break | Reconnecting state; expose Resume if gesture is required |
-| VAR overturn | Roll back truth; cancel held celebration/reaction/sponsor |
-| Missing Room stat | Void only the affected call and normalize score |
-| Historical unavailable | Hide replay action; retain Experience Match |
-| Missing player data | Team-only presentation; no player-specific call |
+| Failure                | Required behavior                                          |
+| ---------------------- | ---------------------------------------------------------- |
+| TxLINE disconnect      | Remove `LIVE`, show exact age, reconcile before media      |
+| Missed events          | Return one ordered catch-up packet                         |
+| Duplicate input        | No duplicate truth, push, commentary, or Room result       |
+| Railway restart        | Resume Experience cursor and outbox work                   |
+| Database unavailable   | Fail readiness; PWA may show explicitly stale cached truth |
+| Push denied            | Match remains complete; show non-looping recovery guidance |
+| Push endpoint 404/410  | Invalidate device and resync on next launch                |
+| TTS/model failure      | Preserve truth/push; use cue/transcript fallback           |
+| Audio break            | Reconnecting state; expose Resume if gesture is required   |
+| VAR overturn           | Roll back truth; cancel held celebration/reaction/sponsor  |
+| Missing Room stat      | Void only the affected call and normalize score            |
+| Historical unavailable | Hide replay action; retain Experience Match                |
+| Missing player data    | Team-only presentation; no player-specific call            |
 
 ## 11. Security, rights, and assets
 

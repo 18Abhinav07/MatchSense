@@ -130,6 +130,10 @@ export interface FanRepository {
     handle: string;
   }): Promise<boolean>;
   listFollows(fanId: string): Promise<readonly FanFollowRecord[]>;
+  listFollowers(input: {
+    fixtureId: string;
+    mode: PersistenceMode;
+  }): Promise<readonly FanFollowRecord[]>;
   removeFollow(input: {
     fanId: string;
     fixtureId: string;
@@ -277,6 +281,16 @@ ORDER BY created_at ASC, mode ASC, fixture_id ASC;`,
       );
       return rows.map(parseFollow);
     },
+    listFollowers: async (input) => {
+      const rows = await client.unsafe(
+        `SELECT fan_id, mode, fixture_id, event_preferences, created_at
+FROM matchsense.fan_follows
+WHERE mode = $1 AND fixture_id = $2
+ORDER BY created_at ASC, fan_id ASC;`,
+        [input.mode, input.fixtureId],
+      );
+      return rows.map(parseFollow);
+    },
     removeFollow: async (input) => {
       const rows = await client.unsafe(
         `DELETE FROM matchsense.fan_follows
@@ -395,6 +409,10 @@ export interface PushDeviceRecord {
 export type PushDeliveryStatus = "pending" | "sent" | "failed" | "invalidated";
 
 export interface PushDeviceRepository {
+  getActiveForFan(input: {
+    deviceId: string;
+    fanId: string;
+  }): Promise<PushDeviceRecord | null>;
   invalidate(input: { deviceId: string; failedAt?: string }): Promise<boolean>;
   listActiveForFan(fanId: string): Promise<readonly PushDeviceRecord[]>;
   recordDelivery(input: {
@@ -448,6 +466,17 @@ export function createPushDeviceRepository(
   client: RepositoryClient,
 ): PushDeviceRepository {
   return {
+    getActiveForFan: async (input) => {
+      const rows = await client.unsafe(
+        `SELECT ${pushDeviceColumns}
+FROM matchsense.push_devices
+WHERE id = $1 AND fan_id = $2
+  AND invalidated_at IS NULL
+  AND (expires_at IS NULL OR expires_at > clock_timestamp());`,
+        [input.deviceId, input.fanId],
+      );
+      return rows[0] ? parsePushDevice(rows[0]) : null;
+    },
     invalidate: async (input) => {
       const rows = await client.unsafe(
         `UPDATE matchsense.push_devices
@@ -619,6 +648,8 @@ export interface ExperienceRepository {
     runId: string;
   }): Promise<boolean>;
   getRun(runId: string): Promise<ExperienceRunRecord | null>;
+  listForOwner(fanId: string): Promise<readonly ExperienceRunRecord[]>;
+  listRecoverableRuns(): Promise<readonly ExperienceRunRecord[]>;
 }
 
 const experienceRunColumns = `id, template_id, template_version, fixture_mode,
@@ -715,9 +746,24 @@ RETURNING run_id;`,
           `UPDATE matchsense.experience_runs
 SET next_beat_index = GREATEST(next_beat_index, $2 + 1),
     version = version + 1,
-    updated_at = clock_timestamp()
+    status = CASE
+      WHEN NOT EXISTS (
+        SELECT 1 FROM matchsense.experience_run_beats
+        WHERE run_id = $1 AND state <> 'delivered'
+      ) THEN 'final'
+      WHEN status IN ('ready', 'countdown') THEN 'live'
+      ELSE status
+    END,
+    completed_at = CASE
+      WHEN NOT EXISTS (
+        SELECT 1 FROM matchsense.experience_run_beats
+        WHERE run_id = $1 AND state <> 'delivered'
+      ) THEN $3::timestamptz
+      ELSE completed_at
+    END,
+    updated_at = $3::timestamptz
 WHERE id = $1;`,
-          [input.runId, input.beatIndex],
+          [input.runId, input.beatIndex, input.deliveredAt],
         );
         return true;
       }),
@@ -799,6 +845,26 @@ WHERE id = $1;`,
       );
       return rows[0] ? parseExperienceRun(rows[0]) : null;
     },
+    listForOwner: async (fanId) => {
+      const rows = await client.unsafe(
+        `SELECT ${experienceRunColumns}
+FROM matchsense.experience_runs
+WHERE owner_fan_id = $1
+ORDER BY created_at DESC, id ASC;`,
+        [fanId],
+      );
+      return rows.map(parseExperienceRun);
+    },
+    listRecoverableRuns: async () => {
+      const rows = await client.unsafe(
+        `SELECT ${experienceRunColumns}
+FROM matchsense.experience_runs
+WHERE status IN ('ready', 'countdown', 'live', 'final')
+ORDER BY created_at DESC, id ASC
+LIMIT 50;`,
+      );
+      return rows.map(parseExperienceRun);
+    },
   };
 }
 
@@ -849,6 +915,19 @@ export interface RoomAggregateRepository<T = unknown> {
     roomId: string;
     teamCode: string | null;
   }): Promise<void>;
+  joinAndCompareAndSwap(input: {
+    aggregate: T;
+    expectedVersion: number;
+    finalizedAt: string | null;
+    member: {
+      fanId: string;
+      nickname: string;
+      role: "member" | "spectator";
+      teamCode: string | null;
+    };
+    roomId: string;
+    status: RoomStatus;
+  }): Promise<RoomAggregateRecord<T> | null>;
   listByFixture(input: {
     fixtureId: string;
     mode: PersistenceMode;
@@ -964,6 +1043,47 @@ ON CONFLICT (room_id, fan_id) DO UPDATE SET
         [input.roomId, input.fanId, input.role, input.nickname, input.teamCode],
       );
     },
+    joinAndCompareAndSwap: async (input) =>
+      client.begin(async (transaction) => {
+        const rows = await transaction.unsafe(
+          `UPDATE matchsense.rooms
+SET version = version + 1,
+    aggregate = $3::jsonb,
+    status = $4,
+    finalized_at = $5::timestamptz,
+    updated_at = clock_timestamp()
+WHERE id = $1 AND version = $2
+RETURNING ${roomColumns};`,
+          [
+            input.roomId,
+            input.expectedVersion,
+            encodeJson(input.aggregate),
+            input.status,
+            input.finalizedAt,
+          ],
+        );
+        const room = rows[0];
+        if (!room) return null;
+        await transaction.unsafe(
+          `INSERT INTO matchsense.room_memberships (
+  room_id, fan_id, role, nickname_snapshot, team_code_snapshot
+)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (room_id, fan_id) DO UPDATE SET
+  role = EXCLUDED.role,
+  nickname_snapshot = EXCLUDED.nickname_snapshot,
+  team_code_snapshot = EXCLUDED.team_code_snapshot,
+  left_at = NULL;`,
+          [
+            input.roomId,
+            input.member.fanId,
+            input.member.role,
+            input.member.nickname,
+            input.member.teamCode,
+          ],
+        );
+        return parseRoom<T>(room);
+      }),
     listByFixture: async (input) => {
       const rows = await client.unsafe(
         `SELECT ${roomColumns}
@@ -1076,10 +1196,14 @@ LIMIT 1;`,
     },
     listLatestForFan: async (fanId) => {
       const rows = await client.unsafe(
-        `SELECT DISTINCT ON (mode, fixture_id) ${memoryColumns}
-FROM matchsense.match_memories
-WHERE fan_id = $1
-ORDER BY mode, fixture_id, revision DESC;`,
+        `SELECT ${memoryColumns}
+FROM (
+  SELECT DISTINCT ON (mode, fixture_id) ${memoryColumns}
+  FROM matchsense.match_memories
+  WHERE fan_id = $1
+  ORDER BY mode, fixture_id, revision DESC
+) AS latest
+ORDER BY created_at DESC, mode ASC, fixture_id ASC;`,
         [fanId],
       );
       return rows.map(parseMemory<T>);

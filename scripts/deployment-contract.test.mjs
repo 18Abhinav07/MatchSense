@@ -133,6 +133,41 @@ test("root exposes real deployment verification commands", () => {
   );
 });
 
+test("Railway config enforces the single-process streaming topology", () => {
+  assert.equal(existsSync(path.join(root, "railway.json")), true);
+  const railway = readJson("railway.json");
+
+  assert.equal(railway.$schema, "https://railway.com/railway.schema.json");
+  assert.deepEqual(railway.build, {
+    builder: "DOCKERFILE",
+    dockerfilePath: "Dockerfile",
+  });
+  assert.equal(railway.deploy?.startCommand, "node dist/main.js");
+  assert.equal(railway.deploy?.numReplicas, 1);
+  assert.equal(railway.deploy?.multiRegionConfig, null);
+  assert.equal(railway.deploy?.sleepApplication, false);
+  assert.equal(railway.deploy?.healthcheckPath, "/health/ready");
+  assert.equal(railway.deploy?.healthcheckTimeout, 300);
+  assert.equal(railway.deploy?.overlapSeconds, 0);
+  assert.equal(railway.deploy?.drainingSeconds, 15);
+  assert.equal(railway.deploy?.restartPolicyType, "ON_FAILURE");
+  assert.equal(railway.deploy?.restartPolicyMaxRetries, 10);
+
+  const readme = read("README.md");
+  assert.match(readme, /exactly one Railway application replica/iu);
+  for (const variable of [
+    "DATABASE_URL",
+    "TXLINE_API_TOKEN",
+    "VAPID_SUBJECT",
+    "VAPID_PUBLIC_KEY",
+    "VAPID_PRIVATE_KEY",
+    "GROQ_API_KEY",
+    "GEMINI_API_KEY",
+  ]) {
+    assert.match(readme, new RegExp(`\\b${variable}\\b`, "u"));
+  }
+});
+
 test("container smoke uses isolated pinned infrastructure and validates the runtime contract", () => {
   const smoke = read("scripts/container-smoke.mjs");
 
@@ -178,8 +213,12 @@ test("container smoke uses isolated pinned infrastructure and validates the runt
   assert.match(smoke, /127\.0\.0\.1::8080/u);
   assert.match(smoke, /health\/live/u);
   assert.match(smoke, /health\/ready/u);
+  assert.match(
+    smoke,
+    /"start application"[\s\S]+?DATA_RIGHTS_MODE=synthetic_demo[\s\S]+?"--publish"/u,
+  );
   assert.match(smoke, /node_modules\/@matchsense\/db\/dist\/cli\.js/u);
-  assert.match(smoke, /Database migrations applied: 1; current version: 1/u);
+  assert.match(smoke, /Database migrations applied: 3; current version: 3/u);
   assert.match(smoke, /Database migrations are current/u);
   assert.match(smoke, /\/app\/web\/dist\/index\.html/u);
   assert.match(smoke, /require\.resolve\(['"]vitest['"]\)/u);

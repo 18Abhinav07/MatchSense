@@ -1,5 +1,7 @@
 import { type CSSProperties, useId } from "react";
 
+import { TeamFlag } from "../../components/TeamFlag.js";
+
 import "./honest-moments.css";
 
 import type {
@@ -32,15 +34,11 @@ function TeamMark({
   quiet?: boolean;
 }) {
   return (
-    <span
-      aria-label={`${team.name} team mark`}
-      className={`msm-team-mark${quiet ? " msm-team-mark--quiet" : ""}`}
-      role="img"
-      style={teamStyle(team)}
-    >
-      <i aria-hidden="true" />
-      <b>{team.code}</b>
-    </span>
+    <TeamFlag
+      className={`msm-team-flag${quiet ? " msm-team-flag--quiet" : ""}`}
+      size={quiet ? "compact" : "standard"}
+      team={team}
+    />
   );
 }
 
@@ -687,7 +685,7 @@ export function MatchMemory({
             onClick={onReplay}
             type="button"
           >
-            <ReplayIcon /> Replay a Moment
+            <ReplayIcon /> Replay match moments
           </button>
           <button className="msm-memory-share" onClick={onShare} type="button">
             <ShareIcon /> Share this memory

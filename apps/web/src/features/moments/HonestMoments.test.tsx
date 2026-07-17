@@ -83,6 +83,7 @@ describe("honest Moment surfaces", () => {
     expect(markup).toContain("Goal · confirmed");
     expect(markup).toContain("Lionel Messi changes the match.");
     expect(markup).toContain("Moment presented by PlayStation");
+    expect(markup).toContain("ms-team-flag");
     expect(markup.indexOf("Goal · confirmed")).toBeLessThan(
       markup.indexOf("GOAL"),
     );
@@ -236,6 +237,6 @@ describe("honest Moment surfaces", () => {
     expect(markup).toContain("800 points");
     expect(markup).toContain("No prizes · no money");
     expect(markup).toContain("Share this memory");
-    expect(markup).toContain("Replay a Moment");
+    expect(markup).toContain("Replay match moments");
   });
 });

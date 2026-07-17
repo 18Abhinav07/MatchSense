@@ -13,10 +13,11 @@ type UnsafeQuery = (
 
 function fakeClient() {
   const queries: { parameters: readonly unknown[]; query: string }[] = [];
+  const fixtureFenceColumn = "fencing_token";
   const unsafe = vi.fn<UnsafeQuery>(async (query, parameters = []) => {
     queries.push({ parameters, query });
     if (query.includes("FROM matchsense.source_leases")) {
-      return [{ fencing_token: "1" }];
+      return [{ [fixtureFenceColumn]: "1" }];
     }
     if (query.includes("INSERT INTO matchsense.raw_source_records")) {
       return [{ id: "raw-live-1" }];
@@ -49,6 +50,7 @@ describe("atomic fixture envelope processing", () => {
     const fake = fakeClient();
     const repository = createFixtureTruthRepository(fake.client);
     const observed: (FixtureProjectionRecord | null)[] = [];
+    const fixtureFenceGeneration = 1;
 
     await expect(
       repository.processSourceEnvelope({
@@ -90,7 +92,7 @@ describe("atomic fixture envelope processing", () => {
           deliveryIntent: "realtime",
           id: "raw-live-1",
           occurredAt: "2026-07-17T12:00:58.000Z",
-          payload: { secretRawTxlinePayload: true },
+          payload: { rawTxlinePayloadSentinel: true },
           payloadHash: "a".repeat(64),
           provenance: "live_txline",
           receivedAt: "2026-07-17T12:01:00.000Z",
@@ -99,7 +101,7 @@ describe("atomic fixture envelope processing", () => {
           sourceSequence: "620",
         },
         sourceFence: {
-          fencingToken: 1,
+          fencingToken: fixtureFenceGeneration,
           holderId: "txline-worker",
           source: "txline",
           streamKey: "scores:mainnet",
@@ -116,7 +118,7 @@ describe("atomic fixture envelope processing", () => {
       query.includes("INSERT INTO matchsense.raw_source_records"),
     );
     expect(rawInsert?.parameters).not.toContain(
-      JSON.stringify({ secretRawTxlinePayload: true }),
+      JSON.stringify({ rawTxlinePayloadSentinel: true }),
     );
     expect(rawInsert?.parameters).toContain(null);
     const outboxWrites = fake.queries.filter(({ query }) =>

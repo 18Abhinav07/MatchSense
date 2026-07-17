@@ -6,6 +6,8 @@ import {
   useState,
 } from "react";
 
+import { TeamFlag } from "../../components/TeamFlag.js";
+
 import "./rooms.css";
 
 import {
@@ -120,6 +122,7 @@ export function FixtureBanner({ fixture }: { fixture: RoomFixture }) {
       aria-label={`${fixture.homeTeam.name} versus ${fixture.awayTeam.name}`}
     >
       <div className="msr-team-lockup" style={teamStyle(fixture.homeTeam)}>
+        <TeamFlag size="standard" team={fixture.homeTeam} />
         <span>{fixture.homeTeam.code}</span>
         <b>{fixture.homeTeam.name}</b>
       </div>
@@ -131,6 +134,7 @@ export function FixtureBanner({ fixture }: { fixture: RoomFixture }) {
         className="msr-team-lockup is-away"
         style={teamStyle(fixture.awayTeam)}
       >
+        <TeamFlag size="standard" team={fixture.awayTeam} />
         <span>{fixture.awayTeam.code}</span>
         <b>{fixture.awayTeam.name}</b>
       </div>
@@ -512,6 +516,7 @@ function RoomScreen({
   onExit,
   onOpenMatch,
   onOpenPicks,
+  onStartExperience,
   onSavePicks,
   onShare,
   onReact,
@@ -523,6 +528,7 @@ function RoomScreen({
   onExit: (() => void) | undefined;
   onOpenMatch: (() => void) | undefined;
   onOpenPicks(): void;
+  onStartExperience(): void;
   onSavePicks(picks: ReturnType<typeof toSensePicks>): void;
   onShare(): void;
   onReact(type: ReactionType, recipient: RoomMember): void;
@@ -618,6 +624,25 @@ function RoomScreen({
             Friends can see that you locked in, but not what you chose. Picks
             reveal automatically at kickoff.
           </p>
+        </section>
+      ) : null}
+      {room.fixture.isReplay && room.isHost && room.sense.phase === "OPEN" ? (
+        <section className="msr-host-gate msr-experience-gate">
+          <h2>Everyone ready? Start the Experience.</h2>
+          <p>
+            This locks the room and reveals every submitted slate. The match
+            itself continues in the main Live Companion.
+          </p>
+          <div>
+            <button
+              className="is-primary"
+              disabled={busy}
+              onClick={onStartExperience}
+              type="button"
+            >
+              Start Experience
+            </button>
+          </div>
         </section>
       ) : null}
       {room.sense.phase === "LOCKED" ? (
@@ -828,6 +853,12 @@ export function RoomExperience({
       onOpenMatch={onOpenMatch ? () => onOpenMatch(room.fixture.id) : undefined}
       onOpenPicks={() =>
         void act(() => api.openPicks(room.id), "Picks are open for everyone.")
+      }
+      onStartExperience={() =>
+        void act(
+          () => api.startExperience(room.id),
+          "Experience started. Every submitted slate is now visible.",
+        )
       }
       onReact={(type, recipient) => {
         if (!room.currentMoment) return;

@@ -49,6 +49,16 @@ function defaultDependencies(): BrowserPushDependencies {
   };
 }
 
+function csrfHeaders() {
+  if (typeof document === "undefined") return {};
+  const entry = document.cookie
+    .split(";")
+    .map((value) => value.trim())
+    .find((value) => value.startsWith("matchsense_csrf="));
+  const token = entry?.slice("matchsense_csrf=".length);
+  return token ? { "x-matchsense-csrf": decodeURIComponent(token) } : {};
+}
+
 function bytesToBase64Url(value: ArrayBuffer) {
   let binary = "";
   for (const byte of new Uint8Array(value)) {
@@ -126,7 +136,7 @@ export async function enableMomentPush(options: {
   const serialized = serializePushSubscription(subscription);
   const response = await dependencies.fetch("/api/v1/push/subscriptions", {
     body: JSON.stringify({ subscription: serialized }),
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...csrfHeaders() },
     method: "POST",
   });
   if (!response.ok) {
@@ -186,7 +196,7 @@ export async function triggerTestMomentPush(
     `/api/v1/push/subscriptions/${encodeURIComponent(registrationId)}/test`,
     {
       body: JSON.stringify(input),
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...csrfHeaders() },
       method: "POST",
     },
   );

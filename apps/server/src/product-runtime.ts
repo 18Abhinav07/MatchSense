@@ -7,6 +7,7 @@ import type {
 } from "@matchsense/commentary";
 import type {
   CanonicalMoment,
+  FixtureProjection,
   FixtureSnapshot,
   FixtureStreamEvent,
   ListeningControllerState,
@@ -145,23 +146,32 @@ export function isConfirmedGoalMoment(
   );
 }
 
+/** Every canonical match beat that is useful in a continuous radio feed. */
+export function isNarratableMoment(moment: CanonicalMoment) {
+  return moment.kind !== "correction" || moment.status === "corrected";
+}
+
 function createSingleFixtureRuntime(
   options: ProductRuntimeOptions & {
     fixture: ProductFixture;
+    initialEvents?: readonly FixtureStreamEvent[];
+    initialProjection?: FixtureProjection;
   },
 ) {
   const now = options.now ?? (() => new Date().toISOString());
   const id = options.id ?? randomUUID;
   const fixtureDefinition = options.fixture;
   const teamCatalog = options.teamCatalog ?? DEFAULT_TEAMS;
-  let projection = createFixtureProjection({
-    awayTeam: fixtureDefinition.awayTeam,
-    fixtureId: fixtureDefinition.fixtureId,
-    homeTeam: fixtureDefinition.homeTeam,
-    kickoffAt: fixtureDefinition.kickoffAt,
-    observedAt: now(),
-    provenance: fixtureDefinition.provenance,
-  });
+  let projection = options.initialProjection
+    ? structuredClone(options.initialProjection)
+    : createFixtureProjection({
+        awayTeam: fixtureDefinition.awayTeam,
+        fixtureId: fixtureDefinition.fixtureId,
+        homeTeam: fixtureDefinition.homeTeam,
+        kickoffAt: fixtureDefinition.kickoffAt,
+        observedAt: now(),
+        provenance: fixtureDefinition.provenance,
+      });
   const replaySessions = new Map<string, ReplaySession>();
   const listeningSessions = new Map<string, ListeningSessionView>();
   const fixtureSubscribers = new Map<string, Set<FixtureSubscriber>>();
@@ -171,7 +181,12 @@ function createSingleFixtureRuntime(
   >();
   const appliedCanonicalEvents = new Set<string>();
   const eventLog = new Map<string, FixtureStreamEvent[]>();
-  const scoringTeamByMoment = new Map<string, TeamCode>();
+  if (options.initialEvents?.length) {
+    eventLog.set(
+      fixtureDefinition.fixtureId,
+      options.initialEvents.map((event) => structuredClone(event)),
+    );
+  }
   const audioHub: AudioHub = createAudioHub(options);
   const commentaryPreparations = new Map<
     string,
@@ -179,6 +194,7 @@ function createSingleFixtureRuntime(
   >();
   const commentaryMp3 = new Map<string, Buffer>();
   const pendingCommentary = new Set<Promise<void>>();
+  let commentaryDeliveryTail: Promise<void> = Promise.resolve();
   let closed = false;
   audioHub.start();
 
@@ -192,8 +208,11 @@ function createSingleFixtureRuntime(
       subscriber(event);
     }
   };
+  const celebratesGoal = (moment: CanonicalMoment) => {
+    return moment.celebratesGoal;
+  };
   const notifyMoment = (moment: CanonicalMoment) => {
-    if (!options.notifyMoment || !isConfirmedGoalMoment(moment)) return;
+    if (!options.notifyMoment || !celebratesGoal(moment)) return;
     void Promise.resolve(options.notifyMoment(moment, snapshot())).catch(
       () => undefined,
     );
@@ -204,10 +223,7 @@ function createSingleFixtureRuntime(
     void work.finally(() => pendingCommentary.delete(work));
   };
 
-  const commentaryInput = (
-    moment: CanonicalMoment,
-    scoringTeam: TeamCode,
-  ): CommentaryInput => {
+  const commentaryInput = (moment: CanonicalMoment): CommentaryInput => {
     const homeTeam =
       teamCatalog.find((team) => team.code === projection.homeTeam) ??
       DEFAULT_TEAMS.find((team) => team.code === projection.homeTeam);
@@ -220,16 +236,16 @@ function createSingleFixtureRuntime(
     return {
       event: {
         awayTeam: { id: awayTeam.code, name: awayTeam.name },
-        eventTeamId: scoringTeam,
+        eventTeamId: moment.eventTeam,
         fixtureId: moment.fixtureId,
         homeTeam: { id: homeTeam.code, name: homeTeam.name },
-        kind: "goal",
+        kind: moment.kind,
         minute: moment.minute,
         momentId: moment.id,
-        playerDisplayName: null,
+        playerDisplayName: moment.player?.displayName ?? null,
         revision: moment.revision,
         score: moment.score,
-        status: "confirmed",
+        status: moment.status,
       },
       fan: {
         eventMode:
@@ -242,18 +258,15 @@ function createSingleFixtureRuntime(
     };
   };
 
-  const prepareCommentary = (
-    moment: CanonicalMoment,
-    scoringTeam: TeamCode,
-  ) => {
-    if (!options.commentaryPipeline || !isConfirmedGoalMoment(moment)) {
+  const prepareCommentary = (moment: CanonicalMoment) => {
+    if (!options.commentaryPipeline || !isNarratableMoment(moment)) {
       return null;
     }
     const key = `${moment.identity}:en-IN:${moment.provenance}:gemini-kore-v1`;
     const existing = commentaryPreparations.get(key);
     if (existing) return existing;
     const work = options.commentaryPipeline
-      .generate(commentaryInput(moment, scoringTeam))
+      .generate(commentaryInput(moment))
       .then(async ({ artifact }) => {
         let mp3Bytes = commentaryMp3.get(artifact.cacheKey) ?? null;
         if (!mp3Bytes && options.transcodeCommentary) {
@@ -273,13 +286,16 @@ function createSingleFixtureRuntime(
 
   const queueCommentary = (
     moment: CanonicalMoment,
-    scoringTeam: TeamCode,
     deliveryIdentity: string,
     targetSessionIds?: readonly string[],
   ) => {
-    if (!isConfirmedGoalMoment(moment)) return;
-    const task = (async () => {
-      const prepared = await prepareCommentary(moment, scoringTeam);
+    if (!isNarratableMoment(moment)) return;
+    // Start synthesis immediately, but serialize delivery so a faster later
+    // request can never speak over or before an earlier canonical Moment.
+    const preparation = prepareCommentary(moment);
+    if (!preparation) return;
+    const deliver = async () => {
+      const prepared = await preparation;
       if (!prepared || closed) return;
       const sessionIds =
         targetSessionIds ??
@@ -312,7 +328,11 @@ function createSingleFixtureRuntime(
         id: `commentary:${prepared.artifact.commentaryId}`,
         snapshot: snapshot(),
       });
-    })().catch(() => undefined);
+    };
+    const task = commentaryDeliveryTail
+      .then(deliver, deliver)
+      .catch(() => undefined);
+    commentaryDeliveryTail = task;
     trackCommentary(task);
   };
 
@@ -323,6 +343,7 @@ function createSingleFixtureRuntime(
     const moment =
       projection.lastEvent ??
       ({
+        celebratesGoal: true,
         eventTeam: projection.homeTeam,
         familyId: prewarmFamilyId,
         fixtureId: projection.fixtureId,
@@ -338,10 +359,7 @@ function createSingleFixtureRuntime(
         status: "confirmed",
       } satisfies CanonicalMoment);
     const task = (async () => {
-      await prepareCommentary(
-        moment,
-        scoringTeamByMoment.get(moment.identity) ?? projection.homeTeam,
-      );
+      await prepareCommentary(moment);
     })().catch(() => undefined);
     trackCommentary(task);
   };
@@ -383,7 +401,6 @@ function createSingleFixtureRuntime(
     ) {
       return { kind: "invalid_listening_session" as const };
     }
-    const previousScore = projection.score;
     const envelope = advanceReplay(replay, command, now());
     if (!envelope) return { kind: "duplicate" as const };
     const fact = adaptSyntheticEnvelope(envelope);
@@ -401,18 +418,14 @@ function createSingleFixtureRuntime(
         if (requestedListeningSession) {
           requestedListeningSession.lastMomentIdentity =
             canonicalMoment.identity;
-          if (isConfirmedGoalMoment(canonicalMoment)) {
+          if (celebratesGoal(canonicalMoment)) {
             audioHub.inject(`replay:${replay.id}:${canonicalMoment.identity}`, [
               requestedListeningSession.id,
             ]);
           }
         }
-        const scoringTeam =
-          scoringTeamByMoment.get(canonicalMoment.identity) ??
-          projection.homeTeam;
         queueCommentary(
           canonicalMoment,
-          scoringTeam,
           `replay:${replay.id}:${canonicalMoment.identity}`,
           requestedListeningSession
             ? [requestedListeningSession.id]
@@ -432,11 +445,6 @@ function createSingleFixtureRuntime(
       moment: reduced.moment,
       snapshot: snapshot(),
     };
-    const scoringTeam =
-      reduced.moment.score.home > previousScore.home
-        ? projection.homeTeam
-        : projection.awayTeam;
-    scoringTeamByMoment.set(reduced.moment.identity, scoringTeam);
     publish(streamEvent);
     notifyMoment(reduced.moment);
     const matchingListeners: string[] = [];
@@ -446,19 +454,86 @@ function createSingleFixtureRuntime(
         matchingListeners.push(session.id);
       }
     }
-    if (isConfirmedGoalMoment(reduced.moment)) {
+    if (celebratesGoal(reduced.moment)) {
       audioHub.inject(reduced.moment.identity, matchingListeners);
     }
     if (
       matchingListeners.length > 0 ||
       (fixtureSubscribers.get(reduced.moment.fixtureId)?.size ?? 0) > 0
     ) {
-      queueCommentary(reduced.moment, scoringTeam, reduced.moment.identity);
+      queueCommentary(reduced.moment, reduced.moment.identity);
     }
     return {
       kind: "accepted" as const,
       moment: reduced.moment,
       snapshot: snapshot(),
+    };
+  };
+
+  const acceptSourceFact = (fact: SourceFact) => {
+    if (fact.fixtureId !== projection.fixtureId) {
+      return { kind: "ignored" as const };
+    }
+    const familyId =
+      fact.type === "canonical_event"
+        ? (fact.targetFamilyId ?? fact.familyId)
+        : `${fact.fixtureId}:event:${fact.sourceEnvelopeId}`;
+    const wasExistingFamily = projection.eventEffects[familyId] !== undefined;
+    const reduced = reduceSourceFact(projection, fact);
+    projection = reduced.projection;
+    if (!reduced.changed) return { kind: "duplicate" as const };
+    if (!reduced.moment) {
+      return { kind: "accepted" as const, moment: null, snapshot: snapshot() };
+    }
+
+    publish({
+      event: wasExistingFamily ? "moment.revised" : "moment.created",
+      id: `${projection.fixtureId}:revision:${projection.revision}`,
+      moment: reduced.moment,
+      snapshot: snapshot(),
+    });
+    notifyMoment(reduced.moment);
+
+    const matchingListeners = [...listeningSessions.values()]
+      .filter((session) => session.fixtureId === projection.fixtureId)
+      .map((session) => {
+        session.lastMomentIdentity = reduced.moment!.identity;
+        return session.id;
+      });
+    if (celebratesGoal(reduced.moment)) {
+      audioHub.inject(reduced.moment.identity, matchingListeners);
+    }
+    if (
+      matchingListeners.length > 0 ||
+      (fixtureSubscribers.get(reduced.moment.fixtureId)?.size ?? 0) > 0
+    ) {
+      queueCommentary(reduced.moment, reduced.moment.identity);
+    }
+    return {
+      kind: "accepted" as const,
+      moment: reduced.moment,
+      snapshot: snapshot(),
+    };
+  };
+
+  const resolveMoment = (identity: string) => {
+    const moments = (eventLog.get(projection.fixtureId) ?? []).flatMap(
+      (event) => (event.moment ? [event.moment] : []),
+    );
+    const requested =
+      moments.find((moment) => moment.identity === identity) ?? null;
+    const familyId = requested?.familyId ?? identity.replace(/:\d+$/u, "");
+    const latest =
+      moments
+        .filter((moment) => moment.familyId === familyId)
+        .sort((left, right) => right.revision - left.revision)[0] ?? null;
+    return {
+      latest,
+      requested,
+      snapshot: snapshot(),
+      superseded:
+        latest !== null &&
+        (requested === null || requested.identity !== latest.identity),
     };
   };
 
@@ -482,6 +557,186 @@ function createSingleFixtureRuntime(
     for (const subscriber of canonicalEventSubscribers.get(event.fixtureId) ??
       []) {
       subscriber(event);
+    }
+    if (projection.phase === "scheduled" && event.action !== "game_finalised") {
+      acceptSourceFact({
+        familyId: `txline:${event.fixtureId}:phase:kickoff`,
+        fixtureId: event.fixtureId,
+        kind: "phase.kickoff",
+        minute: "0'",
+        occurredAt:
+          event.source.sourceTimestampMs === null
+            ? null
+            : new Date(event.source.sourceTimestampMs).toISOString(),
+        player: null,
+        provenance: "live_txline",
+        receivedAt: event.receivedAt,
+        sourceEnvelopeId: `txline:${event.fixtureId}:implicit-kickoff`,
+        sourceEventId: `txline:${event.fixtureId}:implicit-kickoff`,
+        status: "confirmed",
+        team: null,
+        type: "canonical_event",
+      });
+    }
+    if (event.action === "game_finalised") {
+      const participant1IsHome = fixtureDefinition.participant1IsHome ?? true;
+      const stats = event.participantStats
+        ? participant1IsHome
+          ? {
+              away: {
+                ...event.participantStats.participant2,
+                penaltiesAwarded: 0,
+                penaltiesMissed: 0,
+                penaltiesScored: 0,
+              },
+              home: {
+                ...event.participantStats.participant1,
+                penaltiesAwarded: 0,
+                penaltiesMissed: 0,
+                penaltiesScored: 0,
+              },
+            }
+          : {
+              away: {
+                ...event.participantStats.participant1,
+                penaltiesAwarded: 0,
+                penaltiesMissed: 0,
+                penaltiesScored: 0,
+              },
+              home: {
+                ...event.participantStats.participant2,
+                penaltiesAwarded: 0,
+                penaltiesMissed: 0,
+                penaltiesScored: 0,
+              },
+            }
+        : undefined;
+      const score = event.score ?? projection.score;
+      const sourceEventId =
+        event.actionId ?? event.source.actionId ?? event.source.payloadHash;
+      return acceptSourceFact({
+        familyId: `txline:${event.fixtureId}:action:${sourceEventId}`,
+        fixtureId: event.fixtureId,
+        kind: "phase.full_time",
+        minute: "FT",
+        occurredAt:
+          event.source.sourceTimestampMs === null
+            ? null
+            : new Date(event.source.sourceTimestampMs).toISOString(),
+        player: null,
+        provenance: "live_txline",
+        receivedAt: event.receivedAt,
+        scores: {
+          extraTime: projection.scores?.extraTime ?? { away: 0, home: 0 },
+          regulation: score,
+          shootout: projection.scores?.shootout ?? { away: 0, home: 0 },
+        },
+        sourceEnvelopeId: [
+          "txline",
+          event.fixtureId,
+          event.source.observedSeq ?? event.revision,
+          event.source.payloadHash,
+        ].join(":"),
+        sourceEventId,
+        status: "confirmed",
+        ...(stats ? { stats } : {}),
+        team: null,
+        type: "canonical_event",
+      });
+    }
+    if (event.action === "halftime_finalised") {
+      const score = event.score ?? projection.score;
+      const sourceEventId =
+        event.actionId ?? event.source.actionId ?? event.source.payloadHash;
+      return acceptSourceFact({
+        familyId: `txline:${event.fixtureId}:action:${sourceEventId}`,
+        fixtureId: event.fixtureId,
+        kind: "phase.half_time",
+        minute: "HT",
+        occurredAt:
+          event.source.sourceTimestampMs === null
+            ? null
+            : new Date(event.source.sourceTimestampMs).toISOString(),
+        player: null,
+        provenance: "live_txline",
+        receivedAt: event.receivedAt,
+        scores: {
+          extraTime: projection.scores?.extraTime ?? { away: 0, home: 0 },
+          regulation: score,
+          shootout: projection.scores?.shootout ?? { away: 0, home: 0 },
+        },
+        sourceEnvelopeId: [
+          "txline",
+          event.fixtureId,
+          event.source.observedSeq ?? event.revision,
+          event.source.payloadHash,
+        ].join(":"),
+        sourceEventId,
+        status: "confirmed",
+        team: null,
+        type: "canonical_event",
+      });
+    }
+    if (event.action === "var") {
+      const sourceEventId =
+        event.actionId ?? event.source.actionId ?? event.source.payloadHash;
+      return acceptSourceFact({
+        familyId: `txline:${event.fixtureId}:action:${sourceEventId}`,
+        fixtureId: event.fixtureId,
+        kind: "var.started",
+        minute: "—",
+        occurredAt:
+          event.source.sourceTimestampMs === null
+            ? null
+            : new Date(event.source.sourceTimestampMs).toISOString(),
+        player: null,
+        provenance: "live_txline",
+        receivedAt: event.receivedAt,
+        sourceEnvelopeId: [
+          "txline",
+          event.fixtureId,
+          event.source.observedSeq ?? event.revision,
+          event.source.payloadHash,
+        ].join(":"),
+        sourceEventId,
+        status: "under_review",
+        team: null,
+        type: "canonical_event",
+      });
+    }
+    if (event.action === "var_end" && event.varOutcome) {
+      const score = event.score ?? projection.score;
+      const sourceEventId =
+        event.actionId ?? event.source.actionId ?? event.source.payloadHash;
+      return acceptSourceFact({
+        familyId: `txline:${event.fixtureId}:action:${sourceEventId}`,
+        fixtureId: event.fixtureId,
+        kind:
+          event.varOutcome === "overturned" ? "var.overturned" : "var.stands",
+        minute: "—",
+        occurredAt:
+          event.source.sourceTimestampMs === null
+            ? null
+            : new Date(event.source.sourceTimestampMs).toISOString(),
+        player: null,
+        provenance: "live_txline",
+        receivedAt: event.receivedAt,
+        scores: {
+          extraTime: projection.scores?.extraTime ?? { away: 0, home: 0 },
+          regulation: score,
+          shootout: projection.scores?.shootout ?? { away: 0, home: 0 },
+        },
+        sourceEnvelopeId: [
+          "txline",
+          event.fixtureId,
+          event.source.observedSeq ?? event.revision,
+          event.source.payloadHash,
+        ].join(":"),
+        sourceEventId,
+        status: "confirmed",
+        team: null,
+        type: "canonical_event",
+      });
     }
     if (
       event.action !== "goal" ||
@@ -523,6 +778,28 @@ function createSingleFixtureRuntime(
       regulation: projection.score,
       shootout: { away: 0, home: 0 },
     };
+    const participantStats = event.participantStats;
+    const teamStats = (
+      value: NonNullable<typeof participantStats>["participant1"],
+    ) => ({
+      corners: value.corners,
+      penaltiesAwarded: 0,
+      penaltiesMissed: 0,
+      penaltiesScored: 0,
+      redCards: value.redCards,
+      yellowCards: value.yellowCards,
+    });
+    const stats = participantStats
+      ? participant1IsHome
+        ? {
+            away: teamStats(participantStats.participant2),
+            home: teamStats(participantStats.participant1),
+          }
+        : {
+            away: teamStats(participantStats.participant1),
+            home: teamStats(participantStats.participant2),
+          }
+      : undefined;
     const isExtraTime =
       projection.phase === "extra_time_first_half" ||
       projection.phase === "extra_time_half" ||
@@ -562,6 +839,7 @@ function createSingleFixtureRuntime(
       sourceEnvelopeId,
       sourceEventId: sourceActionId ?? sourceEnvelopeId,
       status: "confirmed",
+      ...(stats ? { stats } : {}),
       team: scoringTeam,
       type: "canonical_event",
     };
@@ -571,7 +849,6 @@ function createSingleFixtureRuntime(
     if (!reduced.moment) {
       return { kind: "accepted" as const, moment: null, snapshot: snapshot() };
     }
-    scoringTeamByMoment.set(reduced.moment.identity, scoringTeam);
     const streamEvent: FixtureStreamEvent = {
       event: "moment.created",
       id: reduced.moment.identity,
@@ -586,14 +863,14 @@ function createSingleFixtureRuntime(
         session.lastMomentIdentity = reduced.moment!.identity;
         return session.id;
       });
-    if (isConfirmedGoalMoment(reduced.moment)) {
+    if (celebratesGoal(reduced.moment)) {
       audioHub.inject(reduced.moment.identity, matchingListeners);
     }
     if (
       matchingListeners.length > 0 ||
       (fixtureSubscribers.get(reduced.moment.fixtureId)?.size ?? 0) > 0
     ) {
-      queueCommentary(reduced.moment, scoringTeam, reduced.moment.identity);
+      queueCommentary(reduced.moment, reduced.moment.identity);
     }
     return {
       kind: "accepted" as const,
@@ -603,6 +880,7 @@ function createSingleFixtureRuntime(
   };
 
   return {
+    acceptSourceFact,
     acceptTxlineEvent,
     attachListeningClient: (sessionId: string, client: AudioWritable) =>
       listeningSessions.has(sessionId)
@@ -633,6 +911,55 @@ function createSingleFixtureRuntime(
     fixtures: () => [snapshot()],
     listeningSession: (sessionId: string) =>
       listeningSessions.get(sessionId) ?? null,
+    publishPersistedEvent: (
+      event: FixtureStreamEvent,
+      _delivery: { celebratesGoal?: boolean } = {},
+    ) => {
+      if (event.snapshot.fixtureId !== projection.fixtureId) return false;
+      const existing = eventLog.get(projection.fixtureId) ?? [];
+      if (existing.some((entry) => entry.id === event.id)) return false;
+      if (event.snapshot.revision < projection.revision) return false;
+      projection = {
+        ...projection,
+        ...structuredClone(event.snapshot),
+        appliedSourceEnvelopeIds: projection.appliedSourceEnvelopeIds,
+        eventEffects: projection.eventEffects,
+      };
+      publish(structuredClone(event));
+      const moment = event.moment;
+      if (moment) {
+        const matchingListeners = [...listeningSessions.values()]
+          .filter((session) => session.fixtureId === projection.fixtureId)
+          .map((session) => {
+            session.lastMomentIdentity = moment.identity;
+            return session.id;
+          });
+        if (moment.celebratesGoal) {
+          audioHub.inject(moment.identity, matchingListeners);
+        }
+        if (
+          matchingListeners.length > 0 ||
+          (fixtureSubscribers.get(moment.fixtureId)?.size ?? 0) > 0
+        ) {
+          queueCommentary(moment, moment.identity);
+        }
+      }
+      return true;
+    },
+    restore: (
+      nextProjection: FixtureProjection,
+      events: readonly FixtureStreamEvent[],
+    ) => {
+      if (nextProjection.fixtureId !== projection.fixtureId) {
+        throw new Error("Restored fixture projection does not match runtime");
+      }
+      projection = structuredClone(nextProjection);
+      eventLog.set(
+        projection.fixtureId,
+        events.map((event) => structuredClone(event)),
+      );
+    },
+    resolveMoment,
     waitForCommentary: async () => {
       while (pendingCommentary.size > 0) {
         await Promise.all([...pendingCommentary]);
@@ -711,6 +1038,7 @@ export function createProductRuntime(options: ProductRuntimeOptions) {
   );
   const replayOwners = new Map<string, SingleFixtureRuntime>();
   const listeningOwners = new Map<string, SingleFixtureRuntime>();
+  const fixtureRegistrationSubscribers = new Set<(fixtureId: string) => void>();
   const mode =
     options.mode ??
     (publicFixtures.some(({ provenance }) => provenance === "live_txline")
@@ -729,6 +1057,10 @@ export function createProductRuntime(options: ProductRuntimeOptions) {
     runtimes.get(fixtureId) ?? null;
 
   return {
+    acceptSourceFact: (fact: SourceFact) =>
+      runtimeForFixture(fact.fixtureId)?.acceptSourceFact(fact) ?? {
+        kind: "ignored" as const,
+      },
     acceptTxlineEvent: (event: TxlineCanonicalEvent) =>
       runtimeForFixture(event.fixtureId)?.acceptTxlineEvent(event) ?? {
         kind: "ignored" as const,
@@ -791,6 +1123,53 @@ export function createProductRuntime(options: ProductRuntimeOptions) {
         .sort((left, right) => left.kickoffAt.localeCompare(right.kickoffAt)),
     listeningSession: (sessionId: string) =>
       listeningOwners.get(sessionId)?.listeningSession(sessionId) ?? null,
+    onFixtureRegistered: (subscriber: (fixtureId: string) => void) => {
+      fixtureRegistrationSubscribers.add(subscriber);
+      return () => fixtureRegistrationSubscribers.delete(subscriber);
+    },
+    registerFixture: (
+      fixture: ProductFixture,
+      registration: {
+        events?: readonly FixtureStreamEvent[];
+        projection?: FixtureProjection;
+        public?: boolean;
+      } = {},
+    ) => {
+      let runtime = runtimeForFixture(fixture.fixtureId);
+      const isNew = runtime === null;
+      if (!runtime) {
+        runtime = createSingleFixtureRuntime({
+          ...options,
+          fixture,
+          ...(registration.events
+            ? { initialEvents: registration.events }
+            : {}),
+          ...(registration.projection
+            ? { initialProjection: registration.projection }
+            : {}),
+        });
+        runtimes.set(fixture.fixtureId, runtime);
+      } else if (registration.projection) {
+        runtime.restore(registration.projection, registration.events ?? []);
+      }
+      if (registration.public) publicFixtureIds.add(fixture.fixtureId);
+      if (isNew) {
+        for (const subscriber of fixtureRegistrationSubscribers) {
+          subscriber(fixture.fixtureId);
+        }
+      }
+      return runtime.fixture(fixture.fixtureId)!;
+    },
+    publishPersistedEvent: (
+      event: FixtureStreamEvent,
+      delivery?: { celebratesGoal?: boolean },
+    ) =>
+      runtimeForFixture(event.snapshot.fixtureId)?.publishPersistedEvent(
+        event,
+        delivery,
+      ) ?? false,
+    resolveMoment: (fixtureId: string, identity: string) =>
+      runtimeForFixture(fixtureId)?.resolveMoment(identity) ?? null,
     setSourceHealth: (
       state: ProductSourceState,
       detail: string | null = null,

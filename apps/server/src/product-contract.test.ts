@@ -435,4 +435,55 @@ describe("first vertical product contract", () => {
     expect(unsafe.statusCode).toBe(400);
     await app.close();
   });
+
+  it("never lets a delayed persisted event regress a hydrated fixture", async () => {
+    const runtime = createProductRuntime({
+      cueBytes: Buffer.from("cue"),
+      fixtures: [
+        {
+          awayTeam: "FRA",
+          fixtureId: "restart-fixture",
+          homeTeam: "ARG",
+          kickoffAt: "2026-07-18T21:00:00.000Z",
+          provenance: "live_txline",
+        },
+      ],
+      mode: "live",
+      silenceBytes: Buffer.from("silence"),
+      writeIntervalMs: 60_000,
+    });
+    const initial = runtime.fixture("restart-fixture")!;
+    expect(
+      runtime.publishPersistedEvent({
+        event: "snapshot",
+        id: "restart-fixture:revision:8",
+        snapshot: {
+          ...initial,
+          minute: "50'",
+          phase: "second_half",
+          revision: 8,
+          score: { away: 0, home: 2 },
+        },
+      }),
+    ).toBe(true);
+    expect(
+      runtime.publishPersistedEvent({
+        event: "snapshot",
+        id: "restart-fixture:revision:7",
+        snapshot: {
+          ...initial,
+          minute: "45'",
+          phase: "half_time",
+          revision: 7,
+          score: { away: 0, home: 1 },
+        },
+      }),
+    ).toBe(false);
+    expect(runtime.fixture("restart-fixture")).toMatchObject({
+      minute: "50'",
+      revision: 8,
+      score: { away: 0, home: 2 },
+    });
+    await runtime.close();
+  });
 });

@@ -47,8 +47,15 @@ export interface FixtureProcessorInput {
 }
 
 export interface FixtureProcessor {
-  process(input: FixtureProcessorInput): Promise<ProcessSourceEnvelopeResult>;
+  process(input: FixtureProcessorInput): Promise<FixtureProcessorResult>;
 }
+
+export type FixtureProcessorResult =
+  | Exclude<ProcessSourceEnvelopeResult, { kind: "committed" }>
+  | (Extract<ProcessSourceEnvelopeResult, { kind: "committed" }> & {
+      /** The exact canonical event written in the same database transaction. */
+      event?: FixtureStreamEvent;
+    });
 
 export interface CreateFixtureProcessorOptions {
   repository: Pick<FixtureTruthRepository, "processSourceEnvelope">;
@@ -246,6 +253,7 @@ function normalizedMoment(value: unknown): CanonicalMoment | null {
   }
   const score = normalizedScore(moment.score, { away: 0, home: 0 });
   return {
+    celebratesGoal: moment.celebratesGoal === true,
     eventTeam: moment.eventTeam,
     familyId: moment.familyId,
     fixtureId: moment.fixtureId,
@@ -283,7 +291,7 @@ function normalizedMoment(value: unknown): CanonicalMoment | null {
 function storedProjection(
   record: FixtureProjectionRecord,
   fixture: FixtureProcessorFixture,
-  fact: SourceFact,
+  provenance: SourceFact["provenance"],
 ): FixtureProjection {
   const value = objectValue(record.payload);
   if (!value) throw new Error("Stored fixture projection is invalid");
@@ -293,7 +301,7 @@ function storedProjection(
     homeTeam: fixture.homeTeam,
     kickoffAt: fixture.kickoffAt,
     observedAt: record.updatedAt,
-    provenance: fact.provenance,
+    provenance,
   });
   const score = normalizedScore(value.score, base.score);
   const phase =
@@ -326,6 +334,14 @@ function storedProjection(
   };
 }
 
+export function restoreFixtureProjection(input: {
+  fixture: FixtureProcessorFixture;
+  provenance: SourceFact["provenance"];
+  record: FixtureProjectionRecord;
+}) {
+  return storedProjection(input.record, input.fixture, input.provenance);
+}
+
 function eventAlreadyExists(projection: FixtureProjection, fact: SourceFact) {
   if (fact.type !== "canonical_event") return false;
   const familyId = fact.targetFamilyId ?? fact.familyId;
@@ -355,10 +371,15 @@ export function createFixtureProcessor(
         input.fact.type === "canonical_event"
           ? input.fact.occurredAt
           : input.fact.receivedAt;
-      return options.repository.processSourceEnvelope({
+      let committedEvent: FixtureStreamEvent | undefined;
+      const persisted = await options.repository.processSourceEnvelope({
         derive: (currentRecord) => {
           const current = currentRecord
-            ? storedProjection(currentRecord, input.fixture, input.fact)
+            ? storedProjection(
+                currentRecord,
+                input.fixture,
+                input.fact.provenance,
+              )
             : createFixtureProjection({
                 awayTeam: input.fixture.awayTeam,
                 fixtureId: input.fixture.fixtureId,
@@ -384,24 +405,32 @@ export function createFixtureProcessor(
             ...(reduced.moment ? { moment: reduced.moment } : {}),
             snapshot,
           };
+          committedEvent = event;
+          const celebratesGoal = reduced.moment?.celebratesGoal === true;
+          const alertsFan = Boolean(
+            reduced.moment &&
+            reduced.moment.status === "confirmed" &&
+            (celebratesGoal ||
+              reduced.moment.kind === "card.red" ||
+              reduced.moment.kind === "phase.full_time"),
+          );
           const payload = {
+            celebratesGoal,
             deliveryIntent: input.deliveryIntent,
             event,
+            fact: input.fact,
             fixtureId: input.fixture.fixtureId,
             mode: input.mode,
             moment: reduced.moment,
             revision,
             snapshot,
           };
-          const isConfirmedGoal =
-            reduced.moment?.kind === "goal" &&
-            reduced.moment.status === "confirmed";
           const topics =
             input.deliveryIntent === "reconcile"
               ? ["fixture.reconcile", "room.reconcile", "memory.reconcile"]
               : [
                   "fixture.broadcast",
-                  ...(isConfirmedGoal
+                  ...(alertsFan
                     ? ["push.candidate", "commentary.prepare"]
                     : []),
                   "room.project",
@@ -452,6 +481,16 @@ export function createFixtureProcessor(
         },
         ...(input.sourceFence ? { sourceFence: input.sourceFence } : {}),
       });
+      if (persisted.kind !== "committed") return persisted;
+      if (
+        !committedEvent ||
+        committedEvent.snapshot.revision !== persisted.revision
+      ) {
+        throw new Error(
+          "Committed fixture event does not match persistence result",
+        );
+      }
+      return { ...persisted, event: committedEvent };
     },
   };
 }

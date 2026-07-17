@@ -23,11 +23,13 @@ Every later event and social feature must reuse that path.
 ## Task 1 — Canonical event and fixture truth
 
 **Files:**
+
 - Modify: `packages/contracts/src/index.ts`
 - Modify: `packages/event-engine/src/index.ts`
 - Modify: `packages/event-engine/src/index.test.ts`
 
 **Build:**
+
 - Add the complete canonical event union and full match phases.
 - Separate regulation, extra-time, and shootout score truth.
 - Give every Moment a stable family ID plus revision identity; never derive identity from score.
@@ -40,6 +42,7 @@ Every later event and social feature must reuse that path.
 ## Task 2 — Durable product records and fixture processor
 
 **Files:**
+
 - Modify: `packages/db/src/migrations.ts`
 - Modify: `packages/db/src/repositories.ts`
 - Modify: `packages/db/src/postgres.ts`
@@ -48,6 +51,7 @@ Every later event and social feature must reuse that path.
 - Add: `apps/server/src/fixture-processor.test.ts`
 
 **Build:**
+
 - Persist fans/sessions, profiles, follows, alert preferences, devices, Experience runs/beats, canonical Moments/revisions, fixture events, Rooms, memberships, picks, reactions, results, Memories, and outbox delivery attempts.
 - Use one transaction to dedupe source identity, lock/reduce fixture truth, append revision, update projection, append fixture event, and enqueue side effects.
 - Keep raw live TxLINE payload retention disabled; synthetic source records may be retained.
@@ -59,6 +63,7 @@ Every later event and social feature must reuse that path.
 ## Task 3 — Server-owned Experience Match and shared delivery
 
 **Files:**
+
 - Add: `apps/server/src/experience-runtime.ts`
 - Add: `apps/server/src/experience-runtime.test.ts`
 - Modify: `apps/server/src/product-runtime.ts`
@@ -70,6 +75,7 @@ Every later event and social feature must reuse that path.
 - Modify/add corresponding focused tests
 
 **Build:**
+
 - Create `ExperienceTemplate -> ExperienceRun` with server-owned due beats and unique `(runId, beatIndex)` delivery.
 - Make progression independent of SSE/browser connections and resume after restart.
 - Route Experience and TxLINE envelopes through the same fixture processor/event bus.
@@ -84,6 +90,7 @@ Every later event and social feature must reuse that path.
 ## Task 4 — Cohesive installable PWA shell
 
 **Files:**
+
 - Modify: `apps/web/src/App.tsx`
 - Modify/add components under `apps/web/src/features/`
 - Modify: `apps/web/src/styles.css`
@@ -92,6 +99,7 @@ Every later event and social feature must reuse that path.
 - Modify/add focused web tests
 
 **Build:**
+
 - Add first ordinary-launch animation, favorite-team selection, unique handle, generated team avatar, sample Moment, alert/install primer, and Today entry.
 - Add Profile with handle, avatar, team, alert/listening/language/accessibility preferences, device list, Room achievements, and sign-out/delete actions.
 - Replace circular team tokens with rectangular textile-style flags everywhere.
@@ -105,6 +113,7 @@ Every later event and social feature must reuse that path.
 ## Task 5 — Exact push activation and continuous commentary
 
 **Files:**
+
 - Modify: `apps/web/public/sw.js`
 - Modify: `apps/web/src/push-notifications.ts`
 - Modify: `apps/web/src/ListeningProvider.tsx`
@@ -113,6 +122,7 @@ Every later event and social feature must reuse that path.
 - Modify/add focused PWA tests
 
 **Build:**
+
 - Warm notification activation uses `postMessage + focus` and internal routing without reloading the audio root.
 - Cold activation uses the exact Moment URL plus pending-activation recovery.
 - Hydrate requested/current truth and render overturned/superseded Moments honestly.
@@ -127,6 +137,7 @@ Every later event and social feature must reuse that path.
 ## Task 6 — Persistent Rooms and Sense scoring
 
 **Files:**
+
 - Modify: `packages/rooms/src/index.ts`
 - Modify: `apps/server/src/room-service.ts`
 - Modify: `apps/server/src/room-routes.ts`
@@ -136,6 +147,7 @@ Every later event and social feature must reuse that path.
 - Modify/add Room tests
 
 **Build:**
+
 - Persist room lifecycle, hashed invites, memberships, picks, reactions, and final result.
 - Give each member exactly 100 room-scoped confidence points across five fixed calls.
 - Lock real matches at authentic kickoff; let Experience hosts start; late joiners spectate.
@@ -149,6 +161,7 @@ Every later event and social feature must reuse that path.
 ## Task 7 — Guided Demo, live schedule, history, and Memory
 
 **Files:**
+
 - Modify: `apps/server/src/demo-runtime.ts`
 - Modify: `apps/server/src/demo-routes.ts`
 - Modify: `apps/server/src/main.ts`
@@ -158,6 +171,7 @@ Every later event and social feature must reuse that path.
 - Modify/add focused tests
 
 **Build:**
+
 - Make Demo a guided controller over a real synthetic Experience run; exclude Rooms.
 - Demonstrate kickoff, foreground event, push tap, listening, cards, penalty, VAR overturn/stands, reconnect catch-up, half-time, full-time, and Memory in about five minutes.
 - Sync/persist the full optional-field-tolerant TxLINE schedule at startup and every five minutes; do not limit the UI to two fixtures.
@@ -171,11 +185,13 @@ Every later event and social feature must reuse that path.
 ## Task 8 — Integrated browser proof, deploy, and device handoff
 
 **Files:**
+
 - Add/modify browser smoke scripts under `scripts/`
 - Modify: `README.md`
 - Modify: `../HANDOFF.md`
 
 **Build and prove:**
+
 - Run migrations, all tests, typecheck, build, format check, asset-rights check, and container smoke.
 - Browser-run two isolated fan sessions through onboarding, Experience follow/listen, Room join/picks, event/Moment, VAR revision, final score, and Memory.
 - Browser-run Demo separately and verify it has no Room branch.

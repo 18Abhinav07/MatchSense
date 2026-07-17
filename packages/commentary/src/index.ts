@@ -9,6 +9,31 @@ export const commentaryWorkspace = "@matchsense/commentary" as const;
 
 export type CommentaryLanguage = "en" | "hi";
 export type CommentaryEventMode = "live" | "replay";
+export type CommentaryEventKind =
+  | "phase.kickoff"
+  | "goal"
+  | "card.yellow"
+  | "card.red"
+  | "corner"
+  | "penalty.awarded"
+  | "penalty.scored"
+  | "penalty.missed"
+  | "var.started"
+  | "var.stands"
+  | "var.overturned"
+  | "phase.half_time"
+  | "phase.second_half_start"
+  | "phase.regulation_end"
+  | "phase.extra_time_start"
+  | "phase.extra_time_half"
+  | "phase.extra_time_second_half_start"
+  | "phase.shootout_start"
+  | "shootout.kick_scored"
+  | "shootout.kick_missed"
+  | "phase.full_time"
+  | "correction";
+export type CommentaryEventStatus =
+  "provisional" | "confirmed" | "under_review" | "overturned" | "corrected";
 
 export interface CommentaryTeam {
   id: string;
@@ -17,16 +42,16 @@ export interface CommentaryTeam {
 
 export interface CommentaryEvent {
   awayTeam: CommentaryTeam;
-  eventTeamId: string;
+  eventTeamId: string | null;
   fixtureId: string;
   homeTeam: CommentaryTeam;
-  kind: "goal";
+  kind: CommentaryEventKind;
   minute: string;
   momentId: string;
   playerDisplayName: string | null;
   revision: number;
   score: { away: number; home: number };
-  status: "confirmed" | "provisional";
+  status: CommentaryEventStatus;
 }
 
 export interface FanCommentaryContext {
@@ -148,6 +173,7 @@ function validateInput(input: CommentaryInput) {
     throw new Error("revision must be a positive integer");
   }
   if (
+    input.event.eventTeamId !== null &&
     input.event.eventTeamId !== input.event.homeTeam.id &&
     input.event.eventTeamId !== input.event.awayTeam.id
   ) {
@@ -172,13 +198,17 @@ export function createCommentaryCacheKey(input: CommentaryInput) {
 }
 
 function eventTeam(input: CommentaryInput) {
-  return input.event.eventTeamId === input.event.homeTeam.id
-    ? input.event.homeTeam
-    : input.event.awayTeam;
+  if (input.event.eventTeamId === input.event.homeTeam.id) {
+    return input.event.homeTeam;
+  }
+  if (input.event.eventTeamId === input.event.awayTeam.id) {
+    return input.event.awayTeam;
+  }
+  return null;
 }
 
-function opponentTeam(input: CommentaryInput) {
-  return input.event.eventTeamId === input.event.homeTeam.id
+function opponentTeam(input: CommentaryInput, team: CommentaryTeam) {
+  return team.id === input.event.homeTeam.id
     ? input.event.awayTeam
     : input.event.homeTeam;
 }
@@ -189,6 +219,23 @@ function eventScore(input: CommentaryInput) {
     against: isHome ? input.event.score.away : input.event.score.home,
     for: isHome ? input.event.score.home : input.event.score.away,
   };
+}
+
+function englishScoreline(input: CommentaryInput) {
+  return `${input.event.homeTeam.name} ${input.event.score.home}–${input.event.score.away} ${input.event.awayTeam.name}`;
+}
+
+function englishMinutePhrase(minute: string) {
+  const parsed = parseDisplayMinute(minute);
+  if (parsed === null) return "";
+  return parsed.added === null
+    ? ` in the ${ordinal(parsed.base)} minute`
+    : ` in stoppage time at ${parsed.base} plus ${parsed.added}`;
+}
+
+function eventTeamSuffix(input: CommentaryInput) {
+  const team = eventTeam(input);
+  return team ? ` for ${team.name}` : "";
 }
 
 function parseDisplayMinute(minute: string) {
@@ -222,34 +269,105 @@ function hindiTeam(team: CommentaryTeam) {
 }
 
 function renderEnglishTranscript(input: CommentaryInput, atmosphere: string) {
-  const scoringTeam = eventTeam(input);
-  const opponent = opponentTeam(input);
-  if (input.event.status !== "confirmed") {
-    return `Possible goal for ${scoringTeam.name}, but it is not confirmed yet. Celebration held.`;
+  const team = eventTeam(input);
+  const teamName = team?.name;
+  const minutePhrase = englishMinutePhrase(input.event.minute);
+
+  if (input.event.kind === "goal") {
+    if (input.event.status === "under_review") {
+      return teamName
+        ? `${teamName}'s possible goal is under review. Celebration held until the decision is confirmed.`
+        : "A possible goal is under review. Celebration held until the decision is confirmed.";
+    }
+    if (input.event.status !== "confirmed") {
+      return teamName
+        ? `Possible goal for ${teamName}, but it is not confirmed yet. Celebration held.`
+        : "Possible goal, but it is not confirmed yet. Celebration held.";
+    }
+    if (!team) {
+      return `Goal confirmed. ${englishScoreline(input)}${minutePhrase}.`;
+    }
+    const opponent = opponentTeam(input, team);
+    const scorer = input.event.playerDisplayName
+      ? `${input.event.playerDisplayName} scores for ${team.name}.`
+      : `${team.name} score.`;
+    const score = eventScore(input);
+    const state =
+      score.for === score.against
+        ? `It is now ${englishScoreline(input)}${minutePhrase}.`
+        : score.for > score.against
+          ? `${team.name} lead ${opponent.name} ${score.for}–${score.against}${minutePhrase}.`
+          : `${team.name} pull one back. It is ${englishScoreline(input)}${minutePhrase}.`;
+    return `Goal! ${scorer} ${state} ${atmosphere}`;
   }
-  const scorer = input.event.playerDisplayName
-    ? `${input.event.playerDisplayName} scores for ${scoringTeam.name}.`
-    : `${scoringTeam.name} score.`;
-  const minute = parseDisplayMinute(input.event.minute);
-  const minutePhrase =
-    minute === null
-      ? ""
-      : minute.added === null
-        ? ` in the ${ordinal(minute.base)} minute`
-        : ` in stoppage time at ${minute.base} plus ${minute.added}`;
-  const score = eventScore(input);
-  const state =
-    score.for === score.against
-      ? `It is now ${input.event.homeTeam.name} ${input.event.score.home}–${input.event.score.away} ${input.event.awayTeam.name}${minutePhrase}.`
-      : score.for > score.against
-        ? `${scoringTeam.name} lead ${opponent.name} ${score.for}–${score.against}${minutePhrase}.`
-        : `${scoringTeam.name} pull one back. It is ${input.event.homeTeam.name} ${input.event.score.home}–${input.event.score.away} ${input.event.awayTeam.name}${minutePhrase}.`;
-  return `Goal! ${scorer} ${state} ${atmosphere}`;
+
+  switch (input.event.kind) {
+    case "var.started":
+      return `VAR review underway${eventTeamSuffix(input)}. The decision is being checked. Celebration held.`;
+    case "var.stands":
+      return `VAR check complete. The decision${eventTeamSuffix(input)} stands.`;
+    case "var.overturned":
+      return `VAR overturns the decision${eventTeamSuffix(input)}. No celebration.`;
+    case "card.yellow":
+      return `Yellow card${eventTeamSuffix(input)}${minutePhrase}.`;
+    case "card.red":
+      return `Red card${eventTeamSuffix(input)}${minutePhrase}.`;
+    case "corner":
+      return teamName
+        ? `Corner to ${teamName}${minutePhrase}.`
+        : `Corner awarded${minutePhrase}.`;
+    case "penalty.awarded":
+      return teamName
+        ? `Penalty awarded to ${teamName}${minutePhrase}.`
+        : `Penalty awarded${minutePhrase}.`;
+    case "penalty.scored":
+      return teamName
+        ? `Penalty scored by ${teamName}${minutePhrase}. ${englishScoreline(input)}.`
+        : `Penalty scored${minutePhrase}. ${englishScoreline(input)}.`;
+    case "penalty.missed":
+      return teamName
+        ? `Penalty missed by ${teamName}${minutePhrase}.`
+        : `Penalty missed${minutePhrase}.`;
+    case "phase.kickoff":
+      return `Kickoff. ${input.event.homeTeam.name} against ${input.event.awayTeam.name} is underway.`;
+    case "phase.half_time":
+      return `Half-time. ${englishScoreline(input)}.`;
+    case "phase.second_half_start":
+      return `The second half is underway. ${englishScoreline(input)}.`;
+    case "phase.regulation_end":
+      return `Regulation time is over. ${englishScoreline(input)}.`;
+    case "phase.extra_time_start":
+      return `Extra time is underway. ${englishScoreline(input)}.`;
+    case "phase.extra_time_half":
+      return `Half-time in extra time. ${englishScoreline(input)}.`;
+    case "phase.extra_time_second_half_start":
+      return `The second half of extra time is underway. ${englishScoreline(input)}.`;
+    case "phase.shootout_start":
+      return `The penalty shootout is underway. ${englishScoreline(input)}.`;
+    case "shootout.kick_scored":
+      return teamName
+        ? `${teamName} score in the shootout.`
+        : "The shootout kick is scored.";
+    case "shootout.kick_missed":
+      return teamName
+        ? `${teamName} miss in the shootout.`
+        : "The shootout kick is missed.";
+    case "phase.full_time":
+      return `Full-time. ${englishScoreline(input)}.`;
+    case "correction":
+      return `The match record has been corrected. ${englishScoreline(input)}.`;
+  }
 }
 
 function renderHindiTranscript(input: CommentaryInput, atmosphere: string) {
   const scoringTeam = eventTeam(input);
-  const opponent = opponentTeam(input);
+  if (input.event.kind !== "goal") {
+    return renderEnglishTranscript(input, atmosphere);
+  }
+  if (!scoringTeam) {
+    return `गोल की पुष्टि हुई। स्कोर ${input.event.score.home}–${input.event.score.away} है।`;
+  }
+  const opponent = opponentTeam(input, scoringTeam);
   const scoringTeamName = hindiTeam(scoringTeam);
   if (input.event.status !== "confirmed") {
     return `${scoringTeamName} के लिए संभावित गोल, लेकिन अभी पुष्टि नहीं हुई है। जश्न रोक दिया गया है।`;
@@ -299,11 +417,22 @@ export function createCommentaryPipeline(options?: {
     input: CommentaryInput,
     cacheKey: string,
   ): Promise<CommentaryArtifact> => {
-    const atmosphere = await generateGroqAtmosphere(input, {
-      apiKey: env.GROQ_API_KEY,
-      fetchImpl,
-      timeoutMs: groqTimeoutMs,
-    });
+    // Match facts are rendered deterministically. Groq only supplies a
+    // tightly allowlisted atmosphere sentence after a confirmed goal; every
+    // other beat goes directly to speech synthesis without spending quota.
+    const atmosphere =
+      input.event.kind === "goal" && input.event.status === "confirmed"
+        ? await generateGroqAtmosphere(input, {
+            apiKey: env.GROQ_API_KEY,
+            fetchImpl,
+            timeoutMs: groqTimeoutMs,
+          })
+        : {
+            delivery: "held" as const,
+            fallbackReason: null,
+            model: "deterministic-fallback" as const,
+            phrase: "",
+          };
     const transcript = renderTranscript(input, atmosphere.phrase);
     const speech = await synthesizeGeminiSpeech(
       transcript,

@@ -24,6 +24,13 @@ export interface ProductCatalog {
   sourceLabel?: string | undefined;
 }
 
+export interface MomentResolution {
+  requested: LiveMoment | null;
+  latest: LiveMoment | null;
+  superseded: boolean;
+  snapshot: LiveSnapshot;
+}
+
 function record(value: unknown): JsonRecord | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonRecord)
@@ -74,6 +81,7 @@ export function normalizeMoment(
     fixture.homeTeam,
   );
   return {
+    celebratesGoal: item.celebratesGoal === true,
     detail: text(item.detail) || undefined,
     eventTeam,
     id,
@@ -198,6 +206,39 @@ export async function fetchFixture(fixtureId: string, signal?: AbortSignal) {
   return fixture;
 }
 
+export async function fetchMomentResolution(
+  fixtureId: string,
+  momentIdentity: string,
+  signal?: AbortSignal,
+): Promise<MomentResolution> {
+  const payload = record(
+    await fetchJson(
+      `/api/v1/fixtures/${encodeURIComponent(fixtureId)}/moments/${encodeURIComponent(momentIdentity)}`,
+      signal,
+    ),
+  );
+  const snapshot = normalizeFixture(payload?.snapshot);
+  if (!payload || !snapshot) throw new Error("Moment resolution was invalid");
+  const requested =
+    payload.requested === null
+      ? null
+      : normalizeMoment(payload.requested, snapshot);
+  const latest =
+    payload.latest === null ? null : normalizeMoment(payload.latest, snapshot);
+  if (
+    (payload.requested !== null && !requested) ||
+    (payload.latest !== null && !latest)
+  ) {
+    throw new Error("Moment resolution was invalid");
+  }
+  return {
+    latest,
+    requested,
+    snapshot,
+    superseded: payload.superseded === true,
+  };
+}
+
 export function parseSnapshotEvent(value: string) {
   const payload = record(JSON.parse(value));
   const snapshot = normalizeFixture(payload?.snapshot ?? payload);
@@ -295,6 +336,8 @@ export function eventLabel(moment: LiveMoment) {
     red_card: "Red card",
     substitution: "Substitution",
     var: "VAR review",
+    "var.overturned": "VAR overturned",
+    "var.stands": "VAR stands",
     var_overturned: "VAR overturned",
     var_stands: "VAR stands",
     yellow_card: "Yellow card",
