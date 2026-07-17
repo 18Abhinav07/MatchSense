@@ -28,6 +28,7 @@ import { InMemoryPushSubscriptionStore } from "./push-subscriptions.js";
 import {
   DEFAULT_TEAMS,
   createProductRuntime,
+  isConfirmedGoalMoment,
   type ProductRuntime,
 } from "./product-runtime.js";
 import {
@@ -353,14 +354,20 @@ export async function startServer(options: StartServerOptions = {}) {
         ...(push
           ? {
               notifyMoment: async (moment, fixtureSnapshot) => {
+                if (!isConfirmedGoalMoment(moment)) return;
+                const eventTeam = moment.eventTeam;
+                const eventTeamLabel =
+                  eventTeam === null
+                    ? "MATCH"
+                    : (teamNameByCode.get(eventTeam) ?? eventTeam);
                 await deliverMomentPush(
                   {
-                    body: `${teamNameByCode.get(moment.eventTeam) ?? moment.eventTeam} change the match. Tap to feel the Moment and hear the live call.`,
+                    body: `${eventTeamLabel} change the match. Tap to feel the Moment and hear the live call.`,
                     fixtureId: moment.fixtureId,
                     momentId: moment.id,
                     occurredAt: fixtureSnapshot.updatedAt,
                     revision: moment.revision,
-                    title: `⚽ GOAL — ${moment.eventTeam} ${moment.score.home}–${moment.score.away}, ${moment.minute}`,
+                    title: `⚽ GOAL — ${eventTeamLabel} ${moment.score.home}–${moment.score.away}, ${moment.minute}`,
                   },
                   push,
                 );

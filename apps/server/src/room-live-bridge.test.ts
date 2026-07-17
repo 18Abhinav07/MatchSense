@@ -115,11 +115,13 @@ describe("canonical match events drive Rooms", () => {
     });
     const moment = {
       eventTeam: "FRA",
+      familyId: "txline:18237038:goal:551",
       fixtureId: fixture.fixtureId,
       id: "txline:18237038:goal:551",
       identity: "txline:18237038:goal:551:7",
       kind: "goal",
       minute: "68'",
+      occurredAt: "2026-07-16T19:08:00.000Z",
       provenance: "live_txline",
       revision: 7,
       score: { away: 0, home: 3 },
@@ -219,11 +221,13 @@ describe("canonical match events drive Rooms", () => {
     now = Date.parse("2026-07-16T18:22:00.000Z");
     const moment = {
       eventTeam: "FRA",
+      familyId: "arg-fra-demo:score:1-0",
       fixtureId: replayFixture.fixtureId,
       id: "arg-fra-demo:score:1-0",
       identity: "arg-fra-demo:score:1-0:1",
       kind: "goal",
       minute: "22'",
+      occurredAt: "2026-07-16T18:22:00.000Z",
       provenance: "synthetic_txline_shaped",
       revision: 1,
       score: { away: 0, home: 1 },

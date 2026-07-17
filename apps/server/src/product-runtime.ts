@@ -131,6 +131,20 @@ export interface ProductRuntimeOptions {
   id?: () => string;
 }
 
+export function isConfirmedGoalMoment(
+  moment: CanonicalMoment,
+): moment is CanonicalMoment & {
+  eventTeam: TeamCode;
+  kind: "goal";
+  status: "confirmed";
+} {
+  return (
+    moment.kind === "goal" &&
+    moment.status === "confirmed" &&
+    moment.eventTeam !== null
+  );
+}
+
 function createSingleFixtureRuntime(
   options: ProductRuntimeOptions & {
     fixture: ProductFixture;
@@ -179,7 +193,7 @@ function createSingleFixtureRuntime(
     }
   };
   const notifyMoment = (moment: CanonicalMoment) => {
-    if (!options.notifyMoment) return;
+    if (!options.notifyMoment || !isConfirmedGoalMoment(moment)) return;
     void Promise.resolve(options.notifyMoment(moment, snapshot())).catch(
       () => undefined,
     );
@@ -232,7 +246,9 @@ function createSingleFixtureRuntime(
     moment: CanonicalMoment,
     scoringTeam: TeamCode,
   ) => {
-    if (!options.commentaryPipeline) return null;
+    if (!options.commentaryPipeline || !isConfirmedGoalMoment(moment)) {
+      return null;
+    }
     const key = `${moment.identity}:en-IN:${moment.provenance}:gemini-kore-v1`;
     const existing = commentaryPreparations.get(key);
     if (existing) return existing;
@@ -261,6 +277,7 @@ function createSingleFixtureRuntime(
     deliveryIdentity: string,
     targetSessionIds?: readonly string[],
   ) => {
+    if (!isConfirmedGoalMoment(moment)) return;
     const task = (async () => {
       const prepared = await prepareCommentary(moment, scoringTeam);
       if (!prepared || closed) return;
@@ -302,15 +319,18 @@ function createSingleFixtureRuntime(
   const prewarmReplayCommentary = () => {
     if (projection.provenance !== "synthetic_txline_shaped") return;
     const revision = Math.max(1, projection.revision + 1);
+    const prewarmFamilyId = `${projection.fixtureId}:event:synthetic-goal-arg-fra-1`;
     const moment =
       projection.lastEvent ??
       ({
         eventTeam: projection.homeTeam,
+        familyId: prewarmFamilyId,
         fixtureId: projection.fixtureId,
-        id: `${projection.fixtureId}:score:1-0`,
-        identity: `${projection.fixtureId}:score:1-0:${revision}`,
+        id: prewarmFamilyId,
+        identity: `${prewarmFamilyId}:${revision}`,
         kind: "goal",
         minute: "23'",
+        occurredAt: projection.updatedAt,
         provenance: "synthetic_txline_shaped",
         revision,
         score: { away: 0, home: 1 },
@@ -381,9 +401,11 @@ function createSingleFixtureRuntime(
         if (requestedListeningSession) {
           requestedListeningSession.lastMomentIdentity =
             canonicalMoment.identity;
-          audioHub.inject(`replay:${replay.id}:${canonicalMoment.identity}`, [
-            requestedListeningSession.id,
-          ]);
+          if (isConfirmedGoalMoment(canonicalMoment)) {
+            audioHub.inject(`replay:${replay.id}:${canonicalMoment.identity}`, [
+              requestedListeningSession.id,
+            ]);
+          }
         }
         const scoringTeam =
           scoringTeamByMoment.get(canonicalMoment.identity) ??
@@ -424,7 +446,9 @@ function createSingleFixtureRuntime(
         matchingListeners.push(session.id);
       }
     }
-    audioHub.inject(reduced.moment.identity, matchingListeners);
+    if (isConfirmedGoalMoment(reduced.moment)) {
+      audioHub.inject(reduced.moment.identity, matchingListeners);
+    }
     if (
       matchingListeners.length > 0 ||
       (fixtureSubscribers.get(reduced.moment.fixtureId)?.size ?? 0) > 0
@@ -471,28 +495,6 @@ function createSingleFixtureRuntime(
       };
     }
     const previousScore = projection.score;
-    const fact: SourceFact = {
-      fixtureId: event.fixtureId,
-      // TxLINE's observed Clock.Seconds direction is not stable enough to
-      // derive a display minute. Keep the verified score and show no minute.
-      minute: "—",
-      provenance: "live_txline",
-      receivedAt: event.receivedAt,
-      score: event.score,
-      sourceEnvelopeId: [
-        "txline",
-        event.fixtureId,
-        event.source.observedSeq ?? event.revision,
-        event.source.payloadHash,
-      ].join(":"),
-      type: "score_snapshot",
-    };
-    const reduced = reduceSourceFact(projection, fact);
-    projection = reduced.projection;
-    if (!reduced.changed) return { kind: "duplicate" as const };
-    if (!reduced.moment) {
-      return { kind: "accepted" as const, moment: null, snapshot: snapshot() };
-    }
     const participant1IsHome = fixtureDefinition.participant1IsHome ?? true;
     const scoringTeam =
       event.participant === 1
@@ -503,9 +505,72 @@ function createSingleFixtureRuntime(
           ? participant1IsHome
             ? projection.awayTeam
             : projection.homeTeam
-          : reduced.moment.score.home > previousScore.home
+          : event.score.home > previousScore.home
             ? projection.homeTeam
             : projection.awayTeam;
+    const sourceEnvelopeId = [
+      "txline",
+      event.fixtureId,
+      event.source.observedSeq ?? event.revision,
+      event.source.payloadHash,
+    ].join(":");
+    const sourceActionId = event.actionId ?? event.source.actionId;
+    const familyId = sourceActionId
+      ? `txline:${event.fixtureId}:action:${sourceActionId}`
+      : `txline:${event.fixtureId}:source:${event.source.observedSeq ?? event.source.payloadHash}`;
+    const currentScores = projection.scores ?? {
+      extraTime: { away: 0, home: 0 },
+      regulation: projection.score,
+      shootout: { away: 0, home: 0 },
+    };
+    const isExtraTime =
+      projection.phase === "extra_time_first_half" ||
+      projection.phase === "extra_time_half" ||
+      projection.phase === "extra_time_second_half";
+    const fact: SourceFact = {
+      familyId,
+      fixtureId: event.fixtureId,
+      kind: "goal",
+      // TxLINE's observed Clock.Seconds direction is not stable enough to
+      // derive a display minute. Keep the verified score and show no minute.
+      minute: "—",
+      occurredAt:
+        event.source.sourceTimestampMs === null
+          ? null
+          : new Date(event.source.sourceTimestampMs).toISOString(),
+      player:
+        event.playerId === null
+          ? null
+          : { displayName: null, id: event.playerId },
+      provenance: "live_txline",
+      receivedAt: event.receivedAt,
+      scores: isExtraTime
+        ? {
+            ...currentScores,
+            extraTime: {
+              away: Math.max(
+                0,
+                event.score.away - currentScores.regulation.away,
+              ),
+              home: Math.max(
+                0,
+                event.score.home - currentScores.regulation.home,
+              ),
+            },
+          }
+        : { ...currentScores, regulation: event.score },
+      sourceEnvelopeId,
+      sourceEventId: sourceActionId ?? sourceEnvelopeId,
+      status: "confirmed",
+      team: scoringTeam,
+      type: "canonical_event",
+    };
+    const reduced = reduceSourceFact(projection, fact);
+    projection = reduced.projection;
+    if (!reduced.changed) return { kind: "duplicate" as const };
+    if (!reduced.moment) {
+      return { kind: "accepted" as const, moment: null, snapshot: snapshot() };
+    }
     scoringTeamByMoment.set(reduced.moment.identity, scoringTeam);
     const streamEvent: FixtureStreamEvent = {
       event: "moment.created",
@@ -521,7 +586,9 @@ function createSingleFixtureRuntime(
         session.lastMomentIdentity = reduced.moment!.identity;
         return session.id;
       });
-    audioHub.inject(reduced.moment.identity, matchingListeners);
+    if (isConfirmedGoalMoment(reduced.moment)) {
+      audioHub.inject(reduced.moment.identity, matchingListeners);
+    }
     if (
       matchingListeners.length > 0 ||
       (fixtureSubscribers.get(reduced.moment.fixtureId)?.size ?? 0) > 0

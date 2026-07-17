@@ -1,10 +1,16 @@
 import { EventEmitter } from "node:events";
 
 import { createCommentaryPipeline } from "@matchsense/commentary";
-import type { FixtureStreamEvent } from "@matchsense/contracts";
+import type {
+  CanonicalMoment,
+  FixtureStreamEvent,
+} from "@matchsense/contracts";
 import { describe, expect, it, vi } from "vitest";
 
-import { createProductRuntime } from "./product-runtime.js";
+import {
+  createProductRuntime,
+  isConfirmedGoalMoment,
+} from "./product-runtime.js";
 
 class ListeningClient extends EventEmitter {
   readonly chunks: Buffer[] = [];
@@ -18,6 +24,30 @@ class ListeningClient extends EventEmitter {
 }
 
 describe("canonical Moment to shared commentary", () => {
+  it("allows goal delivery only for confirmed goal moments", () => {
+    const goal: CanonicalMoment = {
+      eventTeam: "ARG",
+      familyId: "goal-1",
+      fixtureId: "arg-fra-demo",
+      id: "goal-1",
+      identity: "goal-1:1",
+      kind: "goal",
+      minute: "23'",
+      occurredAt: "2026-07-16T12:00:00.000Z",
+      provenance: "synthetic_txline_shaped",
+      revision: 1,
+      score: { away: 0, home: 1 },
+      sourceEnvelopeId: "goal-envelope-1",
+      status: "confirmed",
+    };
+
+    expect(isConfirmedGoalMoment(goal)).toBe(true);
+    expect(isConfirmedGoalMoment({ ...goal, status: "provisional" })).toBe(
+      false,
+    );
+    expect(isConfirmedGoalMoment({ ...goal, kind: "card.red" })).toBe(false);
+  });
+
   it("prepares once, fans one generated call to every listener, and publishes its transcript", async () => {
     const pipeline = createCommentaryPipeline({
       env: {},
@@ -65,7 +95,7 @@ describe("canonical Moment to shared commentary", () => {
     expect(events.at(-1)).toMatchObject({
       commentary: {
         language: "en",
-        momentIdentity: "arg-fra-demo:score:1-0:1",
+        momentIdentity: "arg-fra-demo:event:synthetic-goal-arg-fra-1:1",
         provider: "deterministic",
         text: expect.stringContaining("Argentina lead France 1–0"),
       },

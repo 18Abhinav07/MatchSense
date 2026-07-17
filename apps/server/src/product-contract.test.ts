@@ -86,7 +86,7 @@ describe("first vertical product contract", () => {
     expect(first.json()).toMatchObject({
       accepted: true,
       moment: {
-        identity: "arg-fra-demo:score:1-0:1",
+        identity: "arg-fra-demo:event:synthetic-goal-arg-fra-1:1",
         revision: 1,
       },
       snapshot: {
@@ -105,14 +105,14 @@ describe("first vertical product contract", () => {
     });
     expect(session.json()).toMatchObject({
       id: listeningSessionId,
-      lastMomentIdentity: "arg-fra-demo:score:1-0:1",
+      lastMomentIdentity: "arg-fra-demo:event:synthetic-goal-arg-fra-1:1",
       state: "listening",
     });
     expect(runtime.fixtureEvents("arg-fra-demo")).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           event: "moment.created",
-          id: "arg-fra-demo:score:1-0:1",
+          id: "arg-fra-demo:event:synthetic-goal-arg-fra-1:1",
         }),
       ]),
     );
@@ -187,7 +187,9 @@ describe("first vertical product contract", () => {
       const momentChunk = await sseReader.read();
       const momentText = new TextDecoder().decode(momentChunk.value);
       expect(momentText).toContain("event: moment.created");
-      expect(momentText).toContain("arg-fra-demo:score:1-0:1");
+      expect(momentText).toContain(
+        "arg-fra-demo:event:synthetic-goal-arg-fra-1:1",
+      );
       const cueChunk = await audioReader.read();
       expect(Buffer.from(cueChunk.value ?? []).toString()).toBe("cue");
       expect(audioResponse.headers.get("content-type")).toBe("audio/mpeg");
@@ -236,7 +238,10 @@ describe("first vertical product contract", () => {
     expect(first.kind).toBe("accepted");
     expect(replayed).toMatchObject({
       kind: "replayed",
-      moment: { identity: "arg-fra-demo:score:1-0:1", revision: 1 },
+      moment: {
+        identity: "arg-fra-demo:event:synthetic-goal-arg-fra-1:1",
+        revision: 1,
+      },
       snapshot: { revision: 1, score: { away: 0, home: 1 } },
     });
     expect(runtime.fixture("arg-fra-demo")).toEqual(firstSnapshot);
