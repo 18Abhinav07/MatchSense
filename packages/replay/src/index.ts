@@ -3,6 +3,8 @@ import type {
   SyntheticSourceEnvelope,
 } from "@matchsense/contracts";
 
+export * from "./demo-timeline.js";
+
 export const DEMO_FIXTURE_ID = "arg-fra-demo";
 
 export interface ReplaySession {
