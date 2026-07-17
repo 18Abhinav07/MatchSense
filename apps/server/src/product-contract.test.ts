@@ -395,4 +395,39 @@ describe("first vertical product contract", () => {
 
     await app.close();
   });
+
+  it("accepts a safe dynamic catalog code for a listening perspective", async () => {
+    const runtime = createProductRuntime({
+      cueBytes: Buffer.from("cue"),
+      fixtures: [
+        {
+          awayTeam: "UNI-20" as never,
+          fixtureId: "dynamic-fixture",
+          homeTeam: "COT" as never,
+          kickoffAt: "2026-07-18T21:00:00.000Z",
+          provenance: "live_txline",
+        },
+      ],
+      mode: "live",
+      silenceBytes: Buffer.from("silence"),
+      writeIntervalMs: 60_000,
+    });
+    const app = buildApp({ readinessProbe, runtime, webDistPath });
+
+    const listening = await app.inject({
+      method: "POST",
+      payload: { perspectiveTeam: "UNI-20" },
+      url: "/api/v1/fixtures/dynamic-fixture/listening-sessions",
+    });
+    const unsafe = await app.inject({
+      method: "POST",
+      payload: { perspectiveTeam: "<script>" },
+      url: "/api/v1/fixtures/dynamic-fixture/listening-sessions",
+    });
+
+    expect(listening.statusCode).toBe(201);
+    expect(listening.json()).toMatchObject({ perspectiveTeam: "UNI-20" });
+    expect(unsafe.statusCode).toBe(400);
+    await app.close();
+  });
 });

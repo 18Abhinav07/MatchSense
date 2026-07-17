@@ -8,7 +8,7 @@ import {
   type OutboxRepository,
   type PersistenceMode,
 } from "@matchsense/db";
-import type { TeamCode } from "@matchsense/contracts";
+import type { TeamCode, TeamSummary } from "@matchsense/contracts";
 import {
   createTxlineAuthenticatedClient,
   createTxlineLiveScoreSource,
@@ -26,6 +26,7 @@ import { createOutboxWorker, type OutboxWorker } from "./outbox-worker.js";
 import { deliverMomentPush } from "./push-delivery.js";
 import { InMemoryPushSubscriptionStore } from "./push-subscriptions.js";
 import {
+  DEFAULT_TEAMS,
   createProductRuntime,
   type ProductRuntime,
 } from "./product-runtime.js";
@@ -42,23 +43,128 @@ interface ServerDatabaseRuntime extends ReadinessProbe {
   outbox: OutboxRepository;
 }
 
-const TEAM_CODES_BY_NAME: Readonly<Record<string, TeamCode>> = {
-  argentina: "ARG",
-  brazil: "BRA",
-  england: "ENG",
-  france: "FRA",
-  japan: "JPN",
-  spain: "ESP",
-};
+const WORLD_CUP_CATALOG_START_EPOCH_DAY = Math.floor(
+  Date.UTC(2026, 5, 11) / 86_400_000,
+);
 
-function teamCodeFor(name: string) {
-  return TEAM_CODES_BY_NAME[name.trim().toLowerCase()] ?? null;
+const KNOWN_TEAMS_BY_NAME = new Map(
+  DEFAULT_TEAMS.map((team) => [team.name.trim().toLowerCase(), team] as const),
+);
+
+function normalizedCodeBase(name: string) {
+  const words = name
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toUpperCase()
+    .match(/[A-Z0-9]+/g);
+  const compact = (words ?? []).join("");
+  if (compact.length >= 3) return compact.slice(0, 3);
+  return `${compact}XXX`.slice(0, 3);
 }
 
-export function productFixtureFromTxline(fixture: TxlineScheduleFixture) {
-  const participant1Code = teamCodeFor(fixture.participant1.name);
-  const participant2Code = teamCodeFor(fixture.participant2.name);
-  if (!participant1Code || !participant2Code) return null;
+function stableNumber(value: string) {
+  let hash = 2_166_136_261;
+  for (const character of value) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return hash >>> 0;
+}
+
+function deterministicColors(participantId: string) {
+  const hue = stableNumber(participantId) % 360;
+  return {
+    primary: `hsl(${hue} 68% 36%)`,
+    secondary: `hsl(${(hue + 47) % 360} 78% 72%)`,
+  };
+}
+
+export function teamCatalogFromTxline(
+  schedule: readonly TxlineScheduleFixture[],
+): TeamSummary[] {
+  const participants = new Map<
+    string,
+    { id: string; name: string; sourceTimestampMs: number }
+  >();
+  for (const fixture of schedule) {
+    for (const participant of [fixture.participant1, fixture.participant2]) {
+      const current = participants.get(participant.id);
+      if (
+        !current ||
+        fixture.sourceTimestampMs > current.sourceTimestampMs ||
+        (fixture.sourceTimestampMs === current.sourceTimestampMs &&
+          participant.name.localeCompare(current.name) < 0)
+      ) {
+        participants.set(participant.id, {
+          id: participant.id,
+          name: participant.name,
+          sourceTimestampMs: fixture.sourceTimestampMs,
+        });
+      }
+    }
+  }
+  const entries = [...participants.values()].sort(
+    (left, right) =>
+      left.name.localeCompare(right.name) || left.id.localeCompare(right.id),
+  );
+  const knownCodes = new Set(DEFAULT_TEAMS.map(({ code }) => code));
+  const bases = new Map<string, number>();
+  for (const participant of entries) {
+    if (KNOWN_TEAMS_BY_NAME.has(participant.name.trim().toLowerCase()))
+      continue;
+    const base = normalizedCodeBase(participant.name);
+    bases.set(base, (bases.get(base) ?? 0) + 1);
+  }
+  const catalog = entries.map((participant): TeamSummary => {
+    const known = KNOWN_TEAMS_BY_NAME.get(
+      participant.name.trim().toLowerCase(),
+    );
+    if (known) {
+      return {
+        ...known,
+        colors: { ...known.colors },
+        participantId: participant.id,
+      };
+    }
+    const base = normalizedCodeBase(participant.name);
+    const needsTieBreak = (bases.get(base) ?? 0) > 1 || knownCodes.has(base);
+    const suffix = participant.id.replace(/[^A-Za-z0-9]/g, "").slice(-12);
+    const code = needsTieBreak
+      ? `${base}-${suffix || stableNumber(participant.id)}`
+      : base;
+    return {
+      code,
+      colors: deterministicColors(participant.id),
+      name: participant.name,
+      participantId: participant.id,
+    };
+  });
+  return catalog.sort(
+    (left, right) =>
+      left.code.localeCompare(right.code) ||
+      (left.participantId ?? "").localeCompare(right.participantId ?? ""),
+  );
+}
+
+function teamForParticipant(
+  participant: TxlineScheduleFixture["participant1"],
+  catalog: readonly TeamSummary[],
+) {
+  return (
+    catalog.find(({ participantId }) => participantId === participant.id) ??
+    null
+  );
+}
+
+export function productFixtureFromTxline(
+  fixture: TxlineScheduleFixture,
+  catalog: readonly TeamSummary[] = teamCatalogFromTxline([fixture]),
+) {
+  const participant1 = teamForParticipant(fixture.participant1, catalog);
+  const participant2 = teamForParticipant(fixture.participant2, catalog);
+  if (!participant1 || !participant2) {
+    throw new Error("TxLINE fixture participant is missing from the catalog");
+  }
   return {
     context: {
       fixtureId: fixture.fixtureId,
@@ -68,12 +174,12 @@ export function productFixtureFromTxline(fixture: TxlineScheduleFixture) {
     } satisfies TxlineFixtureContext,
     product: {
       awayTeam: fixture.participant1IsHome
-        ? participant2Code
-        : participant1Code,
+        ? participant2.code
+        : participant1.code,
       fixtureId: fixture.fixtureId,
       homeTeam: fixture.participant1IsHome
-        ? participant1Code
-        : participant2Code,
+        ? participant1.code
+        : participant2.code,
       kickoffAt: new Date(fixture.startTimeMs).toISOString(),
       participant1IsHome: fixture.participant1IsHome,
       provenance: "live_txline" as const,
@@ -98,6 +204,7 @@ export interface StartServerOptions {
   signalSource?: ShutdownSignalSource;
   txlineScheduleFetcher?: (
     apiToken: string,
+    options?: { startEpochDay?: number | undefined },
   ) => Promise<readonly TxlineScheduleFixture[]>;
   txlineSourceFactory?: typeof createTxlineLiveScoreSource;
   webDistPath?: string;
@@ -156,6 +263,7 @@ export async function startServer(options: StartServerOptions = {}) {
   let txlineTask: Promise<void> | null = null;
   let txlineFixtureContexts: readonly TxlineFixtureContext[] = [];
   let txlineScheduleError: string | null = null;
+  let txlineSourceDetail: string | null = null;
   let unregisterSignals: () => void = () => undefined;
 
   try {
@@ -174,31 +282,68 @@ export async function startServer(options: StartServerOptions = {}) {
       );
       const streamContract = inspectMp3(cueBytes);
       let liveFixtures: ReturnType<typeof productFixtureFromTxline>[] = [];
+      let liveTeamCatalog: readonly TeamSummary[] | undefined;
       if (config.dataRightsMode === "txline_hackathon") {
-        try {
-          const scheduleFetcher =
-            options.txlineScheduleFetcher ??
-            (async (apiToken: string) => {
-              const client = createTxlineAuthenticatedClient({ apiToken });
-              return fetchTxlineWorldCupSchedule(client, {
-                startEpochDay: Math.floor(Date.now() / 86_400_000),
-              });
+        const authenticatedClient = options.txlineScheduleFetcher
+          ? null
+          : createTxlineAuthenticatedClient({
+              apiToken: config.txlineApiToken!,
             });
-          const schedule = await scheduleFetcher(config.txlineApiToken!);
-          liveFixtures = schedule.map(productFixtureFromTxline);
-          if (liveFixtures.every((fixture) => fixture === null)) {
-            txlineScheduleError =
-              "No supported World Cup fixtures are currently available";
+        const scheduleFetcher =
+          options.txlineScheduleFetcher ??
+          ((_apiToken: string, fetchOptions?: { startEpochDay?: number }) =>
+            fetchTxlineWorldCupSchedule(authenticatedClient!, fetchOptions));
+        const currentEpochDay = Math.floor(Date.now() / 86_400_000);
+        const [catalogResult, currentResult] = await Promise.allSettled([
+          scheduleFetcher(config.txlineApiToken!, {
+            startEpochDay: WORLD_CUP_CATALOG_START_EPOCH_DAY,
+          }),
+          scheduleFetcher(config.txlineApiToken!, {
+            startEpochDay: currentEpochDay,
+          }),
+        ]);
+        const catalogSchedule =
+          catalogResult.status === "fulfilled" ? catalogResult.value : [];
+        const currentSchedule =
+          currentResult.status === "fulfilled" ? currentResult.value : [];
+        const mergedSchedule = new Map<string, TxlineScheduleFixture>();
+        for (const fixture of [...catalogSchedule, ...currentSchedule]) {
+          const existing = mergedSchedule.get(fixture.fixtureId);
+          if (
+            !existing ||
+            fixture.sourceTimestampMs >= existing.sourceTimestampMs
+          ) {
+            mergedSchedule.set(fixture.fixtureId, fixture);
           }
-        } catch {
-          txlineScheduleError = "TxLINE schedule is temporarily unavailable";
+        }
+        liveTeamCatalog = teamCatalogFromTxline([...mergedSchedule.values()]);
+        if (currentResult.status === "fulfilled") {
+          liveFixtures = currentSchedule.map((fixture) =>
+            productFixtureFromTxline(fixture, liveTeamCatalog),
+          );
+          if (currentSchedule.length === 0) {
+            txlineScheduleError =
+              "No World Cup fixtures are currently available from TxLINE";
+          } else if (catalogResult.status === "rejected") {
+            txlineSourceDetail =
+              "Tournament team catalog is temporarily limited to current fixtures";
+          }
+        } else {
+          txlineScheduleError =
+            catalogResult.status === "rejected"
+              ? "TxLINE schedules are temporarily unavailable"
+              : "TxLINE current fixture schedule is temporarily unavailable";
         }
       }
-      const supportedLiveFixtures = liveFixtures.filter(
-        (fixture): fixture is NonNullable<typeof fixture> => fixture !== null,
-      );
+      const supportedLiveFixtures = liveFixtures;
       txlineFixtureContexts = supportedLiveFixtures.map(
         ({ context }) => context,
+      );
+      const teamNameByCode = new Map(
+        (liveTeamCatalog ?? DEFAULT_TEAMS).map(({ code, name }) => [
+          code,
+          name,
+        ]),
       );
       productRuntime = createProductRuntime({
         commentaryPipeline: createCommentaryPipeline({
@@ -208,17 +353,9 @@ export async function startServer(options: StartServerOptions = {}) {
         ...(push
           ? {
               notifyMoment: async (moment, fixtureSnapshot) => {
-                const teamNames = {
-                  ARG: "Argentina",
-                  BRA: "Brazil",
-                  ESP: "Spain",
-                  FRA: "France",
-                  ENG: "England",
-                  JPN: "Japan",
-                } as const;
                 await deliverMomentPush(
                   {
-                    body: `${teamNames[moment.eventTeam]} change the match. Tap to feel the Moment and hear the live call.`,
+                    body: `${teamNameByCode.get(moment.eventTeam) ?? moment.eventTeam} change the match. Tap to feel the Moment and hear the live call.`,
                     fixtureId: moment.fixtureId,
                     momentId: moment.id,
                     occurredAt: fixtureSnapshot.updatedAt,
@@ -235,6 +372,7 @@ export async function startServer(options: StartServerOptions = {}) {
               fixtures: supportedLiveFixtures.map(({ product }) => product),
               includeDemoFixture: true,
               mode: "live" as const,
+              ...(liveTeamCatalog ? { teamCatalog: liveTeamCatalog } : {}),
             }
           : {}),
         silenceBytes: await readFile(
@@ -246,6 +384,8 @@ export async function startServer(options: StartServerOptions = {}) {
       });
       if (txlineScheduleError) {
         productRuntime.setSourceHealth("error", txlineScheduleError);
+      } else if (txlineSourceDetail) {
+        productRuntime.setSourceHealth("scheduled", txlineSourceDetail);
       }
     }
     const runtime = productRuntime;
@@ -338,7 +478,10 @@ export async function startServer(options: StartServerOptions = {}) {
           runtime.acceptTxlineEvent(event);
         },
         onState: ({ state }) => {
-          runtime.setSourceHealth(state === "replay" ? "live" : state, null);
+          runtime.setSourceHealth(
+            state === "replay" ? "live" : state,
+            txlineSourceDetail,
+          );
         },
       });
       txlineTask = source.run(txlineAbort.signal).catch(() => {

@@ -2,14 +2,17 @@ export const TEAM_CODES = ["ARG", "BRA", "ENG", "ESP", "FRA", "JPN"] as const;
 export const SIMULATION_SOURCE_LABEL =
   "SIMULATION · TXLINE-SHAPED DATA" as const;
 export const TXLINE_DEVNET_SOURCE_LABEL = "TXLINE · DEVNET SOURCE" as const;
+export const TEAM_CODE_PATTERN = /^[A-Z0-9][A-Z0-9-]{1,19}$/;
 
-export type TeamCode = (typeof TEAM_CODES)[number];
+export type KnownTeamCode = (typeof TEAM_CODES)[number];
+export type TeamCode = string;
 export type DataProvenance = "synthetic_txline_shaped" | "live_txline";
 
 export interface TeamSummary {
   code: TeamCode;
   name: string;
   colors: { primary: string; secondary: string };
+  participantId?: string | undefined;
 }
 
 export interface Score {

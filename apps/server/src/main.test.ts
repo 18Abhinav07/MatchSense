@@ -33,7 +33,10 @@ type StartServerContract = (options: {
   productRuntime?: { close(): unknown; fixtures(): readonly unknown[] };
   shutdownTimeoutMs?: number;
   signalSource: EventEmitter;
-  txlineScheduleFetcher?: () => Promise<readonly unknown[]>;
+  txlineScheduleFetcher?: (
+    apiToken: string,
+    options?: { startEpochDay?: number },
+  ) => Promise<readonly unknown[]>;
   txlineSourceFactory?: (options?: {
     fixtures?: readonly unknown[];
     onState?: (state: { attempt: number; state: "live" }) => void;
@@ -106,7 +109,61 @@ describe("server entrypoint", () => {
         sourceTimestampMs: 0,
         startTimeMs: 0,
       }),
-    ).toBeNull();
+    ).toMatchObject({
+      context: { fixtureId: "unsupported" },
+      product: {
+        awayTeam: "FRA",
+        fixtureId: "unsupported",
+        homeTeam: expect.stringMatching(/^[A-Z0-9-]+$/),
+      },
+    });
+  });
+
+  it("builds an authoritative dynamic catalog with stable known palettes and collision-safe codes", () => {
+    const schedule = [
+      {
+        competition: "World Cup",
+        competitionId: "72",
+        fixtureGroupId: "1",
+        fixtureId: "101",
+        gameState: 1,
+        participant1: { id: "10", name: "Argentina" },
+        participant1IsHome: true,
+        participant2: { id: "20", name: "United Alpha" },
+        sourceTimestampMs: 1,
+        startTimeMs: 2,
+      },
+      {
+        competition: "World Cup",
+        competitionId: "72",
+        fixtureGroupId: "1",
+        fixtureId: "102",
+        gameState: 1,
+        participant1: { id: "30", name: "United Alps" },
+        participant1IsHome: true,
+        participant2: { id: "40", name: "Cote d'Ivoire" },
+        sourceTimestampMs: 1,
+        startTimeMs: 3,
+      },
+    ];
+
+    const catalog = serverModule.teamCatalogFromTxline(schedule);
+
+    expect(catalog).toHaveLength(4);
+    expect(catalog).toContainEqual({
+      code: "ARG",
+      colors: { primary: "#75AADB", secondary: "#F3EFE4" },
+      name: "Argentina",
+      participantId: "10",
+    });
+    const colliding = catalog.filter(({ name }) => name.startsWith("United"));
+    expect(new Set(colliding.map(({ code }) => code)).size).toBe(2);
+    expect(colliding.every(({ code }) => /^[A-Z0-9-]{3,20}$/.test(code))).toBe(
+      true,
+    );
+    expect(serverModule.teamCatalogFromTxline([...schedule].reverse())).toEqual(
+      catalog,
+    );
   });
 
   it("boots live mode from the TxLINE schedule and exposes every supported fixture", async () => {
@@ -190,6 +247,136 @@ describe("server entrypoint", () => {
         ],
       });
       expect(sourceOptions[0]?.fixtures).toHaveLength(2);
+    } finally {
+      if (app) await app.close();
+      await rm(webDistPath, { force: true, recursive: true });
+    }
+  });
+
+  it("uses the tournament view for all teams while bounding fixtures and live ingest to the current view", async () => {
+    const webDistPath = await temporaryWebShell();
+    const database = {
+      check: vi.fn(async () => ({
+        databaseReachable: true,
+        migrationsCurrent: true,
+      })),
+      close: vi.fn(async () => undefined),
+      migrate: vi.fn(async () => undefined),
+      outbox: {},
+    };
+    const tournamentTeams = [
+      { id: "1999", name: "France" },
+      { id: "1888", name: "England" },
+      { id: "3021", name: "Spain" },
+      { id: "1489", name: "Argentina" },
+      ...Array.from({ length: 25 }, (_, index) => ({
+        id: String(1_000 + index),
+        name: `Nation ${index + 1}`,
+      })),
+    ];
+    const tournament = tournamentTeams.map((participant1, index) => ({
+      competition: "World Cup",
+      competitionId: "72",
+      fixtureGroupId: "101",
+      fixtureId: String(18_000_000 + index),
+      gameState: 3,
+      participant1,
+      participant1IsHome: true,
+      participant2: tournamentTeams[(index + 1) % tournamentTeams.length]!,
+      sourceTimestampMs: 1_784_000_000_000 + index,
+      startTimeMs: 1_783_000_000_000 + index,
+    }));
+    const current = [
+      {
+        competition: "World Cup",
+        competitionId: "72",
+        fixtureGroupId: "102",
+        fixtureId: "18257865",
+        gameState: 1,
+        participant1: { id: "1999", name: "France" },
+        participant1IsHome: true,
+        participant2: { id: "1888", name: "England" },
+        sourceTimestampMs: 1_784_000_000_001,
+        startTimeMs: 1_784_408_400_000,
+      },
+      {
+        competition: "World Cup",
+        competitionId: "72",
+        fixtureGroupId: "102",
+        fixtureId: "18257739",
+        gameState: 1,
+        participant1: { id: "3021", name: "Spain" },
+        participant1IsHome: true,
+        participant2: { id: "1489", name: "Argentina" },
+        sourceTimestampMs: 1_784_000_000_002,
+        startTimeMs: 1_784_487_600_000,
+      },
+    ];
+    const requestedDays: Array<number | undefined> = [];
+    const sourceOptions: Array<{ fixtures?: readonly unknown[] }> = [];
+    const startServer =
+      serverModule.startServer as unknown as StartServerContract;
+    let app: Awaited<ReturnType<StartServerContract>> | undefined;
+
+    try {
+      app = await startServer({
+        databaseFactory: () => database,
+        environment: {
+          DATABASE_URL: "postgresql://db.example/matchsense",
+          DATA_RIGHTS_MODE: "txline_hackathon",
+          TXLINE_API_TOKEN: "fixture-server-only-token",
+        },
+        listen: false,
+        outboxWorker: { start: vi.fn(), stop: vi.fn(async () => undefined) },
+        signalSource: new EventEmitter(),
+        txlineScheduleFetcher: async (_token, options) => {
+          requestedDays.push(options?.startEpochDay);
+          return options?.startEpochDay ===
+            Math.floor(Date.UTC(2026, 5, 11) / 86_400_000)
+            ? tournament
+            : current;
+        },
+        txlineSourceFactory: (options) => {
+          sourceOptions.push(options ?? {});
+          return {
+            run: async (signal: AbortSignal) =>
+              new Promise<void>((resolve) =>
+                signal.addEventListener("abort", () => resolve(), {
+                  once: true,
+                }),
+              ),
+          };
+        },
+        webDistPath,
+      });
+
+      const catalog = (await app.inject({ url: "/api/v1/catalog" })).json() as {
+        teams: Array<{ code: string; name: string }>;
+      };
+      const fixtures = (
+        await app.inject({ url: "/api/v1/fixtures" })
+      ).json() as {
+        fixtures: Array<{ fixtureId: string }>;
+      };
+      expect(catalog.teams).toHaveLength(29);
+      expect(catalog.teams).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: "Nation 25" }),
+          expect.objectContaining({ code: "ENG", name: "England" }),
+          expect.objectContaining({ code: "ESP", name: "Spain" }),
+          expect.objectContaining({ code: "ARG", name: "Argentina" }),
+        ]),
+      );
+      expect(fixtures.fixtures.map(({ fixtureId }) => fixtureId)).toEqual([
+        "18257865",
+        "18257739",
+      ]);
+      expect(sourceOptions[0]?.fixtures).toHaveLength(2);
+      expect(requestedDays).toEqual(
+        expect.arrayContaining([
+          Math.floor(Date.UTC(2026, 5, 11) / 86_400_000),
+        ]),
+      );
     } finally {
       if (app) await app.close();
       await rm(webDistPath, { force: true, recursive: true });

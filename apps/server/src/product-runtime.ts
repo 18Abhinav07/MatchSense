@@ -37,7 +37,7 @@ import {
   type AudioWritable,
 } from "./audio-hub.js";
 
-const teams: TeamSummary[] = [
+export const DEFAULT_TEAMS: readonly TeamSummary[] = [
   {
     code: "ARG",
     colors: { primary: "#75AADB", secondary: "#F3EFE4" },
@@ -118,6 +118,7 @@ export interface ProductRuntimeOptions {
   cueBytes: Buffer;
   fixture?: ProductFixture;
   fixtures?: readonly ProductFixture[];
+  teamCatalog?: readonly TeamSummary[];
   includeDemoFixture?: boolean;
   mode?: "demo" | "live";
   notifyMoment?: (
@@ -138,6 +139,7 @@ function createSingleFixtureRuntime(
   const now = options.now ?? (() => new Date().toISOString());
   const id = options.id ?? randomUUID;
   const fixtureDefinition = options.fixture;
+  const teamCatalog = options.teamCatalog ?? DEFAULT_TEAMS;
   let projection = createFixtureProjection({
     awayTeam: fixtureDefinition.awayTeam,
     fixtureId: fixtureDefinition.fixtureId,
@@ -192,8 +194,12 @@ function createSingleFixtureRuntime(
     moment: CanonicalMoment,
     scoringTeam: TeamCode,
   ): CommentaryInput => {
-    const homeTeam = teams.find((team) => team.code === projection.homeTeam);
-    const awayTeam = teams.find((team) => team.code === projection.awayTeam);
+    const homeTeam =
+      teamCatalog.find((team) => team.code === projection.homeTeam) ??
+      DEFAULT_TEAMS.find((team) => team.code === projection.homeTeam);
+    const awayTeam =
+      teamCatalog.find((team) => team.code === projection.awayTeam) ??
+      DEFAULT_TEAMS.find((team) => team.code === projection.awayTeam);
     if (!homeTeam || !awayTeam) {
       throw new Error("Commentary fixture teams are unavailable");
     }
@@ -538,7 +544,7 @@ function createSingleFixtureRuntime(
     catalog: () => ({
       provenance: projection.provenance,
       sourceLabel: projection.sourceLabel,
-      teams,
+      teams: teamCatalog,
     }),
     close: () => {
       closed = true;
@@ -644,6 +650,7 @@ export function createProductRuntime(options: ProductRuntimeOptions) {
       ? "live"
       : "demo");
   const now = options.now ?? (() => new Date().toISOString());
+  const teamCatalog = options.teamCatalog ?? DEFAULT_TEAMS;
   let sourceHealth: ProductSourceHealth = {
     detail: null,
     mode,
@@ -673,7 +680,7 @@ export function createProductRuntime(options: ProductRuntimeOptions) {
         mode === "live"
           ? ("TXLINE · DEVNET SOURCE" as const)
           : ("SIMULATION · TXLINE-SHAPED DATA" as const),
-      teams,
+      teams: teamCatalog,
     }),
     close: async () => {
       await Promise.all(

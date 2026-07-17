@@ -4,7 +4,11 @@ import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import { z } from "zod";
 
-import type { FixtureStreamEvent, TeamCode } from "@matchsense/contracts";
+import {
+  TEAM_CODE_PATTERN,
+  type FixtureStreamEvent,
+  type TeamCode,
+} from "@matchsense/contracts";
 
 import type { AudioWritable } from "./audio-hub.js";
 import { registerDemoRoutes } from "./demo-routes.js";
@@ -213,7 +217,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   return app;
 }
 
-const teamCode = z.enum(["ARG", "BRA", "ENG", "ESP", "FRA", "JPN"]);
+const teamCode = z.string().regex(TEAM_CODE_PATTERN);
 const replaySessionBody = z
   .object({ fixtureId: z.string().min(1).max(80) })
   .strict();
