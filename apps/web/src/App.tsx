@@ -23,6 +23,14 @@ import {
   type RoomFixture,
 } from "./features/rooms/index.js";
 import { createRoomApi } from "./features/rooms/room-api.js";
+import {
+  createDemoViewState,
+  demoEventPresentation,
+  demoViewReducer,
+  parseDemoBeatEvent,
+  type DemoBeatEvent,
+  type DemoBeatType,
+} from "./features/demo/demo-state.js";
 import { getOrCreateFanIdentity } from "./fan-identity.js";
 import {
   eventLabel,
@@ -53,7 +61,6 @@ import {
   type TeamCode,
 } from "./product-state.js";
 
-const DEMO_FIXTURE_ID = "arg-fra-demo";
 const FAVORITE_KEY = "matchsense.favoriteTeam";
 const CATALOG_EMPTY: ProductCatalog = { teams: [] };
 
@@ -260,13 +267,9 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
 
   if (isDemo) {
     return (
-      <LiveCompanion
+      <DemoCompanion
         catalog={catalogState.catalog}
-        demoMode
-        favoriteTeam={supported}
-        fixtureId={DEMO_FIXTURE_ID}
         onBack={() => navigate("/")}
-        onOpenMemory={() => navigate(`/matches/${DEMO_FIXTURE_ID}/memory`)}
       />
     );
   }
@@ -1070,9 +1073,353 @@ function AlertSheet({
   );
 }
 
+function formatDemoTime(seconds: number) {
+  const clamped = Math.max(0, Math.min(300, Math.floor(seconds)));
+  return `${Math.floor(clamped / 60)}:${String(clamped % 60).padStart(2, "0")}`;
+}
+
+function demoCueFrequency(type: DemoBeatType) {
+  if (type === "winning_goal") return 720;
+  if (type === "var_resolved" || type === "penalty_scored") return 620;
+  if (type === "red_card" || type === "goal_overturned") return 180;
+  if (type === "goal" || type === "yellow_card" || type === "var_started")
+    return 310;
+  return 440;
+}
+
+function demoVibration(type: DemoBeatType): number | number[] {
+  if (type === "winning_goal" || type === "var_resolved") return [80, 45, 180];
+  if (type === "red_card" || type === "goal_overturned") return [180, 70, 180];
+  if (type === "goal" || type === "var_started") return [45, 55, 45, 55, 45];
+  return 55;
+}
+
+function DemoCompanion({
+  catalog,
+  onBack,
+}: {
+  catalog: ProductCatalog;
+  onBack(): void;
+}) {
+  const [state, dispatch] = useReducer(
+    demoViewReducer,
+    undefined,
+    createDemoViewState,
+  );
+  const sessionIdRef = useRef<string | null>(null);
+  const streamRef = useRef<EventSource | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const sensoryEnabledRef = useRef(false);
+  const completeRef = useRef(false);
+  const argentina = teamFor("ARG", catalog, "Argentina");
+  const france = teamFor("FRA", catalog, "France");
+
+  const announceBeat = useCallback((event: DemoBeatEvent) => {
+    if (!sensoryEnabledRef.current) return;
+    const context = audioContextRef.current;
+    if (context) {
+      if (context.state === "suspended") void context.resume();
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = event.type.includes("card") ? "square" : "sine";
+      oscillator.frequency.setValueAtTime(
+        demoCueFrequency(event.type),
+        context.currentTime,
+      );
+      gain.gain.setValueAtTime(0.0001, context.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.11, context.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.2);
+      oscillator.connect(gain).connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.21);
+    }
+    navigator.vibrate?.(demoVibration(event.type));
+    if (
+      "speechSynthesis" in window &&
+      typeof SpeechSynthesisUtterance !== "undefined"
+    ) {
+      window.speechSynthesis.cancel();
+      const call = new SpeechSynthesisUtterance(event.description);
+      call.lang = "en-GB";
+      call.rate = 1.02;
+      window.speechSynthesis.speak(call);
+    }
+  }, []);
+
+  const connect = useCallback(
+    (sessionId: string) => {
+      streamRef.current?.close();
+      completeRef.current = false;
+      const stream = new EventSource(
+        `/api/v1/demo/sessions/${encodeURIComponent(sessionId)}/stream`,
+      );
+      streamRef.current = stream;
+      stream.addEventListener("demo.beat", ((raw: MessageEvent<string>) => {
+        const event = parseDemoBeatEvent(raw.data);
+        if (!event || event.sessionId !== sessionId) return;
+        dispatch({ event, type: "beat" });
+        announceBeat(event);
+        if (event.type === "full_time") {
+          completeRef.current = true;
+          stream.close();
+          if (streamRef.current === stream) streamRef.current = null;
+        }
+      }) as EventListener);
+      stream.onerror = () => {
+        if (!completeRef.current && stream.readyState === EventSource.CLOSED) {
+          dispatch({
+            message: "The simulation stream disconnected. Restart the match.",
+            type: "error",
+          });
+        }
+      };
+    },
+    [announceBeat],
+  );
+
+  useEffect(
+    () => () => {
+      sensoryEnabledRef.current = false;
+      streamRef.current?.close();
+      window.speechSynthesis?.cancel();
+      if (audioContextRef.current) void audioContextRef.current.close();
+    },
+    [],
+  );
+
+  const enableForegroundSensory = () => {
+    sensoryEnabledRef.current = true;
+    if (typeof AudioContext !== "undefined") {
+      if (!audioContextRef.current)
+        audioContextRef.current = new AudioContext();
+      void audioContextRef.current.resume();
+    }
+  };
+
+  const start = async () => {
+    enableForegroundSensory();
+    dispatch({ type: "starting" });
+    try {
+      const response = await fetch("/api/v1/demo/sessions", { method: "POST" });
+      if (!response.ok) throw new Error("Demo session unavailable");
+      const body = (await response.json()) as { id?: unknown };
+      if (typeof body.id !== "string" || body.id.length === 0)
+        throw new Error("Demo session invalid");
+      sessionIdRef.current = body.id;
+      connect(body.id);
+    } catch {
+      dispatch({
+        message: "The five-minute match could not start. Try again.",
+        type: "error",
+      });
+    }
+  };
+
+  const restart = async () => {
+    enableForegroundSensory();
+    const sessionId = sessionIdRef.current;
+    if (!sessionId) {
+      await start();
+      return;
+    }
+    streamRef.current?.close();
+    streamRef.current = null;
+    completeRef.current = false;
+    dispatch({ type: "reset" });
+    dispatch({ type: "starting" });
+    try {
+      const response = await fetch(
+        `/api/v1/demo/sessions/${encodeURIComponent(sessionId)}/restart`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new Error("Demo restart unavailable");
+      connect(sessionId);
+    } catch {
+      dispatch({
+        message: "The simulation could not restart. Try again.",
+        type: "error",
+      });
+    }
+  };
+
+  const presentation = state.currentEvent
+    ? demoEventPresentation(state.currentEvent.type)
+    : null;
+  const running = state.status === "starting" || state.status === "running";
+  const controlLabel =
+    state.status === "idle"
+      ? "Start five-minute match"
+      : state.status === "starting"
+        ? "Starting match…"
+        : state.status === "running"
+          ? `Running · ${state.progress.current}/${state.progress.total}`
+          : "Restart five-minute match";
+
+  return (
+    <main className="live-canvas demo-canvas" id="main-content">
+      <Masthead demo end="SIMULATION · FIVE-MINUTE FINAL" />
+      <button className="back-button" onClick={onBack} type="button">
+        <BackIcon /> Exit demo
+      </button>
+      <div className="demo-disclosure" role="status">
+        <b>DEMO · SIMULATION</b>
+        <span>
+          Scripted Argentina–France match · never mixed with live TxLINE
+          fixtures
+        </span>
+      </div>
+
+      <section className="demo-match-stage" aria-label="Demo match score">
+        <div className="demo-progress-meta">
+          <span>{state.phase}</span>
+          <b>{formatDemoTime(state.progress.elapsedSeconds)} / 5:00</b>
+        </div>
+        <div
+          aria-label={`${Math.round(state.progress.percent)} percent complete`}
+          aria-valuemax={100}
+          aria-valuemin={0}
+          aria-valuenow={state.progress.percent}
+          className="demo-progress-track"
+          role="progressbar"
+        >
+          <i style={{ width: `${state.progress.percent}%` }} />
+        </div>
+        <div className="score-grid demo-score-grid">
+          <div>
+            <TeamMark large team={argentina} />
+            <span>
+              <small>ARG</small>
+              <b>Argentina</b>
+            </span>
+          </div>
+          <div className="score-lockup">
+            <span>{state.score.home}</span>
+            <i>—</i>
+            <span>{state.score.away}</span>
+            <small>{state.minute}</small>
+          </div>
+          <div>
+            <span>
+              <small>FRA</small>
+              <b>France</b>
+            </span>
+            <TeamMark large team={france} />
+          </div>
+        </div>
+
+        <section
+          aria-live="assertive"
+          className="demo-cinematic-beat"
+          data-tone={presentation?.tone ?? "neutral"}
+          key={state.currentEvent?.id ?? "ready"}
+        >
+          {state.currentEvent && presentation ? (
+            <>
+              <div className="demo-beat-symbol" aria-hidden="true">
+                {state.currentEvent.type === "goal_overturned"
+                  ? "×"
+                  : state.currentEvent.type === "red_card" ||
+                      state.currentEvent.type === "yellow_card"
+                    ? "■"
+                    : state.currentEvent.type.startsWith("var")
+                      ? "VAR"
+                      : state.currentEvent.type === "reconnect_catchup"
+                        ? "↻"
+                        : "●"}
+              </div>
+              <div>
+                <p>{presentation.eyebrow}</p>
+                <h1>{presentation.title}</h1>
+                <span>{state.currentEvent.description}</span>
+              </div>
+              <strong>{state.currentEvent.matchMinute}</strong>
+            </>
+          ) : (
+            <div className="demo-ready-copy">
+              <p>A complete MatchSense walkthrough</p>
+              <h1>The final starts when you do.</h1>
+              <span>
+                Sixteen automatic beats: goals, cards, VAR, catch-up and full
+                time.
+              </span>
+            </div>
+          )}
+        </section>
+      </section>
+
+      <section className="demo-command-deck">
+        <div>
+          <p className="kicker">Foreground match experience</p>
+          <h2>One tap. Then the match runs itself.</h2>
+          <p>
+            This page uses browser speech, sound cues and vibration after your
+            start gesture. These are in-app effects, not OS push notifications.
+          </p>
+        </div>
+        <button
+          className="primary-control"
+          disabled={running}
+          onClick={() => void (state.status === "idle" ? start() : restart())}
+          type="button"
+        >
+          {controlLabel} <ArrowIcon />
+        </button>
+      </section>
+      {state.error ? <p className="demo-stream-error">{state.error}</p> : null}
+
+      <section className="demo-timeline-layout">
+        <div className="timeline-panel">
+          <div className="section-head">
+            <span>Five-minute match wire</span>
+            <b>
+              {state.cursor} / {state.progress.total} beats
+            </b>
+          </div>
+          {state.timeline.length ? (
+            state.timeline.map((event) => {
+              const eventCopy = demoEventPresentation(event.type);
+              return (
+                <article
+                  className="demo-timeline-row"
+                  data-tone={eventCopy.tone}
+                  key={event.id}
+                >
+                  <span>{event.matchMinute}</span>
+                  <div>
+                    <b>{eventCopy.title}</b>
+                    <small>{event.description}</small>
+                  </div>
+                  <em>
+                    {event.score.home}—{event.score.away}
+                  </em>
+                </article>
+              );
+            })
+          ) : (
+            <p className="timeline-empty">
+              Start the final and every beat will arrive here automatically.
+            </p>
+          )}
+        </div>
+        <aside className="demo-run-sheet">
+          <span>What you will see</span>
+          <ol>
+            <li>Kickoff, pressure and cards</li>
+            <li>A held goal and VAR stands</li>
+            <li>A red card and penalty equalizer</li>
+            <li>An overturned goal with score rollback</li>
+            <li>Reconnect catch-up, winner and full time</li>
+          </ol>
+          <small>SIMULATION · ARGENTINA VS FRANCE · 5 MIN</small>
+        </aside>
+      </section>
+      <Provenance label="SIMULATION · NOT LIVE MATCH DATA" />
+    </main>
+  );
+}
+
 function LiveCompanion({
   catalog,
-  demoMode = false,
   favoriteTeam,
   fixtureId,
   initialMomentIdentity,
@@ -1081,7 +1428,6 @@ function LiveCompanion({
   onOpenMemory,
 }: {
   catalog: ProductCatalog;
-  demoMode?: boolean;
   favoriteTeam: TeamCode;
   fixtureId: string;
   initialMomentIdentity?: string;
@@ -1097,12 +1443,9 @@ function LiveCompanion({
   const [loadState, setLoadState] = useState<"loading" | "ready" | "error">(
     "loading",
   );
-  const [error, setError] = useState<string | null>(null);
-  const [playingDemo, setPlayingDemo] = useState(false);
   const [freshnessNow, setFreshnessNow] = useState(() =>
     new Date().toISOString(),
   );
-  const replaySession = useRef<string | null>(null);
   const listening = useListening();
 
   useEffect(() => {
@@ -1229,48 +1572,15 @@ function LiveCompanion({
     };
   }, [fixtureId, initialMomentIdentity]);
 
-  const playNextDemoBeat = async () => {
-    setPlayingDemo(true);
-    setError(null);
-    try {
-      if (!replaySession.current) {
-        const response = await fetch("/api/v1/replay/sessions", {
-          body: JSON.stringify({ fixtureId }),
-          headers: { "Content-Type": "application/json" },
-          method: "POST",
-        });
-        if (!response.ok) throw new Error("Demo unavailable");
-        replaySession.current = ((await response.json()) as { id: string }).id;
-      }
-      const response = await fetch(
-        `/api/v1/replay/sessions/${replaySession.current}/commands`,
-        {
-          body: JSON.stringify({
-            listeningSessionId: listening.sessionId,
-            marker: "goal",
-            type: "advance_to_marker",
-          }),
-          headers: { "Content-Type": "application/json" },
-          method: "POST",
-        },
-      );
-      if (!response.ok) throw new Error("Demo command failed");
-    } catch {
-      setError("The demo could not advance. Try once more.");
-    } finally {
-      setPlayingDemo(false);
-    }
-  };
-
   const snapshot =
     state.snapshot.fixtureId === fixtureId ? state.snapshot : null;
   if (loadState === "loading" && !snapshot) {
-    return <MatchLoading demo={demoMode} onBack={onBack} />;
+    return <MatchLoading demo={false} onBack={onBack} />;
   }
   if (loadState === "error" && !snapshot) {
     return (
       <main className="live-canvas">
-        <Masthead demo={demoMode} end="MATCH UNAVAILABLE" />
+        <Masthead end="MATCH UNAVAILABLE" />
         <button className="back-button" onClick={onBack} type="button">
           <BackIcon /> Today
         </button>
@@ -1312,21 +1622,10 @@ function LiveCompanion({
         : "Start listening";
   return (
     <main className="live-canvas" id="main-content">
-      <Masthead
-        demo={demoMode}
-        end={`${demoMode ? "REPLAY" : "TXLINE"} · ${state.transportHealth.toUpperCase()}`}
-      />
+      <Masthead end={`TXLINE · ${state.transportHealth.toUpperCase()}`} />
       <button className="back-button" onClick={onBack} type="button">
-        <BackIcon /> {demoMode ? "Exit demo" : "Today"}
+        <BackIcon /> Today
       </button>
-      {demoMode ? (
-        <div className="demo-disclosure">
-          <b>DEMO MODE</b>
-          <span>
-            Scripted Argentina–France replay · separate from live fixtures
-          </span>
-        </div>
-      ) : null}
       {state.transportHealth === "stale" ||
       state.transportHealth === "offline" ? (
         <FreshnessBanner
@@ -1457,25 +1756,6 @@ function LiveCompanion({
             >
               Open Match Memory <ArrowIcon />
             </button>
-          ) : null}
-          {demoMode ? (
-            <div className="demo-controls">
-              <span>Demo conductor</span>
-              <h3>Run the next match beat.</h3>
-              <p>
-                Every click enters through the same match stream used by the UI
-                and active listeners.
-              </p>
-              <button
-                disabled={playingDemo}
-                onClick={() => void playNextDemoBeat()}
-                type="button"
-              >
-                {playingDemo ? "Advancing…" : "Play next event"}
-                <ArrowIcon />
-              </button>
-              {error ? <p className="inline-error">{error}</p> : null}
-            </div>
           ) : null}
         </aside>
       </section>

@@ -24,4 +24,18 @@ describe("MatchSense web product", () => {
     expect(markup).not.toContain("SIMULATION · TXLINE-SHAPED DATA");
     expect(markup).not.toContain("DEMO MODE");
   });
+
+  it("renders the automatic five-minute simulation as a clearly separate route", () => {
+    const App = shell.App as FunctionComponent<AppProps>;
+    const markup = renderToStaticMarkup(
+      createElement(App, { initialFavoriteTeam: "ARG", initialPath: "/demo" }),
+    );
+
+    expect(markup).toContain("DEMO · SIMULATION");
+    expect(markup).toContain("Start five-minute match");
+    expect(markup).toContain("Sixteen automatic beats");
+    expect(markup).toContain("not OS push notifications");
+    expect(markup).not.toContain("Play next event");
+    expect(markup).not.toContain("TXLINE · CONNECTING");
+  });
 });
