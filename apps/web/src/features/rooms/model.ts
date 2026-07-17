@@ -1,87 +1,109 @@
 import type {
-  CallAnswer,
-  CallConfidence,
-  CallStat,
-  CallThreePick,
+  SenseMarketId,
+  SensePick,
+  SenseSelection,
+  SenseSlate,
 } from "./types.js";
 
-export const CALL_STATS = ["goals", "cards", "corners"] as const;
+export const SENSE_MARKET_IDS = [
+  "winner",
+  "goals_2_5",
+  "cards_4_5",
+  "corners_9_5",
+  "btts",
+] as const;
 
-export interface CallDraftEntry {
-  readonly answer: CallAnswer | null;
-  readonly confidence: CallConfidence;
+export interface SenseDraftEntry {
+  readonly allocation: number;
+  readonly selection: SenseSelection | null;
 }
 
-export type CallDraft = Readonly<Record<CallStat, CallDraftEntry>>;
+export type SenseDraft = Readonly<Record<SenseMarketId, SenseDraftEntry>>;
 
-export function createInitialCallDraft(): CallDraft {
+export function createInitialSenseDraft(): SenseDraft {
   return {
-    cards: { answer: null, confidence: 1 },
-    corners: { answer: null, confidence: 2 },
-    goals: { answer: null, confidence: 3 },
+    btts: { allocation: 20, selection: null },
+    cards_4_5: { allocation: 20, selection: null },
+    corners_9_5: { allocation: 20, selection: null },
+    goals_2_5: { allocation: 20, selection: null },
+    winner: { allocation: 20, selection: null },
   };
 }
 
-export function createCallDraftFromPicks(
-  picks: readonly CallThreePick[],
-): CallDraft {
-  const initial = createInitialCallDraft();
-  return CALL_STATS.reduce<CallDraft>((draft, stat) => {
-    const pick = picks.find((candidate) => candidate.stat === stat);
-    return pick === undefined
-      ? draft
-      : {
-          ...draft,
-          [stat]: { answer: pick.answer, confidence: pick.confidence },
-        };
-  }, initial);
-}
-
-export function answerCall(
-  draft: CallDraft,
-  stat: CallStat,
-  answer: CallAnswer,
-): CallDraft {
-  return { ...draft, [stat]: { ...draft[stat], answer } };
-}
-
-export function assignConfidence(
-  draft: CallDraft,
-  stat: CallStat,
-  confidence: CallConfidence,
-): CallDraft {
-  const displacedStat = CALL_STATS.find(
-    (candidate) =>
-      candidate !== stat && draft[candidate].confidence === confidence,
+export function createSenseDraftFromSlate(slate: SenseSlate): SenseDraft {
+  return slate.picks.reduce<SenseDraft>(
+    (draft, pick) => ({
+      ...draft,
+      [pick.marketId]: {
+        allocation: pick.allocation,
+        selection: pick.selection,
+      },
+    }),
+    createInitialSenseDraft(),
   );
-  if (displacedStat === undefined) {
-    return { ...draft, [stat]: { ...draft[stat], confidence } };
-  }
+}
 
-  const previousConfidence = draft[stat].confidence;
+export function selectSenseOption(
+  draft: SenseDraft,
+  marketId: SenseMarketId,
+  selection: SenseSelection,
+): SenseDraft {
+  return { ...draft, [marketId]: { ...draft[marketId], selection } };
+}
+
+export function moveSense(
+  draft: SenseDraft,
+  marketId: SenseMarketId,
+  direction: 1 | -1,
+): SenseDraft {
+  const current = draft[marketId];
+  if (direction === -1 && current.allocation <= 5) return draft;
+  const others = SENSE_MARKET_IDS.filter((id) => id !== marketId);
+  const counterpart =
+    direction === 1
+      ? [...others].sort(
+          (left, right) => draft[right].allocation - draft[left].allocation,
+        )[0]
+      : others[0];
+  if (!counterpart || (direction === 1 && draft[counterpart].allocation <= 5)) {
+    return draft;
+  }
   return {
     ...draft,
-    [displacedStat]: {
-      ...draft[displacedStat],
-      confidence: previousConfidence,
+    [counterpart]: {
+      ...draft[counterpart],
+      allocation: draft[counterpart].allocation - direction * 5,
     },
-    [stat]: { ...draft[stat], confidence },
+    [marketId]: { ...current, allocation: current.allocation + direction * 5 },
   };
 }
 
-export function isCallDraftComplete(draft: CallDraft): boolean {
-  return CALL_STATS.every((stat) => draft[stat].answer !== null);
+export function senseAllocated(draft: SenseDraft): number {
+  return SENSE_MARKET_IDS.reduce(
+    (total, marketId) => total + draft[marketId].allocation,
+    0,
+  );
 }
 
-export function toCallPicks(draft: CallDraft): readonly CallThreePick[] {
-  if (!isCallDraftComplete(draft)) {
-    throw new Error(
-      "All three calls must be answered before they can be saved",
-    );
+export function isSenseDraftComplete(draft: SenseDraft): boolean {
+  return (
+    senseAllocated(draft) === 100 &&
+    SENSE_MARKET_IDS.every(
+      (marketId) =>
+        draft[marketId].selection !== null &&
+        draft[marketId].allocation >= 5 &&
+        draft[marketId].allocation % 5 === 0,
+    )
+  );
+}
+
+export function toSensePicks(draft: SenseDraft): readonly SensePick[] {
+  if (!isSenseDraftComplete(draft)) {
+    throw new Error("Choose one side in all five markets before locking picks");
   }
-  return CALL_STATS.map((stat) => ({
-    answer: draft[stat].answer as CallAnswer,
-    confidence: draft[stat].confidence,
-    stat,
+  return SENSE_MARKET_IDS.map((marketId) => ({
+    allocation: draft[marketId].allocation,
+    marketId,
+    selection: draft[marketId].selection as SenseSelection,
   }));
 }

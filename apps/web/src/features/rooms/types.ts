@@ -1,9 +1,10 @@
-export type RoomPhase = "lobby" | "locked" | "live" | "final";
 export type RoomMemberRole = "host" | "member" | "spectator";
-export type CallStat = "goals" | "cards" | "corners";
-export type CallAnswer = "yes" | "no";
-export type CallConfidence = 1 | 2 | 3;
 export type ReactionType = "roar" | "cold" | "called_it";
+export type SenseRoomPhase = "DRAFT" | "OPEN" | "LOCKED" | "LIVE" | "FINAL";
+export type SenseMarketId =
+  "winner" | "goals_2_5" | "cards_4_5" | "corners_9_5" | "btts";
+export type SenseSelection =
+  "HOME" | "DRAW" | "AWAY" | "OVER" | "UNDER" | "YES" | "NO";
 
 export interface RoomTeam {
   readonly code: string;
@@ -22,53 +23,42 @@ export interface RoomFixture {
 }
 
 export interface RoomMember {
-  readonly callsLocked: boolean;
+  readonly hasPicks: boolean;
   readonly id: string;
-  readonly muted: boolean;
   readonly nickname: string;
   readonly role: RoomMemberRole;
   readonly teamCode: string | null;
 }
 
-export interface CallThreeTarget {
-  readonly question: string;
-  readonly reliability: "reliable" | "unreliable" | "unknown";
-  readonly sourceLabel: "MatchSense game rule";
-  readonly stat: CallStat;
-  readonly threshold: number;
-  readonly version: number;
+export interface SenseMarket {
+  readonly id: SenseMarketId;
+  readonly label: string;
+  readonly selections: readonly {
+    readonly id: SenseSelection;
+    readonly label: string;
+    readonly price: number;
+  }[];
+  readonly sourceLabel: "MatchSense pricing";
 }
 
-export interface CallThreePick {
-  readonly answer: CallAnswer;
-  readonly confidence: CallConfidence;
-  readonly stat: CallStat;
+export interface SensePick {
+  readonly allocation: number;
+  readonly marketId: SenseMarketId;
+  readonly selection: SenseSelection;
 }
 
-export interface CallThreeEntry {
-  readonly picks: readonly CallThreePick[];
-  readonly points: number;
-  readonly status: "open" | "locked" | "provisional" | "final";
-  readonly submittedAt: string;
+export interface SenseSlate {
+  readonly lockedAt: string;
+  readonly participantId: string;
+  readonly picks: readonly SensePick[];
 }
 
-export interface CallThreePublic {
-  readonly lockAt: string;
-  readonly locked: boolean;
-  readonly pointsOnly: true;
-  readonly progress: Readonly<Record<CallStat, number | null>>;
-  readonly targets: readonly CallThreeTarget[];
-  readonly viewerEntry: CallThreeEntry | null;
-}
-
-export interface RoomLeaderboardRow {
-  readonly correctCalls: number;
-  readonly final: boolean;
+export interface SenseLeaderboardRow {
+  readonly correctCount: number;
   readonly memberId: string;
   readonly nickname: string;
-  readonly points: number;
   readonly rank: number;
-  readonly submittedAt: string;
+  readonly returnedSense: number;
 }
 
 export interface RoomReactionReceipt {
@@ -92,16 +82,23 @@ export interface RoomMoment {
 }
 
 export interface RoomView {
-  readonly calls: CallThreePublic;
   readonly currentMoment: RoomMoment | null;
   readonly fixture: RoomFixture;
   readonly id: string;
   readonly inviteUrl: string | null;
-  readonly leaderboard: readonly RoomLeaderboardRow[];
+  readonly isHost: boolean;
   readonly members: readonly RoomMember[];
   readonly name: string;
-  readonly phase: RoomPhase;
   readonly reactions: readonly RoomReactionReceipt[];
+  readonly sense: {
+    readonly currencyLabel: "FRIEND SENSE · NO MONEY · NO PRIZES";
+    readonly leaderboard: readonly SenseLeaderboardRow[];
+    readonly markets: readonly SenseMarket[];
+    readonly mySlate: SenseSlate | null;
+    readonly phase: SenseRoomPhase;
+    readonly revealedSlates: readonly SenseSlate[];
+    readonly total: 100;
+  };
   readonly viewerMemberId: string;
 }
 
@@ -124,12 +121,6 @@ export interface JoinRoomInput {
   readonly inviteCode: string;
   readonly nickname: string;
   readonly teamCode: string | null;
-}
-
-export interface SaveCallsInput {
-  readonly lock: boolean;
-  readonly picks: readonly CallThreePick[];
-  readonly targetVersions: Readonly<Record<CallStat, number>>;
 }
 
 export interface SendReactionInput {
@@ -155,12 +146,13 @@ export interface RoomApi {
   joinRoom(
     input: JoinRoomInput,
   ): Promise<{ readonly lateJoin: boolean; readonly room: RoomView }>;
+  openPicks(roomId: string): Promise<RoomView>;
   playReplay(
     roomId: string,
     onUpdate?: (update: RoomReplayUpdate) => void,
   ): Promise<RoomView>;
   previewInvite(inviteCode: string): Promise<RoomInvitePreview>;
-  saveCalls(roomId: string, input: SaveCallsInput): Promise<RoomView>;
+  savePicks(roomId: string, picks: readonly SensePick[]): Promise<RoomView>;
   sendReaction(
     roomId: string,
     input: SendReactionInput,

@@ -1,320 +1,171 @@
-import { createElement, type FunctionComponent } from "react";
+import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { RoomExperience, type RoomExperienceProps } from "./RoomExperience.js";
+import { RoomExperience } from "./RoomExperience.js";
 import {
-  answerCall,
-  assignConfidence,
-  createInitialCallDraft,
-  isCallDraftComplete,
+  createInitialSenseDraft,
+  isSenseDraftComplete,
+  selectSenseOption,
+  toSensePicks,
 } from "./model.js";
-import type {
-  RoomApi,
-  RoomFixture,
-  RoomInvitePreview,
-  RoomView,
-} from "./types.js";
+import type { RoomApi, RoomView } from "./types.js";
 
-const fixture: RoomFixture = {
+const fixture = {
   awayTeam: {
-    code: "BRA",
-    name: "Brazil",
-    primary: "#f6cf3a",
-    secondary: "#16653d",
+    code: "FRA",
+    name: "France",
+    primary: "#173a70",
+    secondary: "#d34d58",
   },
   homeTeam: {
     code: "ARG",
-    foreground: "#0b2035",
     name: "Argentina",
     primary: "#75aadb",
     secondary: "#f3efe4",
   },
-  id: "arg-bra-final",
-  isReplay: true,
-  kickoffAt: "2026-07-19T16:00:00.000Z",
-};
+  id: "fixture-1",
+  isReplay: false,
+  kickoffAt: "2026-07-19T19:00:00.000Z",
+} as const;
 
-const preview: RoomInvitePreview = {
-  callsLocked: false,
-  expiresAt: "2026-07-19T17:00:00.000Z",
-  fixture,
-  hostNickname: "Pratik",
-  memberNicknames: ["Pratik", "Yash"],
-  roomName: "Finals Night",
-};
-
-function room(overrides: Partial<RoomView> = {}): RoomView {
-  return {
-    calls: {
-      lockAt: fixture.kickoffAt,
-      locked: false,
-      pointsOnly: true,
-      progress: { cards: 4, corners: 7, goals: 1 },
-      targets: [
-        {
-          question: "3+ total goals?",
-          reliability: "reliable",
-          sourceLabel: "MatchSense game rule",
-          stat: "goals",
-          threshold: 3,
-          version: 1,
-        },
-        {
-          question: "5+ total cards?",
-          reliability: "reliable",
-          sourceLabel: "MatchSense game rule",
-          stat: "cards",
-          threshold: 5,
-          version: 1,
-        },
-        {
-          question: "10+ total corners?",
-          reliability: "reliable",
-          sourceLabel: "MatchSense game rule",
-          stat: "corners",
-          threshold: 10,
-          version: 1,
-        },
-      ],
-      viewerEntry: null,
-    },
-    currentMoment: {
-      label: "Goal · Argentina",
-      minute: "67′",
-      momentId: "arg-bra-final:goal:67",
-      revision: 7,
-      score: { away: 0, home: 1 },
-      state: "confirmed",
-    },
-    fixture,
-    id: "room-finals-night",
-    inviteUrl: "https://matchsense.app/join/finals-night-67",
-    leaderboard: [
-      {
-        correctCalls: 1,
-        final: false,
-        memberId: "abhinav",
-        nickname: "Abhinav",
-        points: 300,
-        rank: 1,
-        submittedAt: "2026-07-19T15:40:00.000Z",
-      },
-      {
-        correctCalls: 1,
-        final: false,
-        memberId: "pratik",
-        nickname: "Pratik",
-        points: 100,
-        rank: 2,
-        submittedAt: "2026-07-19T15:41:00.000Z",
-      },
+const markets = [
+  {
+    id: "winner",
+    label: "Who wins?",
+    selections: [
+      { id: "HOME", label: "Argentina", price: 2.7 },
+      { id: "DRAW", label: "Draw", price: 2.7 },
+      { id: "AWAY", label: "France", price: 2.7 },
     ],
+    sourceLabel: "MatchSense pricing",
+  },
+  {
+    id: "goals_2_5",
+    label: "Total goals · 2.5",
+    selections: [
+      { id: "OVER", label: "Over", price: 1.9 },
+      { id: "UNDER", label: "Under", price: 1.9 },
+    ],
+    sourceLabel: "MatchSense pricing",
+  },
+  {
+    id: "cards_4_5",
+    label: "Total cards · 4.5",
+    selections: [
+      { id: "OVER", label: "Over", price: 1.9 },
+      { id: "UNDER", label: "Under", price: 1.9 },
+    ],
+    sourceLabel: "MatchSense pricing",
+  },
+  {
+    id: "corners_9_5",
+    label: "Total corners · 9.5",
+    selections: [
+      { id: "OVER", label: "Over", price: 1.9 },
+      { id: "UNDER", label: "Under", price: 1.9 },
+    ],
+    sourceLabel: "MatchSense pricing",
+  },
+  {
+    id: "btts",
+    label: "Both teams to score?",
+    selections: [
+      { id: "YES", label: "Yes", price: 1.9 },
+      { id: "NO", label: "No", price: 1.9 },
+    ],
+    sourceLabel: "MatchSense pricing",
+  },
+] as const;
+
+function room(phase: RoomView["sense"]["phase"]): RoomView {
+  return {
+    currentMoment: null,
+    fixture,
+    id: "room-1",
+    inviteUrl: "https://matchsense.test/rooms/join/abcdefghijklmnopqrstuv",
+    isHost: true,
     members: [
       {
-        callsLocked: true,
-        id: "abhinav",
-        muted: false,
+        hasPicks: false,
+        id: "fan-one",
         nickname: "Abhinav",
         role: "host",
         teamCode: "ARG",
       },
-      {
-        callsLocked: true,
-        id: "pratik",
-        muted: false,
-        nickname: "Pratik",
-        role: "member",
-        teamCode: "BRA",
-      },
     ],
-    name: "Finals Night",
-    phase: "live",
+    name: "Final night",
     reactions: [],
-    viewerMemberId: "abhinav",
-    ...overrides,
+    sense: {
+      currencyLabel: "FRIEND SENSE · NO MONEY · NO PRIZES",
+      leaderboard: [],
+      markets,
+      mySlate: null,
+      phase,
+      revealedSlates: [],
+      total: 100,
+    },
+    viewerMemberId: "fan-one",
   };
 }
 
 const api: RoomApi = {
-  createRoom: async () => ({ room: room(), inviteUrl: room().inviteUrl ?? "" }),
-  getRoom: async () => room(),
-  joinRoom: async () => ({ room: room(), lateJoin: false }),
-  previewInvite: async () => preview,
-  playReplay: async () => room({ phase: "final" }),
-  saveCalls: async () => room(),
-  sendReaction: async () => ({ room: room(), receiptId: "reaction-1" }),
+  createRoom: async () => ({ inviteUrl: "", room: room("DRAFT") }),
+  getRoom: async () => room("OPEN"),
+  joinRoom: async () => ({ lateJoin: false, room: room("OPEN") }),
+  openPicks: async () => room("OPEN"),
+  playReplay: async () => room("FINAL"),
+  previewInvite: async () => ({
+    callsLocked: false,
+    expiresAt: fixture.kickoffAt,
+    fixture,
+    hostNickname: "Abhinav",
+    memberNicknames: ["Abhinav"],
+    roomName: "Final night",
+  }),
+  savePicks: async () => room("OPEN"),
+  sendReaction: async () => ({ receiptId: "r1", room: room("LIVE") }),
   subscribeRoom: () => () => undefined,
 };
 
-function render(props: RoomExperienceProps) {
-  return renderToStaticMarkup(
-    createElement(
-      RoomExperience as FunctionComponent<RoomExperienceProps>,
-      props,
-    ),
-  );
-}
-
-describe("Call Three draft", () => {
-  it("keeps confidence 1, 2, and 3 unique by swapping the displaced value", () => {
-    const initial = createInitialCallDraft();
-    const changed = assignConfidence(initial, "goals", 1);
-
-    expect(changed.goals.confidence).toBe(1);
-    expect(changed.cards.confidence).toBe(3);
-    expect(changed.corners.confidence).toBe(2);
+describe("100-Sense room experience", () => {
+  it("requires one selection in each market while keeping exactly 100 Sense", () => {
+    let draft = createInitialSenseDraft();
+    draft = selectSenseOption(draft, "winner", "HOME");
+    draft = selectSenseOption(draft, "goals_2_5", "OVER");
+    draft = selectSenseOption(draft, "cards_4_5", "UNDER");
+    draft = selectSenseOption(draft, "corners_9_5", "OVER");
+    draft = selectSenseOption(draft, "btts", "YES");
+    expect(isSenseDraftComplete(draft)).toBe(true);
     expect(
-      new Set(Object.values(changed).map(({ confidence }) => confidence)),
-    ).toEqual(new Set([1, 2, 3]));
+      toSensePicks(draft).reduce((total, pick) => total + pick.allocation, 0),
+    ).toBe(100);
   });
 
-  it("becomes lockable only after all three YES or NO calls are made", () => {
-    let draft = createInitialCallDraft();
-    expect(isCallDraftComplete(draft)).toBe(false);
-
-    draft = answerCall(draft, "goals", "yes");
-    draft = answerCall(draft, "cards", "no");
-    draft = answerCall(draft, "corners", "yes");
-
-    expect(isCallDraftComplete(draft)).toBe(true);
-  });
-});
-
-describe("RoomExperience", () => {
-  it("opens with a private, points-only room creation ritual", () => {
-    const markup = render({ api, route: { fixture, mode: "create" } });
-
-    expect(markup).toContain("Create the match ritual.");
-    expect(markup).toContain("Room name");
-    expect(markup).toContain("Your nickname");
-    expect(markup).toContain("Friend points only");
-    expect(markup).toContain("No money. No prizes.");
-  });
-
-  it("keeps an optional exit control available throughout routed room screens", () => {
-    const markup = render({
-      api,
-      onExit: () => undefined,
-      route: { fixture, mode: "create" },
-    });
-
-    expect(markup).toContain('aria-label="Close room"');
-  });
-
-  it("makes the host, room, match, and nickname step explicit on an invite", () => {
-    const markup = render({
-      api,
-      route: { inviteCode: "finals-night-67", mode: "invite", preview },
-    });
-
-    expect(markup).toContain("Pratik invited you");
-    expect(markup).toContain("Finals Night");
-    expect(markup).toContain("Argentina");
-    expect(markup).toContain("Brazil");
-    expect(markup).toContain("Join and make calls");
-  });
-
-  it("shows late joiners the live room without pretending calls are still open", () => {
-    const spectatorRoom = room({
-      members: [
-        ...room().members,
-        {
-          callsLocked: false,
-          id: "yash",
-          muted: false,
-          nickname: "Yash",
-          role: "spectator",
-          teamCode: null,
-        },
-      ],
-      viewerMemberId: "yash",
-    });
-    const markup = render({
-      api,
-      route: {
-        initialRoom: spectatorRoom,
-        mode: "room",
-        roomId: spectatorRoom.id,
-      },
-    });
-
-    expect(markup).toContain("You joined after kickoff.");
-    expect(markup).toContain("Watch the room live");
-    expect(markup).not.toContain("Lock my calls");
-  });
-
-  it("keeps provisional rankings and controlled reactions beside the current Moment", () => {
-    const liveRoom = room();
-    const markup = render({
-      api,
-      route: { initialRoom: liveRoom, mode: "room", roomId: liveRoom.id },
-    });
-
-    expect(markup).toContain("Room ranking · provisional");
-    expect(markup).toContain("Goal · Argentina");
-    expect(markup).toContain("ROAR");
-    expect(markup).toContain("COLD");
-    expect(markup).toContain("CALLED IT");
-    expect(markup).toContain("Reactions reference revision 7");
-  });
-
-  it("gives only a replay-room host the polished match conductor", () => {
-    const hostMarkup = render({
-      api,
-      route: {
-        initialRoom: room({ phase: "lobby" }),
-        mode: "room",
-        roomId: room().id,
-      },
-    });
-    const memberMarkup = render({
-      api,
-      route: {
-        initialRoom: room({ phase: "lobby", viewerMemberId: "pratik" }),
-        mode: "room",
-        roomId: room().id,
-      },
-    });
-    const liveFixtureMarkup = render({
-      api,
-      route: {
-        initialRoom: room({
-          fixture: { ...fixture, isReplay: false },
-          phase: "lobby",
-        }),
-        mode: "room",
-        roomId: room().id,
-      },
-    });
-
-    expect(hostMarkup).toContain("Play match replay");
-    expect(hostMarkup).toContain("Replay room · host control");
-    expect(hostMarkup).toContain(
-      "Everyone in the room follows the same Moment",
+  it("renders the host open gate with the no-money contract", () => {
+    const html = renderToStaticMarkup(
+      createElement(RoomExperience, {
+        api,
+        route: { initialRoom: room("DRAFT"), mode: "room", roomId: "room-1" },
+      }),
     );
-    expect(memberMarkup).not.toContain("Play match replay");
-    expect(liveFixtureMarkup).not.toContain("Play match replay");
+    expect(html).toContain("Open 100-Sense picks");
+    expect(html).toContain("FRIEND SENSE · NO MONEY · NO PRIZES");
+    expect(html).toContain("Share private invite");
   });
 
-  it("closes on a final room result without prize or money semantics", () => {
-    const finalRoom = room({
-      leaderboard: room().leaderboard.map((entry) => ({
-        ...entry,
-        final: true,
-      })),
-      phase: "final",
-    });
-    const markup = render({
-      api,
-      route: { initialRoom: finalRoom, mode: "room", roomId: finalRoom.id },
-    });
-
-    expect(markup).toContain("Final room result");
-    expect(markup).toContain("Friend points · final");
-    expect(markup).toContain("No money. No prizes.");
-    expect(markup).not.toContain("payout");
-    expect(markup).not.toContain("stake");
-    expect(markup).not.toContain("odds");
+  it("renders all five MatchSense-priced markets when picks open", () => {
+    const html = renderToStaticMarkup(
+      createElement(RoomExperience, {
+        api,
+        route: { initialRoom: room("OPEN"), mode: "room", roomId: "room-1" },
+      }),
+    );
+    expect(html).toContain("Who wins?");
+    expect(html).toContain("Total goals · 2.5");
+    expect(html).toContain("Total cards · 4.5");
+    expect(html).toContain("Total corners · 9.5");
+    expect(html).toContain("Both teams to score?");
+    expect(html.match(/MatchSense pricing/g)?.length).toBe(5);
   });
 });

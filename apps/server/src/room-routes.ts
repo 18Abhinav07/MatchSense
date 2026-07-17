@@ -12,9 +12,20 @@ import {
 const participantId = z.string().trim().min(1).max(120);
 const nickname = z.string().trim().min(1).max(30);
 const roomName = z.string().trim().min(1).max(60);
-const teamCode = z.enum(["ARG", "BRA", "ESP", "FRA", "JPN"]);
+const teamCode = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z0-9]{2,12}$/u);
 const roomIdParams = z.object({ roomId: z.string().min(1).max(120) }).strict();
 const emptyQuery = z.object({}).strict();
+const streamQuery = z
+  .object({
+    fanId: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{6,120}$/u)
+      .optional(),
+  })
+  .strict();
 const createBody = z
   .object({
     fixtureId: z.string().min(1).max(80),
@@ -40,6 +51,37 @@ const callsBody = z
   .object({
     calls: z.array(call).length(3),
     lock: z.boolean(),
+  })
+  .strict();
+const senseMarketId = z.enum([
+  "winner",
+  "goals_2_5",
+  "cards_4_5",
+  "corners_9_5",
+  "btts",
+]);
+const senseSelection = z.enum([
+  "HOME",
+  "DRAW",
+  "AWAY",
+  "OVER",
+  "UNDER",
+  "YES",
+  "NO",
+]);
+const sensePicksBody = z
+  .object({
+    picks: z
+      .array(
+        z
+          .object({
+            allocation: z.number().int().min(5).max(80).multipleOf(5),
+            marketId: senseMarketId,
+            selection: senseSelection,
+          })
+          .strict(),
+      )
+      .length(5),
   })
   .strict();
 const reactionBody = z
@@ -192,15 +234,28 @@ function formatSse(event: RoomStreamEvent) {
 }
 
 export function registerRoomRoutes(app: FastifyInstance, service: RoomService) {
+  const headerFanId = (request: FastifyRequest) => {
+    const raw = request.headers["x-matchsense-fan-id"];
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    return typeof value === "string" && /^[A-Za-z0-9_-]{6,120}$/u.test(value)
+      ? value
+      : undefined;
+  };
   const openSession = (request: FastifyRequest, reply: FastifyReply) => {
+    const fanId = headerFanId(request);
+    if (fanId) return service.openFanIdentity(fanId);
     const session = service.openSession(roomSessionCapability(request));
     if (session.isNew) {
       setRoomSessionCookie(request, reply, session.capability);
     }
     return session.participantId;
   };
-  const authenticate = (request: FastifyRequest) =>
-    service.authenticateSession(roomSessionCapability(request));
+  const authenticate = (request: FastifyRequest) => {
+    const fanId = headerFanId(request);
+    return fanId
+      ? service.openFanIdentity(fanId)
+      : service.authenticateSession(roomSessionCapability(request));
+  };
 
   app.post("/api/v1/rooms", async (request, reply) => {
     const body = createBody.safeParse(request.body);
@@ -279,11 +334,13 @@ export function registerRoomRoutes(app: FastifyInstance, service: RoomService) {
     "/api/v1/rooms/:roomId/stream",
     (request, reply) => {
       const params = roomIdParams.safeParse(request.params);
-      const query = emptyQuery.safeParse(request.query);
+      const query = streamQuery.safeParse(request.query);
       if (!params.success || !query.success) return invalidRequest(reply);
       let participantId: string;
       try {
-        participantId = authenticate(request);
+        participantId = query.data.fanId
+          ? service.openFanIdentity(query.data.fanId)
+          : authenticate(request);
         service.get(params.data.roomId, participantId);
       } catch (error) {
         return sendError(reply, error);
@@ -325,6 +382,42 @@ export function registerRoomRoutes(app: FastifyInstance, service: RoomService) {
             roomId: params.data.roomId,
             ...body.data,
             participantId: authenticate(request),
+          }),
+        );
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  app.post<{ Params: { roomId: string } }>(
+    "/api/v1/rooms/:roomId/picks/open",
+    async (request, reply) => {
+      const params = roomIdParams.safeParse(request.params);
+      const body = emptyBody.safeParse(request.body ?? {});
+      if (!params.success || !body.success) return invalidRequest(reply);
+      try {
+        return reply.send(
+          service.openPicks(params.data.roomId, authenticate(request)),
+        );
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  app.put<{ Params: { roomId: string } }>(
+    "/api/v1/rooms/:roomId/picks",
+    async (request, reply) => {
+      const params = roomIdParams.safeParse(request.params);
+      const body = sensePicksBody.safeParse(request.body);
+      if (!params.success || !body.success) return invalidRequest(reply);
+      try {
+        return reply.send(
+          service.saveSensePicks({
+            participantId: authenticate(request),
+            picks: body.data.picks,
+            roomId: params.data.roomId,
           }),
         );
       } catch (error) {

@@ -12,7 +12,9 @@ import {
   lockCalls,
   registerMoment,
   resolveMoment,
+  scoreSenseSlates,
   setCalls,
+  validateSensePicks,
   voidStat,
 } from "../src/index.ts";
 
@@ -470,4 +472,70 @@ test("releases held reactions when VAR confirms the same moment revision", () =>
     resolution: "CONFIRMED",
   });
   assert.equal(room.reactions[0]?.status, "VISIBLE");
+});
+
+test("100-Sense requires all five markets and exactly 100 in five-Sense steps", () => {
+  const slate = validateSensePicks(
+    "fan-1",
+    [
+      { allocation: 30, marketId: "winner", selection: "HOME" },
+      { allocation: 20, marketId: "goals_2_5", selection: "OVER" },
+      { allocation: 15, marketId: "cards_4_5", selection: "UNDER" },
+      { allocation: 25, marketId: "corners_9_5", selection: "OVER" },
+      { allocation: 10, marketId: "btts", selection: "YES" },
+    ],
+    100,
+  );
+  assert.equal(
+    Object.values(slate.picks).reduce(
+      (total, pick) => total + pick.allocation,
+      0,
+    ),
+    100,
+  );
+  assert.throws(
+    () =>
+      validateSensePicks(
+        "fan-1",
+        [
+          { allocation: 25, marketId: "winner", selection: "HOME" },
+          { allocation: 20, marketId: "goals_2_5", selection: "OVER" },
+          { allocation: 20, marketId: "cards_4_5", selection: "UNDER" },
+          { allocation: 20, marketId: "corners_9_5", selection: "OVER" },
+          { allocation: 10, marketId: "btts", selection: "YES" },
+        ],
+        100,
+      ),
+    hasCode("INVALID_CALLS"),
+  );
+});
+
+test("100-Sense leaderboard uses returned Sense then earliest lock", () => {
+  const picks = [
+    { allocation: 20, marketId: "winner", selection: "HOME" },
+    { allocation: 20, marketId: "goals_2_5", selection: "OVER" },
+    { allocation: 20, marketId: "cards_4_5", selection: "UNDER" },
+    { allocation: 20, marketId: "corners_9_5", selection: "OVER" },
+    { allocation: 20, marketId: "btts", selection: "YES" },
+  ] as const;
+  const leaderboard = scoreSenseSlates({
+    members: [
+      { id: "fan-1", nickname: "A" },
+      { id: "fan-2", nickname: "B" },
+    ],
+    outcomes: {
+      btts: "YES",
+      cards_4_5: "UNDER",
+      corners_9_5: "OVER",
+      goals_2_5: "OVER",
+      winner: "HOME",
+    },
+    slates: {
+      "fan-1": validateSensePicks("fan-1", picks, 10),
+      "fan-2": validateSensePicks("fan-2", picks, 20),
+    },
+  });
+  assert.equal(leaderboard[0]?.participantId, "fan-1");
+  assert.equal(leaderboard[0]?.correctCount, 5);
+  assert.equal(leaderboard[0]?.returnedSense, 206);
 });

@@ -743,3 +743,212 @@ export function resolveMoment(
     ),
   };
 }
+
+// 100-Sense is the fan-facing room game. The original Call Three exports above
+// remain available for replay compatibility while the product migrates.
+export const SENSE_TOTAL = 100;
+export const SENSE_INCREMENT = 5;
+export const SENSE_MINIMUM_PER_MARKET = 5;
+export const SENSE_MARKET_IDS = [
+  "winner",
+  "goals_2_5",
+  "cards_4_5",
+  "corners_9_5",
+  "btts",
+] as const;
+
+export type SenseMarketId = (typeof SENSE_MARKET_IDS)[number];
+export type SenseSelection =
+  "HOME" | "DRAW" | "AWAY" | "OVER" | "UNDER" | "YES" | "NO";
+export type SenseRoomPhase = "DRAFT" | "OPEN" | "LOCKED" | "LIVE" | "FINAL";
+
+export interface SenseMarket {
+  readonly id: SenseMarketId;
+  readonly label: string;
+  readonly selections: readonly {
+    readonly id: SenseSelection;
+    readonly label: string;
+    readonly price: number;
+  }[];
+  readonly sourceLabel: "MatchSense pricing";
+}
+
+export interface SensePickInput {
+  readonly marketId: SenseMarketId;
+  readonly selection: SenseSelection;
+  readonly allocation: number;
+}
+
+export interface SenseSlate {
+  readonly participantId: string;
+  readonly picks: Readonly<Record<SenseMarketId, SensePickInput>>;
+  readonly lockedAt: number;
+}
+
+export interface SenseOutcomes {
+  readonly winner: "HOME" | "DRAW" | "AWAY";
+  readonly goals_2_5: "OVER" | "UNDER";
+  readonly cards_4_5: "OVER" | "UNDER";
+  readonly corners_9_5: "OVER" | "UNDER";
+  readonly btts: "YES" | "NO";
+}
+
+export interface SenseLeaderboardEntry {
+  readonly correctCount: number;
+  readonly participantId: string;
+  readonly nickname: string;
+  readonly rank: number;
+  readonly returnedSense: number;
+  readonly lockedAt: number;
+}
+
+export const SENSE_MARKETS: readonly SenseMarket[] = [
+  {
+    id: "winner",
+    label: "Who wins?",
+    selections: [
+      { id: "HOME", label: "Home", price: 2.7 },
+      { id: "DRAW", label: "Draw", price: 2.7 },
+      { id: "AWAY", label: "Away", price: 2.7 },
+    ],
+    sourceLabel: "MatchSense pricing",
+  },
+  {
+    id: "goals_2_5",
+    label: "Total goals · 2.5",
+    selections: [
+      { id: "OVER", label: "Over", price: 1.9 },
+      { id: "UNDER", label: "Under", price: 1.9 },
+    ],
+    sourceLabel: "MatchSense pricing",
+  },
+  {
+    id: "cards_4_5",
+    label: "Total cards · 4.5",
+    selections: [
+      { id: "OVER", label: "Over", price: 1.9 },
+      { id: "UNDER", label: "Under", price: 1.9 },
+    ],
+    sourceLabel: "MatchSense pricing",
+  },
+  {
+    id: "corners_9_5",
+    label: "Total corners · 9.5",
+    selections: [
+      { id: "OVER", label: "Over", price: 1.9 },
+      { id: "UNDER", label: "Under", price: 1.9 },
+    ],
+    sourceLabel: "MatchSense pricing",
+  },
+  {
+    id: "btts",
+    label: "Both teams to score?",
+    selections: [
+      { id: "YES", label: "Yes", price: 1.9 },
+      { id: "NO", label: "No", price: 1.9 },
+    ],
+    sourceLabel: "MatchSense pricing",
+  },
+] as const;
+
+const senseMarketById = new Map(
+  SENSE_MARKETS.map((market) => [market.id, market] as const),
+);
+
+export function validateSensePicks(
+  participantId: string,
+  picks: readonly SensePickInput[],
+  lockedAt: number,
+): SenseSlate {
+  const id = cleanRequiredText(
+    participantId,
+    "INVALID_PARTICIPANT",
+    "participant id",
+  );
+  assertTimestamp(lockedAt, "lockedAt");
+  if (picks.length !== SENSE_MARKET_IDS.length) {
+    fail("INVALID_CALLS", "exactly five 100-Sense picks are required");
+  }
+  const mapped = new Map<SenseMarketId, SensePickInput>();
+  let total = 0;
+  for (const pick of picks) {
+    const market = senseMarketById.get(pick.marketId);
+    if (
+      !market ||
+      mapped.has(pick.marketId) ||
+      !market.selections.some(
+        ({ id: selection }) => selection === pick.selection,
+      ) ||
+      !Number.isSafeInteger(pick.allocation) ||
+      pick.allocation < SENSE_MINIMUM_PER_MARKET ||
+      pick.allocation % SENSE_INCREMENT !== 0
+    ) {
+      fail(
+        "INVALID_CALLS",
+        "each market needs one valid pick and at least 5 Sense in 5-Sense steps",
+      );
+    }
+    mapped.set(pick.marketId, { ...pick });
+    total += pick.allocation;
+  }
+  if (total !== SENSE_TOTAL) {
+    fail("INVALID_CALLS", "all 100 Sense must be allocated exactly");
+  }
+  const winner = mapped.get("winner");
+  const goals = mapped.get("goals_2_5");
+  const cards = mapped.get("cards_4_5");
+  const corners = mapped.get("corners_9_5");
+  const btts = mapped.get("btts");
+  if (!winner || !goals || !cards || !corners || !btts) {
+    fail("INVALID_CALLS", "all five 100-Sense markets are required");
+  }
+  return {
+    lockedAt,
+    participantId: id,
+    picks: {
+      btts,
+      cards_4_5: cards,
+      corners_9_5: corners,
+      goals_2_5: goals,
+      winner,
+    },
+  };
+}
+
+export function scoreSenseSlates(input: {
+  readonly members: readonly Pick<RoomMember, "id" | "nickname">[];
+  readonly outcomes: SenseOutcomes;
+  readonly slates: Readonly<Record<string, SenseSlate>>;
+}): readonly SenseLeaderboardEntry[] {
+  const rows = Object.values(input.slates).map((slate) => {
+    let correctCount = 0;
+    let returnedSense = 0;
+    for (const marketId of SENSE_MARKET_IDS) {
+      const pick = slate.picks[marketId];
+      if (pick.selection !== input.outcomes[marketId]) continue;
+      correctCount += 1;
+      const market = senseMarketById.get(marketId)!;
+      const selection = market.selections.find(
+        ({ id }) => id === pick.selection,
+      )!;
+      returnedSense += pick.allocation * selection.price;
+    }
+    return {
+      correctCount,
+      lockedAt: slate.lockedAt,
+      nickname:
+        input.members.find(({ id }) => id === slate.participantId)?.nickname ??
+        "Fan",
+      participantId: slate.participantId,
+      returnedSense: Math.round(returnedSense * 10) / 10,
+    };
+  });
+  rows.sort(
+    (left, right) =>
+      right.returnedSense - left.returnedSense ||
+      right.correctCount - left.correctCount ||
+      left.lockedAt - right.lockedAt ||
+      compareParticipantIds(left.participantId, right.participantId),
+  );
+  return rows.map((row, index) => ({ ...row, rank: index + 1 }));
+}

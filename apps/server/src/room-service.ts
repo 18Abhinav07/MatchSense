@@ -3,10 +3,10 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type {
   FixtureSnapshot,
   FixtureStreamEvent,
-  TeamCode,
 } from "@matchsense/contracts";
 import {
   CALL_CATEGORIES,
+  SENSE_MARKETS,
   RoomsDomainError,
   addReaction,
   applyStatRevision,
@@ -18,10 +18,16 @@ import {
   registerMoment,
   resolveMoment,
   setCalls,
+  scoreSenseSlates,
+  validateSensePicks,
   type CallAnswer,
   type CallInput,
   type ReactionKind,
   type RoomState,
+  type SenseOutcomes,
+  type SensePickInput,
+  type SenseRoomPhase,
+  type SenseSlate,
 } from "@matchsense/rooms";
 import type { TxlineCanonicalEvent } from "@matchsense/txline-adapter";
 
@@ -32,6 +38,9 @@ export type RoomServiceErrorCode =
   | "FIXTURE_NOT_FOUND"
   | "INVITE_NOT_FOUND"
   | "INVALID_ROOM_NAME"
+  | "PICKS_NOT_OPEN"
+  | "PICKS_OPEN"
+  | "ROOM_FULL"
   | "REACTION_DUPLICATE"
   | "REACTION_MOMENT_OVERTURNED"
   | "REACTION_RECIPIENT_INVALID"
@@ -62,6 +71,15 @@ export interface RoomView {
   readonly status: "PRE_KICKOFF" | "LIVE" | "FINAL";
   readonly viewerParticipantId: string;
   readonly friendPointsLabel: "FRIEND POINTS · NO PRIZES";
+  readonly sense: {
+    readonly currencyLabel: "FRIEND SENSE · NO MONEY · NO PRIZES";
+    readonly total: 100;
+    readonly phase: SenseRoomPhase;
+    readonly markets: typeof SENSE_MARKETS;
+    readonly mySlate: SenseSlate | null;
+    readonly revealedSlates: readonly SenseSlate[];
+    readonly leaderboard: ReturnType<typeof scoreSenseSlates>;
+  };
   readonly hostParticipantId: string;
   readonly members: readonly {
     id: string;
@@ -69,9 +87,10 @@ export interface RoomView {
     role: "PLAYER" | "SPECTATOR";
     joinedAt: number;
     hasCalls: boolean;
+    hasPicks: boolean;
     isHost: boolean;
     lockedAt: number | null;
-    teamCode: TeamCode | null;
+    teamCode: string | null;
   }[];
   readonly myCalls: RoomState["callSlates"][string] | null;
   readonly leaderboard: readonly (ReturnType<typeof getLeaderboard>[number] & {
@@ -98,11 +117,11 @@ export interface RoomReactionView {
   readonly reactedAt: number;
   readonly recipientNickname: string;
   readonly recipientParticipantId: string;
-  readonly recipientTeamCode: TeamCode | null;
+  readonly recipientTeamCode: string | null;
   readonly revision: number;
   readonly senderNickname: string;
   readonly senderParticipantId: string;
-  readonly senderTeamCode: TeamCode | null;
+  readonly senderTeamCode: string | null;
   readonly status: "HELD" | "VISIBLE" | "OVERTURNED";
 }
 
@@ -134,7 +153,7 @@ interface RoomRecord {
   room: RoomState;
   fixture: FixtureSnapshot;
   readonly hostParticipantId: string;
-  readonly memberTeamCodes: Map<string, TeamCode | null>;
+  readonly memberTeamCodes: Map<string, string | null>;
   readonly name: string;
   readonly reactionRecipients: Map<string, string>;
   revision: number;
@@ -142,6 +161,9 @@ interface RoomRecord {
   startedAt: number | null;
   readonly statTotals: Record<(typeof CALL_CATEGORIES)[number], number | null>;
   readonly subscribers: Map<string, Set<RoomSubscriber>>;
+  sensePhase: SenseRoomPhase;
+  readonly senseSlates: Record<string, SenseSlate>;
+  senseOutcomes: SenseOutcomes | null;
 }
 
 export interface RoomServiceOptions {
@@ -180,6 +202,18 @@ function effectiveStatus(
   return record.startedAt === null && observedAt < record.room.kickoffAt
     ? record.room.status
     : "LIVE";
+}
+
+function effectiveSensePhase(
+  record: RoomRecord,
+  observedAt: number,
+): SenseRoomPhase {
+  if (record.room.status === "FINAL" || record.sensePhase === "FINAL") {
+    return "FINAL";
+  }
+  if (record.startedAt !== null || record.room.status === "LIVE") return "LIVE";
+  if (observedAt >= record.room.kickoffAt) return "LOCKED";
+  return record.sensePhase;
 }
 
 export function createRoomService(options: RoomServiceOptions) {
@@ -282,6 +316,14 @@ export function createRoomService(options: RoomServiceOptions) {
         : 0;
       return { ...entry, correctCalls };
     });
+    const sensePhase = effectiveSensePhase(record, now());
+    const senseLeaderboard = record.senseOutcomes
+      ? scoreSenseSlates({
+          members: record.room.members,
+          outcomes: record.senseOutcomes,
+          slates: record.senseSlates,
+        })
+      : [];
     return {
       createdAt: record.room.createdAt,
       currentMoment: moments.at(-1) ?? null,
@@ -296,6 +338,7 @@ export function createRoomService(options: RoomServiceOptions) {
         const slate = record.room.callSlates[roomMember.id];
         return {
           hasCalls: slate !== undefined,
+          hasPicks: record.senseSlates[roomMember.id] !== undefined,
           id: roomMember.id,
           isHost: roomMember.id === record.hostParticipantId,
           joinedAt: roomMember.joinedAt,
@@ -310,6 +353,20 @@ export function createRoomService(options: RoomServiceOptions) {
       name: record.name,
       reactions: reactionViews,
       revision: record.revision,
+      sense: {
+        currencyLabel: "FRIEND SENSE · NO MONEY · NO PRIZES",
+        leaderboard: senseLeaderboard,
+        markets: SENSE_MARKETS,
+        mySlate: record.senseSlates[participantId] ?? null,
+        phase: sensePhase,
+        revealedSlates:
+          sensePhase === "LOCKED" ||
+          sensePhase === "LIVE" ||
+          sensePhase === "FINAL"
+            ? Object.values(record.senseSlates)
+            : [],
+        total: 100,
+      },
       stats: Object.fromEntries(
         CALL_CATEGORIES.map((category) => {
           const stat = record.room.stats[category];
@@ -378,6 +435,19 @@ export function createRoomService(options: RoomServiceOptions) {
   };
 
   return {
+    openFanIdentity(fanId: string) {
+      const normalized = fanId.trim();
+      if (!/^[A-Za-z0-9_-]{6,120}$/u.test(normalized)) {
+        throw new RoomServiceError(
+          "ROOM_SESSION_REQUIRED",
+          401,
+          "Fan identity is required",
+        );
+      }
+      participantIds.add(normalized);
+      return normalized;
+    },
+
     openSession(capability?: string) {
       if (capability && /^[A-Za-z0-9_-]{43}$/u.test(capability)) {
         const participantId = participantIdBySessionHash.get(
@@ -426,7 +496,7 @@ export function createRoomService(options: RoomServiceOptions) {
       host: {
         participantId: string;
         nickname: string;
-        teamCode?: TeamCode | undefined;
+        teamCode?: string | undefined;
       };
       name: string;
     }) {
@@ -497,6 +567,9 @@ export function createRoomService(options: RoomServiceOptions) {
         startedAt: null,
         statTotals: { cards: null, corners: null, goals: null },
         subscribers: new Map(),
+        senseOutcomes: null,
+        sensePhase: "DRAFT",
+        senseSlates: {},
       };
       records.set(id, record);
       roomIdByInviteHash.set(hashedInvite, id);
@@ -535,9 +608,16 @@ export function createRoomService(options: RoomServiceOptions) {
       inviteCode: string;
       nickname: string;
       participantId: string;
-      teamCode?: TeamCode | undefined;
+      teamCode?: string | undefined;
     }) {
       const record = recordForInvite(input.inviteCode);
+      if (record.room.members.length >= 20) {
+        throw new RoomServiceError(
+          "ROOM_FULL",
+          409,
+          "This room already has its maximum of 20 fans",
+        );
+      }
       const nextRoom = joinRoom(record.room, {
         joinedAt: domainNow(record),
         participant: {
@@ -560,6 +640,72 @@ export function createRoomService(options: RoomServiceOptions) {
           record.room.members.some(({ id }) => id === participantId),
         )
         .map((record) => view(record, participantId));
+    },
+
+    openPicks(roomId: string, participantId: string) {
+      const record = recordFor(roomId);
+      if (participantId !== record.hostParticipantId) {
+        throw new RoomServiceError(
+          "DEMO_HOST_REQUIRED",
+          403,
+          "Only the room host can open picks",
+        );
+      }
+      if (now() >= record.room.kickoffAt) {
+        throw new RoomServiceError(
+          "ROOM_CREATION_CLOSED",
+          409,
+          "Kickoff has passed, so picks cannot be opened",
+        );
+      }
+      if (record.sensePhase !== "DRAFT") return view(record, participantId);
+      record.sensePhase = "OPEN";
+      changed(record);
+      return view(record, participantId);
+    },
+
+    saveSensePicks(input: {
+      readonly roomId: string;
+      readonly participantId: string;
+      readonly picks: readonly SensePickInput[];
+    }) {
+      const record = recordFor(input.roomId);
+      const member = record.room.members.find(
+        ({ id }) => id === input.participantId,
+      );
+      if (!member) {
+        throw new RoomsDomainError("MEMBER_NOT_FOUND", "Room member not found");
+      }
+      if (member.role !== "PLAYER") {
+        throw new RoomsDomainError(
+          "NOT_PLAYER",
+          "Spectators cannot submit picks",
+        );
+      }
+      if (record.sensePhase !== "OPEN") {
+        throw new RoomServiceError(
+          "PICKS_NOT_OPEN",
+          409,
+          "The host has not opened 100-Sense picks",
+        );
+      }
+      if (now() >= record.room.kickoffAt) {
+        throw new RoomsDomainError("KICKOFF_LOCKED", "Picks locked at kickoff");
+      }
+      if (record.senseSlates[input.participantId]) {
+        throw new RoomServiceError(
+          "PICKS_OPEN",
+          409,
+          "Your 100-Sense picks are already locked",
+        );
+      }
+      record.senseSlates[input.participantId] = validateSensePicks(
+        input.participantId,
+        input.picks,
+        now(),
+      );
+      changed(record);
+      return view(record, input.participantId);
     },
 
     subscribe(
@@ -694,6 +840,7 @@ export function createRoomService(options: RoomServiceOptions) {
         let changedByEvent = false;
         if (record.startedAt === null && observedAt >= record.room.kickoffAt) {
           record.startedAt = observedAt;
+          record.sensePhase = "LIVE";
           changedByEvent = true;
         }
         if (event.confirmed === true && event.participantStats !== null) {
@@ -721,10 +868,29 @@ export function createRoomService(options: RoomServiceOptions) {
           changedByEvent = true;
         }
         if (event.action === "game_finalised" && event.confirmed === true) {
+          const finalScore = event.score ?? currentFixture(record).score;
+          const cards = record.statTotals.cards;
+          const corners = record.statTotals.corners;
+          if (cards !== null && corners !== null) {
+            record.senseOutcomes = {
+              btts: finalScore.home > 0 && finalScore.away > 0 ? "YES" : "NO",
+              cards_4_5: cards > 4.5 ? "OVER" : "UNDER",
+              corners_9_5: corners > 9.5 ? "OVER" : "UNDER",
+              goals_2_5:
+                finalScore.home + finalScore.away > 2.5 ? "OVER" : "UNDER",
+              winner:
+                finalScore.home === finalScore.away
+                  ? "DRAW"
+                  : finalScore.home > finalScore.away
+                    ? "HOME"
+                    : "AWAY",
+            };
+          }
           nextRoom = finaliseRoom(nextRoom, {
             event: "game_finalised",
             finalisedAt: domainObservedAt,
           });
+          record.sensePhase = "FINAL";
           changedByEvent = true;
         }
         if (changedByEvent) {
@@ -760,6 +926,7 @@ export function createRoomService(options: RoomServiceOptions) {
           record.room.kickoffAt,
         );
         record.startedAt ??= domainObservedAt;
+        record.sensePhase = "LIVE";
         let nextRoom = registerMoment(record.room, {
           momentId: event.moment.id,
           revision: event.moment.revision,
@@ -786,6 +953,7 @@ export function createRoomService(options: RoomServiceOptions) {
       assertDemoHost(record, participantId);
       if (record.startedAt === null) {
         record.startedAt = now();
+        record.sensePhase = "LIVE";
         changed(record);
       }
       return view(record, participantId);
@@ -862,6 +1030,22 @@ export function createRoomService(options: RoomServiceOptions) {
     finaliseDemo(roomId: string, participantId: string) {
       const record = recordFor(roomId);
       assertDemoStarted(record, participantId);
+      const score = currentFixture(record).score;
+      const cards = record.statTotals.cards ?? 0;
+      const corners = record.statTotals.corners ?? 0;
+      record.senseOutcomes = {
+        btts: score.home > 0 && score.away > 0 ? "YES" : "NO",
+        cards_4_5: cards > 4.5 ? "OVER" : "UNDER",
+        corners_9_5: corners > 9.5 ? "OVER" : "UNDER",
+        goals_2_5: score.home + score.away > 2.5 ? "OVER" : "UNDER",
+        winner:
+          score.home === score.away
+            ? "DRAW"
+            : score.home > score.away
+              ? "HOME"
+              : "AWAY",
+      };
+      record.sensePhase = "FINAL";
       changed(
         record,
         finaliseRoom(record.room, {
