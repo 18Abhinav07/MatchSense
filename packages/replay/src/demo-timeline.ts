@@ -136,7 +136,8 @@ export const DEMO_TIMELINE: readonly DemoBeat[] = [
   },
   {
     atSeconds: 216,
-    description: "Caught you up: a substitution and a France attack happened while reconnecting.",
+    description:
+      "Caught you up: a substitution and a France attack happened while reconnecting.",
     id: "arg-fra-demo:catchup:1",
     matchMinute: "72'",
     score: { away: 1, home: 1 },

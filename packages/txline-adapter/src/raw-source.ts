@@ -131,8 +131,7 @@ export function createTxlineRawScoreSource(
   };
 
   const isEventStream = (contentType: string) =>
-    contentType.split(";", 1)[0]?.trim().toLowerCase() ===
-    "text/event-stream";
+    contentType.split(";", 1)[0]?.trim().toLowerCase() === "text/event-stream";
   const warn = (
     code: TxlineRawSourceWarningCode,
     message: string,

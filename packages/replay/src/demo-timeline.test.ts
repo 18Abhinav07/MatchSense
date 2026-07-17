@@ -28,10 +28,12 @@ describe("five-minute MatchSense demo timeline", () => {
       "winning_goal",
       "full_time",
     ]);
-    expect(DEMO_TIMELINE.every((beat, index) => {
-      const previous = DEMO_TIMELINE[index - 1];
-      return previous === undefined || previous.atSeconds < beat.atSeconds;
-    })).toBe(true);
+    expect(
+      DEMO_TIMELINE.every((beat, index) => {
+        const previous = DEMO_TIMELINE[index - 1];
+        return previous === undefined || previous.atSeconds < beat.atSeconds;
+      }),
+    ).toBe(true);
     expect(DEMO_TIMELINE.at(-1)).toMatchObject({
       atSeconds: 300,
       score: { away: 1, home: 2 },
