@@ -7,6 +7,11 @@ import { z } from "zod";
 import type { FixtureStreamEvent, TeamCode } from "@matchsense/contracts";
 
 import type { AudioWritable } from "./audio-hub.js";
+import { registerDemoRoutes } from "./demo-routes.js";
+import {
+  createDemoSessionRuntime,
+  type DemoSessionRuntime,
+} from "./demo-runtime.js";
 import type { ProductRuntime } from "./product-runtime.js";
 import {
   type PushRouteDependencies,
@@ -25,6 +30,7 @@ export interface ReadinessProbe {
 }
 
 export interface BuildAppOptions {
+  demo?: DemoSessionRuntime | false;
   manageRuntimeLifecycle?: boolean;
   readinessProbe: ReadinessProbe;
   webDistPath: string;
@@ -81,6 +87,7 @@ const canonicalShellRoutes = [
     pattern: new RegExp(`^/you/${segment}(?:/${segment})*$`, "u"),
     template: "/you/*",
   },
+  { pattern: /^\/history$/u, template: "/history" },
   { pattern: /^\/demo$/u, template: "/demo" },
   { pattern: /^\/offline$/u, template: "/offline" },
 ] as const;
@@ -109,8 +116,17 @@ function cacheControlForStaticFile(root: string, filePath: string) {
 
 export function buildApp(options: BuildAppOptions): FastifyInstance {
   const app = Fastify({ logger: false });
+  const demo =
+    options.demo === false
+      ? null
+      : (options.demo ?? createDemoSessionRuntime());
 
   app.get("/health/live", async () => ({ status: "ok" }));
+
+  if (demo) {
+    registerDemoRoutes(app, demo);
+    app.addHook("preClose", () => demo.close());
+  }
 
   app.get("/health/ready", async (_request, reply) => {
     try {

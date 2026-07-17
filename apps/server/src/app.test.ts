@@ -118,6 +118,7 @@ describe("same-origin web shell", () => {
     "/rooms/room-1",
     "/you/profile",
     "/you/settings/notifications",
+    "/history",
     "/demo",
     "/offline",
   ])("serves the SPA shell for %s", async (url) => {
