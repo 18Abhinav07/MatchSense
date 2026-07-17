@@ -19,7 +19,7 @@
     "build": "tsc -p tsconfig.json",
     "db:check": "node dist/cli.js check",
     "db:migrate": "node dist/cli.js migrate",
-    "test": "vitest run",
+    "test": "vitest run --root ../.. packages/db/src",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

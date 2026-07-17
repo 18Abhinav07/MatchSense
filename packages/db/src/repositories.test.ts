@@ -429,6 +429,7 @@ describe("fixture truth repository", () => {
       expect.stringContaining("INSERT INTO matchsense.fixture_events"),
       expect.stringContaining("INSERT INTO matchsense.outbox"),
     ]);
+    expect(fake.queries[4]?.query).toContain("current_revision");
   });
 
   it("rejects an unexpected revision before derived writes", async () => {

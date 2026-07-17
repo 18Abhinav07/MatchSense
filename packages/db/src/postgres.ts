@@ -12,6 +12,18 @@ import {
   type SourceStateRepository,
 } from "./repositories.js";
 import {
+  createExperienceRepository,
+  createFanRepository,
+  createMemoryRepository,
+  createPushDeviceRepository,
+  createRoomAggregateRepository,
+  type ExperienceRepository,
+  type FanRepository,
+  type MemoryRepository,
+  type PushDeviceRepository,
+  type RoomAggregateRepository,
+} from "./product-repositories.js";
+import {
   createDatabaseRuntime,
   type DatabaseRuntime,
   type MigrationStore,
@@ -33,8 +45,13 @@ export interface PostgresClient extends QueryExecutor {
 
 export interface ApplicationDatabase extends DatabaseRuntime {
   commentaryArtifacts: CommentaryArtifactRepository;
+  experiences: ExperienceRepository;
+  fans: FanRepository;
   fixtureTruth: FixtureTruthRepository;
+  memories: MemoryRepository;
   outbox: OutboxRepository;
+  pushDevices: PushDeviceRepository;
+  rooms: RoomAggregateRepository;
   sourceState: SourceStateRepository;
 }
 
@@ -145,8 +162,13 @@ export function createApplicationDatabase(
 
   return Object.assign(runtime, {
     commentaryArtifacts: createCommentaryArtifactRepository(client),
+    experiences: createExperienceRepository(client),
+    fans: createFanRepository(client),
     fixtureTruth: createFixtureTruthRepository(client),
+    memories: createMemoryRepository(client),
     outbox: createOutboxRepository(client),
+    pushDevices: createPushDeviceRepository(client),
+    rooms: createRoomAggregateRepository(client),
     sourceState: createSourceStateRepository(client),
   });
 }

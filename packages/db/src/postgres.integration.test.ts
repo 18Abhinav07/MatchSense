@@ -154,8 +154,8 @@ describe.sequential("real PostgreSQL migration runtime", () => {
     const runtime = trackedDatabase();
 
     await expect(runtime.migrate()).resolves.toEqual({
-      appliedVersions: [1, 2],
-      currentVersion: 2,
+      appliedVersions: [1, 2, 3],
+      currentVersion: 3,
     });
     await expect(runtime.check()).resolves.toEqual({
       databaseReachable: true,
@@ -163,7 +163,7 @@ describe.sequential("real PostgreSQL migration runtime", () => {
     });
     await expect(runtime.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 2,
+      currentVersion: 3,
     });
 
     const schemas = await admin.unsafe<{ schema_name: string }[]>(
@@ -175,7 +175,7 @@ describe.sequential("real PostgreSQL migration runtime", () => {
       "SELECT version, checksum, applied_at FROM public.matchsense_schema_migrations ORDER BY version;",
     );
     expect(schemas).toHaveLength(1);
-    expect(ledger).toHaveLength(2);
+    expect(ledger).toHaveLength(3);
     expect(ledger).toEqual([
       expect.objectContaining({
         checksum: migrationCatalog[0]?.checksum,
@@ -184,6 +184,10 @@ describe.sequential("real PostgreSQL migration runtime", () => {
       expect.objectContaining({
         checksum: migrationCatalog[1]?.checksum,
         version: 2,
+      }),
+      expect.objectContaining({
+        checksum: migrationCatalog[2]?.checksum,
+        version: 3,
       }),
     ]);
     expect(ledger.every(({ applied_at }) => applied_at instanceof Date)).toBe(
@@ -524,6 +528,77 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
       outbox: 1,
       raw: 1,
       revisions: 1,
+    });
+  });
+
+  it("atomically processes and deduplicates a source envelope through the v3 repository path", async () => {
+    const runtime = trackedDatabase();
+    await runtime.migrate();
+    await runtime.fixtureTruth.upsert(demoFixture);
+    const raw = sourceChange({ suffix: "process-envelope" }).raw;
+    const derive = vi.fn((current: { revision: number } | null) => {
+      const revision = (current?.revision ?? 0) + 1;
+      return {
+        event: {
+          id: `processed-event-${revision}`,
+          payload: { revision },
+          type: "moment.created",
+        },
+        moment: {
+          id: "processed-goal",
+          kind: "goal",
+          payload: { score: { away: 0, home: 1 } },
+          revision,
+        },
+        outbox: [
+          {
+            id: `processed-outbox-${revision}`,
+            idempotencyKey: `processed-goal:${revision}:broadcast`,
+            payload: { momentId: "processed-goal", revision },
+            topic: "fixture.broadcast",
+          },
+        ],
+        projection: {
+          payload: { revision, score: { away: 0, home: 1 } },
+          revision,
+        },
+      };
+    });
+    const input = {
+      derive,
+      fixtureId: demoFixture.id,
+      mode: "demo" as const,
+      raw,
+    };
+
+    await expect(
+      runtime.fixtureTruth.processSourceEnvelope(input),
+    ).resolves.toEqual({ eventSequence: 1, kind: "committed", revision: 1 });
+    await expect(
+      runtime.fixtureTruth.processSourceEnvelope(input),
+    ).resolves.toEqual({ kind: "duplicate" });
+    expect(derive).toHaveBeenCalledTimes(1);
+
+    const [counts] = await admin.unsafe<
+      {
+        events: number;
+        moments: number;
+        outbox: number;
+        projections: number;
+        raw: number;
+      }[]
+    >(`SELECT
+  (SELECT count(*)::integer FROM matchsense.raw_source_records) AS raw,
+  (SELECT count(*)::integer FROM matchsense.fixture_projections) AS projections,
+  (SELECT count(*)::integer FROM matchsense.canonical_moments) AS moments,
+  (SELECT count(*)::integer FROM matchsense.fixture_events) AS events,
+  (SELECT count(*)::integer FROM matchsense.outbox) AS outbox;`);
+    expect(counts).toEqual({
+      events: 1,
+      moments: 1,
+      outbox: 1,
+      projections: 1,
+      raw: 1,
     });
   });
 

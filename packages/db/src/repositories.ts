@@ -1,5 +1,6 @@
 export type PersistenceMode = "live" | "demo";
 export type PersistenceProvenance = "live_txline" | "synthetic_txline_shaped";
+export type SourceDeliveryIntent = "realtime" | "reconcile";
 
 export type QueryRow = Record<string, unknown>;
 
@@ -40,7 +41,9 @@ export interface FixtureUpsert {
 
 export interface RawSourceRecordWrite {
   dedupeKey: string;
+  deliveryIntent?: SourceDeliveryIntent;
   id: string;
+  occurredAt?: string | null;
   payload: unknown;
   payloadHash: string;
   provenance: PersistenceProvenance;
@@ -100,6 +103,37 @@ export type CommitSourceChangeResult =
   | { kind: "duplicate" }
   | { eventSequence: number; kind: "committed"; revision: number }
   | { kind: "fenced" };
+
+export interface SourceEnvelopeCommitPlan {
+  event: { id: string; payload: unknown; type: string };
+  moment?:
+    | { id: string; kind: string; payload: unknown; revision: number }
+    | undefined;
+  outbox: readonly {
+    availableAt?: string;
+    id: string;
+    idempotencyKey: string;
+    payload: unknown;
+    topic: string;
+  }[];
+  projection: { payload: unknown; revision: number };
+}
+
+export interface ProcessSourceEnvelopeInput {
+  derive(
+    current: FixtureProjectionRecord | null,
+  ): SourceEnvelopeCommitPlan | null;
+  fixtureId: string;
+  mode: PersistenceMode;
+  raw: RawSourceRecordWrite;
+  sourceFence?: SourceFence;
+}
+
+export type ProcessSourceEnvelopeResult =
+  | { kind: "duplicate" }
+  | { kind: "fenced" }
+  | { kind: "accepted_no_change" }
+  | { eventSequence: number; kind: "committed"; revision: number };
 
 export interface FixtureEventRecord {
   createdAt: string;
@@ -163,6 +197,9 @@ export interface FixtureTruthRepository {
     scheduledFrom?: string;
     scheduledTo?: string;
   }): Promise<readonly FixtureRecord[]>;
+  processSourceEnvelope(
+    input: ProcessSourceEnvelopeInput,
+  ): Promise<ProcessSourceEnvelopeResult>;
   upsert(input: FixtureUpsert): Promise<FixtureRecord>;
 }
 
@@ -553,9 +590,11 @@ async function insertRawSourceRecord(
   const rows = await executor.unsafe(
     `INSERT INTO matchsense.raw_source_records (
   mode, id, fixture_id, source, source_record_id, source_sequence,
-  dedupe_key, payload_hash, provenance, payload, received_at
+  dedupe_key, payload_hash, provenance, payload, received_at,
+  delivery_intent, occurred_at
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::timestamptz)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::timestamptz,
+  $12, $13::timestamptz)
 ON CONFLICT (mode, source, fixture_id, dedupe_key) DO NOTHING
 RETURNING id;`,
     [
@@ -568,8 +607,10 @@ RETURNING id;`,
       input.raw.dedupeKey,
       input.raw.payloadHash,
       input.raw.provenance,
-      json(input.raw.payload),
+      input.mode === "live" ? null : json(input.raw.payload),
       input.raw.receivedAt,
+      input.raw.deliveryIntent ?? "realtime",
+      input.raw.occurredAt ?? null,
     ],
   );
   return rows[0] !== undefined;
@@ -653,6 +694,155 @@ export function createFixtureTruthRepository(
           kind: (await insertRawSourceRecord(transaction, input))
             ? "committed"
             : "duplicate",
+        };
+      });
+    },
+    processSourceEnvelope: async (input) => {
+      assertRawSourceRecord(input.mode, input.raw);
+      return client.begin(async (transaction) => {
+        if (
+          !(await lockCurrentSourceFence(transaction, {
+            mode: input.mode,
+            rawSource: input.raw.source,
+            sourceFence: input.sourceFence,
+          }))
+        ) {
+          return { kind: "fenced" };
+        }
+        if (
+          !(await insertRawSourceRecord(transaction, {
+            fixtureId: input.fixtureId,
+            mode: input.mode,
+            raw: input.raw,
+          }))
+        ) {
+          return { kind: "duplicate" };
+        }
+
+        const fixtureRows = await transaction.unsafe(
+          `SELECT id
+FROM matchsense.fixtures
+WHERE mode = $1 AND id = $2
+FOR UPDATE;`,
+          [input.mode, input.fixtureId],
+        );
+        if (!fixtureRows[0]) throw new Error("Fixture does not exist");
+
+        const projectionRows = await transaction.unsafe(
+          `SELECT ${projectionColumns}
+FROM matchsense.fixture_projections
+WHERE mode = $1 AND fixture_id = $2;`,
+          [input.mode, input.fixtureId],
+        );
+        const current = projectionRows[0]
+          ? parseProjection(projectionRows[0])
+          : null;
+        const plan = input.derive(current);
+        if (!plan) return { kind: "accepted_no_change" };
+
+        const currentRevision = current?.revision ?? 0;
+        const nextRevision = currentRevision + 1;
+        if (plan.projection.revision !== nextRevision) {
+          throw new Error("Derived projection must advance exactly once");
+        }
+        if (plan.moment && plan.moment.revision !== nextRevision) {
+          throw new Error("Derived Moment must use the fixture revision");
+        }
+
+        await transaction.unsafe(
+          `INSERT INTO matchsense.fixture_projections (
+  mode, fixture_id, revision, source_sequence, payload
+)
+VALUES ($1, $2, $3, $4, $5::jsonb)
+ON CONFLICT (mode, fixture_id) DO UPDATE SET
+  revision = EXCLUDED.revision,
+  source_sequence = EXCLUDED.source_sequence,
+  payload = EXCLUDED.payload,
+  updated_at = clock_timestamp();`,
+          [
+            input.mode,
+            input.fixtureId,
+            plan.projection.revision,
+            input.raw.sourceSequence,
+            json(plan.projection.payload),
+          ],
+        );
+
+        if (plan.moment) {
+          await transaction.unsafe(
+            `INSERT INTO matchsense.canonical_moments (
+  mode, fixture_id, id, kind, current_revision
+)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (mode, fixture_id, id) DO UPDATE SET
+  current_revision = EXCLUDED.current_revision;`,
+            [
+              input.mode,
+              input.fixtureId,
+              plan.moment.id,
+              plan.moment.kind,
+              plan.moment.revision,
+            ],
+          );
+          await transaction.unsafe(
+            `INSERT INTO matchsense.moment_revisions (
+  mode, fixture_id, moment_id, revision, source_record_id, payload
+)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb);`,
+            [
+              input.mode,
+              input.fixtureId,
+              plan.moment.id,
+              plan.moment.revision,
+              input.raw.id,
+              json(plan.moment.payload),
+            ],
+          );
+        }
+
+        const eventRows = await transaction.unsafe(
+          `INSERT INTO matchsense.fixture_events (
+  mode, fixture_id, sequence, event_id, event_type, payload
+)
+SELECT $1, $2, COALESCE(MAX(sequence), 0) + 1, $3, $4, $5::jsonb
+FROM matchsense.fixture_events
+WHERE mode = $1 AND fixture_id = $2
+RETURNING sequence;`,
+          [
+            input.mode,
+            input.fixtureId,
+            plan.event.id,
+            plan.event.type,
+            json(plan.event.payload),
+          ],
+        );
+        const eventRow = eventRows[0];
+        if (!eventRow) throw new Error("Fixture event insert returned no row");
+        const eventSequence = safeInteger(eventRow.sequence, "sequence");
+
+        for (const message of plan.outbox) {
+          await transaction.unsafe(
+            `INSERT INTO matchsense.outbox (
+  mode, id, fixture_id, topic, idempotency_key, payload, available_at
+)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb,
+  COALESCE($7::timestamptz, clock_timestamp()));`,
+            [
+              input.mode,
+              message.id,
+              input.fixtureId,
+              message.topic,
+              message.idempotencyKey,
+              json(message.payload),
+              message.availableAt ?? null,
+            ],
+          );
+        }
+
+        return {
+          eventSequence,
+          kind: "committed",
+          revision: plan.projection.revision,
         };
       });
     },
@@ -771,10 +961,19 @@ ON CONFLICT (mode, fixture_id) DO UPDATE SET
           ],
         );
         await transaction.unsafe(
-          `INSERT INTO matchsense.canonical_moments (mode, fixture_id, id, kind)
-VALUES ($1, $2, $3, $4)
-ON CONFLICT (mode, fixture_id, id) DO NOTHING;`,
-          [input.mode, input.fixtureId, input.moment.id, input.moment.kind],
+          `INSERT INTO matchsense.canonical_moments (
+  mode, fixture_id, id, kind, current_revision
+)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (mode, fixture_id, id) DO UPDATE SET
+  current_revision = EXCLUDED.current_revision;`,
+          [
+            input.mode,
+            input.fixtureId,
+            input.moment.id,
+            input.moment.kind,
+            input.moment.revision,
+          ],
         );
         await transaction.unsafe(
           `INSERT INTO matchsense.moment_revisions (

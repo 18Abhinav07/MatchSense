@@ -54,9 +54,13 @@ export type {
   OutboxWrite,
   PersistenceMode,
   PersistenceProvenance,
+  ProcessSourceEnvelopeInput,
+  ProcessSourceEnvelopeResult,
   QueryRow,
   RawSourceRecordWrite,
   RepositoryClient,
+  SourceDeliveryIntent,
+  SourceEnvelopeCommitPlan,
   SourceCursorRecord,
   SourceFence,
   SourceLeaseRecord,
@@ -64,5 +68,36 @@ export type {
   SourceStreamKey,
   SqlExecutor,
 } from "./repositories.js";
+export {
+  createExperienceRepository,
+  createFanRepository,
+  createMemoryRepository,
+  createPushDeviceRepository,
+  createRoomAggregateRepository,
+} from "./product-repositories.js";
+export type {
+  ExperienceBeatRecord,
+  ExperienceJourney,
+  ExperienceRepository,
+  ExperienceRunRecord,
+  ExperienceRunStatus,
+  FanFollowRecord,
+  FanRecord,
+  FanRepository,
+  FanSessionRecord,
+  MemoryRecord,
+  MemoryRepository,
+  PushDeliveryStatus,
+  PushDeviceRecord,
+  PushDeviceRepository,
+  RoomAggregateRecord,
+  RoomAggregateRepository,
+  RoomStatus,
+} from "./product-repositories.js";
+export { createInMemoryFixtureTruthRepository } from "./in-memory-fixture-truth.js";
+export type {
+  InMemoryFixtureTruthInspection,
+  InMemoryFixtureTruthRepository,
+} from "./in-memory-fixture-truth.js";
 export { isDirectExecution, runDatabaseCli } from "./cli.js";
 export type { DatabaseCliOptions } from "./cli.js";

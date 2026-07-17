@@ -50,7 +50,7 @@ const prefixCatalog = [
 
 describe("migration catalog and planning", () => {
   it("publishes a deterministic schema-only baseline migration", () => {
-    expect(db.migrationCatalog).toHaveLength(2);
+    expect(db.migrationCatalog).toHaveLength(3);
 
     const migration = db.migrationCatalog?.[0];
     expect(migration).toMatchObject({
@@ -162,6 +162,53 @@ describe("migration catalog and planning", () => {
       /CREATE INDEX outbox_unprocessed_idx[\s\S]*WHERE processed_at IS NULL/u,
     );
     expect(migration?.sql).not.toMatch(/call_three|leaderboard|room_invites/iu);
+  });
+
+  it("appends the v3 fan, delivery, experience, room, and memory product records", () => {
+    const migration = db.migrationCatalog?.[2];
+
+    expect(migration).toMatchObject({
+      description: "create unified fan experience product records",
+      version: 3,
+    });
+    expect(migration?.checksum).toBe(
+      createHash("sha256")
+        .update(migration?.sql ?? "")
+        .digest("hex"),
+    );
+
+    for (const table of [
+      "fans",
+      "fan_sessions",
+      "fan_follows",
+      "push_devices",
+      "push_deliveries",
+      "experience_templates",
+      "experience_runs",
+      "experience_run_beats",
+      "rooms",
+      "room_memberships",
+      "match_memories",
+    ]) {
+      expect(migration?.sql).toMatch(
+        new RegExp(`CREATE TABLE matchsense\\.${table} \\(`, "u"),
+      );
+    }
+
+    expect(migration?.sql).toMatch(
+      /ALTER TABLE matchsense\.raw_source_records[\s\S]*ALTER COLUMN payload DROP NOT NULL/u,
+    );
+    expect(migration?.sql).toMatch(
+      /delivery_intent text NOT NULL DEFAULT 'realtime'[\s\S]*CHECK \(delivery_intent IN \('realtime', 'reconcile'\)\)/u,
+    );
+    expect(migration?.sql).toMatch(/handle_normalized text UNIQUE/u);
+    expect(migration?.sql).toMatch(
+      /UNIQUE \(device_id, mode, fixture_id, moment_id, moment_revision\)/u,
+    );
+    expect(migration?.sql).toMatch(/PRIMARY KEY \(run_id, beat_index\)/u);
+    expect(migration?.sql).toMatch(
+      /PRIMARY KEY \(fan_id, mode, fixture_id, revision\)/u,
+    );
   });
 
   it("orders pending migrations and reports a repeat run as current", () => {

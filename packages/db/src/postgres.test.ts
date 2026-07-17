@@ -23,8 +23,13 @@ type DatabaseModuleContract = {
     }>;
     close(): Promise<void>;
     commentaryArtifacts: { get(input: unknown): Promise<unknown> };
+    experiences: { getRun(input: string): Promise<unknown> };
+    fans: { getProfile(input: string): Promise<unknown> };
     fixtureTruth: { get(input: unknown): Promise<unknown> };
+    memories: { latestForFanFixture(input: unknown): Promise<unknown> };
     outbox: { hasConsumerReceipt(input: unknown): Promise<boolean> };
+    pushDevices: { listActiveForFan(input: string): Promise<unknown> };
+    rooms: { get(input: string): Promise<unknown> };
     sourceState: { getCursor(input: unknown): Promise<unknown> };
   };
   createPostgresDatabase?: (databaseUrl: string) => {
@@ -102,7 +107,12 @@ describe("PostgreSQL migration store", () => {
 
     expect(database?.fixtureTruth).toBeDefined();
     expect(database?.commentaryArtifacts).toBeDefined();
+    expect(database?.experiences).toBeDefined();
+    expect(database?.fans).toBeDefined();
+    expect(database?.memories).toBeDefined();
     expect(database?.outbox).toBeDefined();
+    expect(database?.pushDevices).toBeDefined();
+    expect(database?.rooms).toBeDefined();
     expect(database?.sourceState).toBeDefined();
     await expect(database?.check()).resolves.toEqual({
       databaseReachable: true,
