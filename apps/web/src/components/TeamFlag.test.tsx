@@ -42,6 +42,7 @@ describe("TeamFlag", () => {
         "POR",
         "NED",
         "BEL",
+        "BIH",
         "ITA",
         "CRO",
         "URU",

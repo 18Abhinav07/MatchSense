@@ -146,11 +146,35 @@ describe("server entrypoint", () => {
         sourceTimestampMs: 1,
         startTimeMs: 3,
       },
+      {
+        competition: "World Cup",
+        competitionId: "72",
+        fixtureGroupId: "1",
+        fixtureId: "103",
+        gameState: 1,
+        participant1: { id: "50", name: "Bosnia & Herzegovina" },
+        participant1IsHome: true,
+        participant2: { id: "60", name: "USA" },
+        sourceTimestampMs: 1,
+        startTimeMs: 4,
+      },
+      {
+        competition: "World Cup",
+        competitionId: "72",
+        fixtureGroupId: "1",
+        fixtureId: "104",
+        gameState: 1,
+        participant1: { id: "70", name: "Congo DR" },
+        participant1IsHome: true,
+        participant2: { id: "10", name: "Argentina" },
+        sourceTimestampMs: 1,
+        startTimeMs: 5,
+      },
     ];
 
     const catalog = serverModule.teamCatalogFromTxline(schedule);
 
-    expect(catalog).toHaveLength(4);
+    expect(catalog).toHaveLength(7);
     expect(catalog).toContainEqual({
       code: "ARG",
       colors: { primary: "#75AADB", secondary: "#F3EFE4" },
@@ -164,6 +188,13 @@ describe("server entrypoint", () => {
     );
     expect(catalog).toContainEqual(
       expect.objectContaining({ code: "CIV", name: "Cote d'Ivoire" }),
+    );
+    expect(catalog).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "BIH", name: "Bosnia & Herzegovina" }),
+        expect.objectContaining({ code: "COD", name: "Congo DR" }),
+        expect.objectContaining({ code: "USA", name: "USA" }),
+      ]),
     );
     expect(serverModule.teamCatalogFromTxline([...schedule].reverse())).toEqual(
       catalog,

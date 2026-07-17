@@ -36,6 +36,7 @@ const FLAG_SPECS = {
   },
   NED: { bands: [["#ae1c28"], ["#ffffff"], ["#21468b"]], kind: "horizontal" },
   BEL: { bands: [["#1b1b1b"], ["#fdda24"], ["#ef3340"]], kind: "vertical" },
+  BIH: { color: "#002395", kind: "solid" },
   ITA: { bands: [["#009246"], ["#ffffff"], ["#ce2b37"]], kind: "vertical" },
   CRO: { bands: [["#ff0000"], ["#ffffff"], ["#171796"]], kind: "horizontal" },
   URU: { color: "#ffffff", kind: "solid" },
@@ -207,6 +208,21 @@ function unionCanton() {
 
 function renderAccent(code: string): ReactNode {
   switch (code) {
+    case "BIH":
+      return (
+        <>
+          <path d="M19 3h27L19 36z" fill="#fecb00" />
+          {[7, 13, 19, 25, 31, 37].map((offset) => (
+            <circle
+              key={offset}
+              cx={offset}
+              cy={offset - 2}
+              fill="#ffffff"
+              r="1.35"
+            />
+          ))}
+        </>
+      );
     case "ARG":
       return <circle cx="30" cy="20" fill="#f6b40e" r="3.2" />;
     case "BRA":
