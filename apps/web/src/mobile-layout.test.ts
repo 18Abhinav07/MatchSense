@@ -13,6 +13,9 @@ describe("mobile team catalog layout", () => {
       /@media \(max-width: 820px\)[\s\S]*?\.team-choice\s*\{[\s\S]*?grid-template-columns:\s*78px minmax\(0, 1fr\) 24px;/u,
     );
     expect(styles).toMatch(
+      /@media \(max-width: 820px\)[\s\S]*?\.team-pick-grid\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\);/u,
+    );
+    expect(styles).toMatch(
       /\.team-choice span:nth-child\(2\)\s*\{[\s\S]*?min-width:\s*0;/u,
     );
   });
