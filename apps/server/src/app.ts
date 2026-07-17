@@ -25,6 +25,7 @@ export interface ReadinessProbe {
 }
 
 export interface BuildAppOptions {
+  manageRuntimeLifecycle?: boolean;
   readinessProbe: ReadinessProbe;
   webDistPath: string;
   runtime?: ProductRuntime;
@@ -126,9 +127,11 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
 
   if (options.runtime) {
     registerProductRoutes(app, options.runtime);
-    app.addHook("preClose", () => {
-      options.runtime?.close();
-    });
+    if (options.manageRuntimeLifecycle !== false) {
+      app.addHook("preClose", () => {
+        options.runtime?.close();
+      });
+    }
   }
   if (options.push) {
     registerPushRoutes(app, options.push);

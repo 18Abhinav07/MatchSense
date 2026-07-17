@@ -3,13 +3,19 @@ import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 import { createCommentaryPipeline } from "@matchsense/commentary";
-import { createPostgresDatabase } from "@matchsense/db";
+import {
+  createPostgresDatabase,
+  type OutboxRepository,
+  type PersistenceMode,
+} from "@matchsense/db";
 import { createTxlineLiveScoreSource } from "@matchsense/txline-adapter";
+import type { FastifyInstance } from "fastify";
 
 import { buildApp, type ReadinessProbe } from "./app.js";
 import { transcodeWavToStreamMp3 } from "./audio-transcoder.js";
 import { parseServerEnv } from "./config.js";
 import { inspectMp3 } from "./mp3.js";
+import { createOutboxWorker, type OutboxWorker } from "./outbox-worker.js";
 import { deliverMomentPush } from "./push-delivery.js";
 import { InMemoryPushSubscriptionStore } from "./push-subscriptions.js";
 import {
@@ -25,6 +31,8 @@ import { createVapidWebPushSender } from "./web-push-sender.js";
 
 interface ServerDatabaseRuntime extends ReadinessProbe {
   close(): Promise<void>;
+  migrate(): Promise<unknown>;
+  outbox: OutboxRepository;
 }
 
 const VERIFIED_HACKATHON_FIXTURE = {
@@ -38,127 +46,271 @@ export interface StartServerOptions {
   databaseFactory?: (databaseUrl: string) => ServerDatabaseRuntime;
   databaseRuntime?: ServerDatabaseRuntime;
   environment?: Record<string, string | undefined>;
+  httpListen?: (
+    app: FastifyInstance,
+    address: { host: string; port: number },
+  ) => Promise<unknown>;
   listen?: boolean;
+  outboxWorker?: OutboxWorker;
+  outboxWorkerFactory?: (mode: PersistenceMode) => OutboxWorker;
   readinessProbe?: ReadinessProbe;
+  shutdownTimeoutMs?: number;
   productRuntime?: ProductRuntime;
   signalSource?: ShutdownSignalSource;
+  txlineSourceFactory?: typeof createTxlineLiveScoreSource;
   webDistPath?: string;
+}
+
+async function boundedCleanup(
+  label: string,
+  timeoutMs: number,
+  action: () => unknown,
+): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.resolve().then(action),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`${label} shutdown timed out`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function settleCleanupStage(
+  actions: readonly { action: () => unknown; label: string }[],
+  timeoutMs: number,
+): Promise<unknown[]> {
+  const results = await Promise.allSettled(
+    actions.map(({ action, label }) =>
+      boundedCleanup(label, timeoutMs, action),
+    ),
+  );
+  return results.flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : [],
+  );
 }
 
 export async function startServer(options: StartServerOptions = {}) {
   const config = parseServerEnv(options.environment ?? process.env);
-  const push = config.vapid
-    ? {
-        applicationServerKey: config.vapid.publicKey,
-        sender: createVapidWebPushSender(config.vapid),
-        store: new InMemoryPushSubscriptionStore(),
-      }
-    : null;
+  const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 10_000;
+  if (!Number.isSafeInteger(shutdownTimeoutMs) || shutdownTimeoutMs < 1) {
+    throw new Error("Server shutdown timeout is invalid");
+  }
   const webDistPath =
     options.webDistPath ?? path.resolve(import.meta.dirname, "../../web/dist");
   const databaseRuntime =
     options.databaseRuntime ??
-    (options.readinessProbe
-      ? undefined
-      : (options.databaseFactory ?? createPostgresDatabase)(
-          config.databaseUrl,
-        ));
-  let productRuntime = options.productRuntime;
-  if (!productRuntime) {
-    const cueBytes = await readFile(
-      path.resolve(import.meta.dirname, "../assets/goal-cue.mp3"),
-    );
-    const streamContract = inspectMp3(cueBytes);
-    productRuntime = createProductRuntime({
-      commentaryPipeline: createCommentaryPipeline({
-        env: options.environment ?? process.env,
-      }),
-      cueBytes,
-      ...(push
-        ? {
-            notifyMoment: async (moment, fixtureSnapshot) => {
-              const teamNames = {
-                ARG: "Argentina",
-                BRA: "Brazil",
-                ESP: "Spain",
-                FRA: "France",
-                JPN: "Japan",
-              } as const;
-              await deliverMomentPush(
-                {
-                  body: `${teamNames[moment.eventTeam]} change the match. Tap to feel the Moment and hear the live call.`,
-                  fixtureId: moment.fixtureId,
-                  momentId: moment.id,
-                  occurredAt: fixtureSnapshot.updatedAt,
-                  revision: moment.revision,
-                  title: `⚽ GOAL — ${moment.eventTeam} ${moment.score.home}–${moment.score.away}, ${moment.minute}`,
-                },
-                push,
-              );
-            },
-          }
-        : {}),
-      ...(config.dataRightsMode === "txline_hackathon"
-        ? {
-            fixture: {
-              awayTeam: "ESP" as const,
-              fixtureId: VERIFIED_HACKATHON_FIXTURE.fixtureId,
-              homeTeam: "FRA" as const,
-              kickoffAt: "2026-07-14T15:00:00.000Z",
-              participant1IsHome: true,
-              provenance: "live_txline" as const,
-            },
-          }
-        : {}),
-      silenceBytes: await readFile(
-        path.resolve(import.meta.dirname, "../assets/silence.mp3"),
-      ),
-      transcodeCommentary: (wavBytes) =>
-        transcodeWavToStreamMp3(wavBytes, { expected: streamContract }),
-      writeIntervalMs: 940,
-    });
-  }
+    (options.databaseFactory ?? createPostgresDatabase)(config.databaseUrl);
+  let productRuntime: ProductRuntime | undefined;
+  let app: FastifyInstance | undefined;
+  let outboxWorkers: OutboxWorker[] = [];
   let txlineAbort: AbortController | null = null;
   let txlineTask: Promise<void> | null = null;
-  if (config.dataRightsMode === "txline_hackathon") {
-    txlineAbort = new AbortController();
-    const source = createTxlineLiveScoreSource({
-      apiToken: config.txlineApiToken!,
-      fixtures: [VERIFIED_HACKATHON_FIXTURE],
-      onEvent: (event) => {
-        productRuntime.acceptTxlineEvent(event);
-      },
-    });
-    txlineTask = source.run(txlineAbort.signal).catch(() => undefined);
-  }
-  const app = buildApp({
-    ...(push ? { push } : {}),
-    readinessProbe: options.readinessProbe ?? databaseRuntime!,
-    runtime: productRuntime,
-    webDistPath,
-  });
-
   let unregisterSignals: () => void = () => undefined;
-  app.addHook("onClose", async () => {
-    unregisterSignals();
-    txlineAbort?.abort();
-    await txlineTask;
-    productRuntime.close();
-    await databaseRuntime?.close();
-  });
 
   try {
+    await databaseRuntime.migrate();
+    const push = config.vapid
+      ? {
+          applicationServerKey: config.vapid.publicKey,
+          sender: createVapidWebPushSender(config.vapid),
+          store: new InMemoryPushSubscriptionStore(),
+        }
+      : null;
+    productRuntime = options.productRuntime;
+    if (!productRuntime) {
+      const cueBytes = await readFile(
+        path.resolve(import.meta.dirname, "../assets/goal-cue.mp3"),
+      );
+      const streamContract = inspectMp3(cueBytes);
+      productRuntime = createProductRuntime({
+        commentaryPipeline: createCommentaryPipeline({
+          env: options.environment ?? process.env,
+        }),
+        cueBytes,
+        ...(push
+          ? {
+              notifyMoment: async (moment, fixtureSnapshot) => {
+                const teamNames = {
+                  ARG: "Argentina",
+                  BRA: "Brazil",
+                  ESP: "Spain",
+                  FRA: "France",
+                  JPN: "Japan",
+                } as const;
+                await deliverMomentPush(
+                  {
+                    body: `${teamNames[moment.eventTeam]} change the match. Tap to feel the Moment and hear the live call.`,
+                    fixtureId: moment.fixtureId,
+                    momentId: moment.id,
+                    occurredAt: fixtureSnapshot.updatedAt,
+                    revision: moment.revision,
+                    title: `⚽ GOAL — ${moment.eventTeam} ${moment.score.home}–${moment.score.away}, ${moment.minute}`,
+                  },
+                  push,
+                );
+              },
+            }
+          : {}),
+        ...(config.dataRightsMode === "txline_hackathon"
+          ? {
+              fixture: {
+                awayTeam: "ESP" as const,
+                fixtureId: VERIFIED_HACKATHON_FIXTURE.fixtureId,
+                homeTeam: "FRA" as const,
+                kickoffAt: "2026-07-14T15:00:00.000Z",
+                participant1IsHome: true,
+                provenance: "live_txline" as const,
+              },
+            }
+          : {}),
+        silenceBytes: await readFile(
+          path.resolve(import.meta.dirname, "../assets/silence.mp3"),
+        ),
+        transcodeCommentary: (wavBytes) =>
+          transcodeWavToStreamMp3(wavBytes, { expected: streamContract }),
+        writeIntervalMs: 940,
+      });
+    }
+    const runtime = productRuntime;
+    const workerFactory =
+      options.outboxWorkerFactory ??
+      ((mode: PersistenceMode) =>
+        createOutboxWorker({
+          consumer: "product",
+          handlers: {},
+          mode,
+          outbox: databaseRuntime.outbox,
+        }));
+    outboxWorkers = options.outboxWorker
+      ? [options.outboxWorker]
+      : (["live", "demo"] as const).map(workerFactory);
+    app = buildApp({
+      ...(push ? { push } : {}),
+      manageRuntimeLifecycle: false,
+      readinessProbe: options.readinessProbe ?? databaseRuntime,
+      runtime,
+      webDistPath,
+    });
+    app.addHook("onClose", async () => {
+      const failures: unknown[] = [];
+      try {
+        unregisterSignals();
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        txlineAbort?.abort();
+      } catch (error) {
+        failures.push(error);
+      }
+      failures.push(
+        ...(await settleCleanupStage(
+          [
+            ...outboxWorkers.map((worker, index) => ({
+              action: () => worker.stop(),
+              label: `outbox worker ${index + 1}`,
+            })),
+            ...(txlineTask
+              ? [{ action: () => txlineTask, label: "TxLINE source" }]
+              : []),
+          ],
+          shutdownTimeoutMs,
+        )),
+      );
+      failures.push(
+        ...(await settleCleanupStage(
+          [{ action: () => runtime.close(), label: "product runtime" }],
+          shutdownTimeoutMs,
+        )),
+      );
+      failures.push(
+        ...(await settleCleanupStage(
+          [{ action: () => databaseRuntime.close(), label: "database" }],
+          shutdownTimeoutMs,
+        )),
+      );
+      if (failures.length > 0) {
+        throw new AggregateError(failures, "Server shutdown failed");
+      }
+    });
+
     if (options.listen !== false) {
-      await app.listen({ host: config.host, port: config.port });
+      if (options.httpListen) {
+        await options.httpListen(app, {
+          host: config.host,
+          port: config.port,
+        });
+      } else {
+        await app.listen({ host: config.host, port: config.port });
+      }
+    }
+    for (const worker of outboxWorkers) {
+      worker.start();
+    }
+    if (config.dataRightsMode === "txline_hackathon") {
+      txlineAbort = new AbortController();
+      const sourceFactory =
+        options.txlineSourceFactory ?? createTxlineLiveScoreSource;
+      const source = sourceFactory({
+        apiToken: config.txlineApiToken!,
+        fixtures: [VERIFIED_HACKATHON_FIXTURE],
+        onEvent: (event) => {
+          runtime.acceptTxlineEvent(event);
+        },
+      });
+      txlineTask = source.run(txlineAbort.signal).catch(() => undefined);
     }
   } catch (error) {
-    await app.close();
+    const cleanupFailures: unknown[] = [];
+    const application = app;
+    if (application) {
+      cleanupFailures.push(
+        ...(await settleCleanupStage(
+          [{ action: () => application.close(), label: "HTTP application" }],
+          shutdownTimeoutMs,
+        )),
+      );
+    } else {
+      const runtimeToClose = productRuntime;
+      if (runtimeToClose) {
+        cleanupFailures.push(
+          ...(await settleCleanupStage(
+            [
+              {
+                action: () => runtimeToClose.close(),
+                label: "product runtime",
+              },
+            ],
+            shutdownTimeoutMs,
+          )),
+        );
+      }
+      cleanupFailures.push(
+        ...(await settleCleanupStage(
+          [{ action: () => databaseRuntime.close(), label: "database" }],
+          shutdownTimeoutMs,
+        )),
+      );
+    }
+    if (cleanupFailures.length > 0) {
+      throw new AggregateError(
+        [error, ...cleanupFailures],
+        "Server startup failed and cleanup was incomplete",
+      );
+    }
     throw error;
   }
 
   unregisterSignals = registerShutdownSignals(
     options.signalSource ?? process,
-    async () => app.close(),
+    async () => app!.close(),
     createShutdownFailureReporter({
       setExitCode: (code) => {
         process.exitCode = code;
@@ -166,7 +318,7 @@ export async function startServer(options: StartServerOptions = {}) {
       writeError: (message) => process.stderr.write(message),
     }),
   );
-  return app;
+  return app!;
 }
 
 const entryPath = process.argv[1];

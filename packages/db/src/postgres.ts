@@ -1,7 +1,21 @@
 import postgres, { type Sql, type TransactionSql } from "postgres";
 
 import type { AppliedMigration, MigrationDefinition } from "./migrations.js";
-import { createDatabaseRuntime, type MigrationStore } from "./runtime.js";
+import {
+  createCommentaryArtifactRepository,
+  createFixtureTruthRepository,
+  createOutboxRepository,
+  createSourceStateRepository,
+  type CommentaryArtifactRepository,
+  type FixtureTruthRepository,
+  type OutboxRepository,
+  type SourceStateRepository,
+} from "./repositories.js";
+import {
+  createDatabaseRuntime,
+  type DatabaseRuntime,
+  type MigrationStore,
+} from "./runtime.js";
 
 type QueryRow = Record<string, unknown>;
 
@@ -15,6 +29,13 @@ interface QueryExecutor {
 export interface PostgresClient extends QueryExecutor {
   begin<T>(work: (transaction: QueryExecutor) => Promise<T>): Promise<T>;
   end(options: { timeout: number }): Promise<void>;
+}
+
+export interface ApplicationDatabase extends DatabaseRuntime {
+  commentaryArtifacts: CommentaryArtifactRepository;
+  fixtureTruth: FixtureTruthRepository;
+  outbox: OutboxRepository;
+  sourceState: SourceStateRepository;
 }
 
 function adaptQueryExecutor(executor: Sql | TransactionSql): QueryExecutor {
@@ -115,14 +136,29 @@ export function createPostgresMigrationStore(
   };
 }
 
-export function createPostgresDatabase(databaseUrl: string) {
+export function createApplicationDatabase(
+  client: PostgresClient,
+): ApplicationDatabase {
+  const runtime = createDatabaseRuntime({
+    store: createPostgresMigrationStore(client),
+  });
+
+  return Object.assign(runtime, {
+    commentaryArtifacts: createCommentaryArtifactRepository(client),
+    fixtureTruth: createFixtureTruthRepository(client),
+    outbox: createOutboxRepository(client),
+    sourceState: createSourceStateRepository(client),
+  });
+}
+
+export function createPostgresDatabase(
+  databaseUrl: string,
+): ApplicationDatabase {
   const client = postgres(databaseUrl, {
     connect_timeout: 5,
     idle_timeout: 20,
     max: 10,
   });
 
-  return createDatabaseRuntime({
-    store: createPostgresMigrationStore(adaptPostgresClient(client)),
-  });
+  return createApplicationDatabase(adaptPostgresClient(client));
 }

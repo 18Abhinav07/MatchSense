@@ -50,7 +50,7 @@ const prefixCatalog = [
 
 describe("migration catalog and planning", () => {
   it("publishes a deterministic schema-only baseline migration", () => {
-    expect(db.migrationCatalog).toHaveLength(1);
+    expect(db.migrationCatalog).toHaveLength(2);
 
     const migration = db.migrationCatalog?.[0];
     expect(migration).toMatchObject({
@@ -66,6 +66,102 @@ describe("migration catalog and planning", () => {
         .update(migration?.sql ?? "")
         .digest("hex"),
     );
+  });
+
+  it("publishes the deterministic v2 truth and delivery foundation", () => {
+    const migration = db.migrationCatalog?.[1];
+
+    expect(migration).toMatchObject({
+      description: "create durable product truth and delivery foundation",
+      version: 2,
+    });
+    expect(migration?.checksum).toBe(
+      createHash("sha256")
+        .update(migration?.sql ?? "")
+        .digest("hex"),
+    );
+
+    for (const table of [
+      "fixtures",
+      "raw_source_records",
+      "source_cursors",
+      "source_leases",
+      "fixture_projections",
+      "canonical_moments",
+      "moment_revisions",
+      "fixture_events",
+      "outbox",
+      "consumer_receipts",
+      "outbox_dead_letters",
+      "commentary_artifacts",
+    ]) {
+      expect(migration?.sql).toMatch(
+        new RegExp(`CREATE TABLE matchsense\\.${table} \\(`, "u"),
+      );
+    }
+
+    expect(migration?.sql).toContain("CHECK (mode IN ('live', 'demo'))");
+    expect(migration?.sql).toContain(
+      "CHECK ((mode = 'live' AND provenance = 'live_txline') OR (mode = 'demo' AND provenance = 'synthetic_txline_shaped'))",
+    );
+    expect(migration?.sql).toMatch(
+      /PRIMARY KEY \(mode, fixture_id, sequence\)/u,
+    );
+    expect(migration?.sql).toMatch(
+      /FOREIGN KEY \(mode, fixture_id\) REFERENCES matchsense\.fixtures \(mode, id\)/u,
+    );
+    expect(migration?.sql).toMatch(
+      /CREATE INDEX fixtures_schedule_idx[\s\S]*scheduled_at/u,
+    );
+    expect(migration?.sql).toMatch(
+      /CREATE UNIQUE INDEX raw_source_records_dedupe_idx/u,
+    );
+    expect(migration?.sql).toMatch(
+      /FOREIGN KEY \(mode, fixture_id\) REFERENCES matchsense\.fixtures \(mode, id\) DEFERRABLE INITIALLY DEFERRED/u,
+    );
+    expect(migration?.sql).toMatch(
+      /CREATE TABLE matchsense\.source_cursors \([\s\S]*stream_key text NOT NULL[\s\S]*fencing_token bigint NOT NULL[\s\S]*PRIMARY KEY \(mode, source, stream_key\)/u,
+    );
+    expect(migration?.sql).toMatch(
+      /CREATE TABLE matchsense\.source_leases \([\s\S]*stream_key text NOT NULL[\s\S]*fencing_token bigint NOT NULL[\s\S]*PRIMARY KEY \(mode, source, stream_key\)/u,
+    );
+    expect(migration?.sql).not.toMatch(
+      /CREATE TABLE matchsense\.source_(?:cursors|leases) \([^;]*fixture_id/u,
+    );
+    expect(migration?.sql).toMatch(
+      /CREATE TABLE matchsense\.fixture_projections \([\s\S]*source_sequence text/u,
+    );
+    expect(migration?.sql).toMatch(/dedupe_key text NOT NULL/u);
+    expect(migration?.sql).toMatch(
+      /payload_hash text NOT NULL CHECK \(length\(payload_hash\) = 64\)/u,
+    );
+    expect(migration?.sql).toMatch(
+      /raw_source_records \(mode, source, fixture_id, dedupe_key\)/u,
+    );
+    expect(migration?.sql).toMatch(/revision bigint NOT NULL/u);
+    expect(migration?.sql).toMatch(/idempotency_key text NOT NULL/u);
+    expect(migration?.sql).toMatch(/UNIQUE \(mode, idempotency_key\)/u);
+    expect(migration?.sql).toMatch(/claim_token text/u);
+    expect(migration?.sql).toMatch(
+      /\(locked_by IS NULL\) = \(claim_token IS NULL\)/u,
+    );
+    expect(migration?.sql).toMatch(
+      /FOREIGN KEY \(mode, fixture_id, moment_id\) REFERENCES matchsense\.canonical_moments \(mode, fixture_id, id\)/u,
+    );
+    expect(migration?.sql).toMatch(
+      /FOREIGN KEY \(mode, fixture_id, source_record_id\) REFERENCES matchsense\.raw_source_records \(mode, fixture_id, id\)/u,
+    );
+    expect(migration?.sql).toMatch(
+      /UNIQUE \(mode, fixture_id, moment_id, moment_revision, language, voice\)/u,
+    );
+    expect(migration?.sql).toMatch(
+      /FOREIGN KEY \(mode, fixture_id, moment_id, moment_revision\) REFERENCES matchsense\.moment_revisions \(mode, fixture_id, moment_id, revision\)/u,
+    );
+    expect(migration?.sql).toMatch(/CREATE INDEX fixture_events_catchup_idx/u);
+    expect(migration?.sql).toMatch(
+      /CREATE INDEX outbox_unprocessed_idx[\s\S]*WHERE processed_at IS NULL/u,
+    );
+    expect(migration?.sql).not.toMatch(/call_three|leaderboard|room_invites/iu);
   });
 
   it("orders pending migrations and reports a repeat run as current", () => {

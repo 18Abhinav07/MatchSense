@@ -19,9 +19,50 @@ export type {
   MigrationTransaction,
 } from "./runtime.js";
 export {
+  createApplicationDatabase,
   createPostgresDatabase,
   createPostgresMigrationStore,
 } from "./postgres.js";
-export type { PostgresClient } from "./postgres.js";
+export type { ApplicationDatabase, PostgresClient } from "./postgres.js";
+export {
+  createCommentaryArtifactRepository,
+  createFixtureTruthRepository,
+  createOutboxRepository,
+  createSourceStateRepository,
+  FixtureRevisionConflictError,
+} from "./repositories.js";
+export type {
+  AdvanceSourceCursorResult,
+  CommentaryArtifactKey,
+  CommentaryArtifactRecord,
+  CommentaryArtifactRepository,
+  CommitFixtureScheduleInput,
+  CommitFixtureScheduleResult,
+  CommitRawSourceRecordInput,
+  CommitRawSourceRecordResult,
+  CommitSourceChangeInput,
+  CommitSourceChangeResult,
+  ConsumerReceiptKey,
+  FencedSourceLeaseKey,
+  FixtureEventRecord,
+  FixtureProjectionRecord,
+  FixtureRecord,
+  FixtureTruthRepository,
+  FixtureUpsert,
+  OutboxRecord,
+  OutboxRepository,
+  OutboxWrite,
+  PersistenceMode,
+  PersistenceProvenance,
+  QueryRow,
+  RawSourceRecordWrite,
+  RepositoryClient,
+  SourceCursorRecord,
+  SourceFence,
+  SourceLeaseRecord,
+  SourceStateRepository,
+  SourceStreamKey,
+  SqlExecutor,
+} from "./repositories.js";
 export { isDirectExecution, runDatabaseCli } from "./cli.js";
 export type { DatabaseCliOptions } from "./cli.js";

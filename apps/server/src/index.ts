@@ -6,3 +6,10 @@ export type {
 } from "./app.js";
 export { parseServerEnv } from "./config.js";
 export type { ServerConfig } from "./config.js";
+export { createOutboxWorker } from "./outbox-worker.js";
+export type {
+  CreateOutboxWorkerOptions,
+  OutboxHandler,
+  OutboxWorker,
+  OutboxWorkerRepository,
+} from "./outbox-worker.js";

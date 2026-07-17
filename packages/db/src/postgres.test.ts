@@ -16,6 +16,17 @@ interface TestPostgresClient {
 }
 
 type DatabaseModuleContract = {
+  createApplicationDatabase?: (client: TestPostgresClient) => {
+    check(): Promise<{
+      databaseReachable: boolean;
+      migrationsCurrent: boolean;
+    }>;
+    close(): Promise<void>;
+    commentaryArtifacts: { get(input: unknown): Promise<unknown> };
+    fixtureTruth: { get(input: unknown): Promise<unknown> };
+    outbox: { hasConsumerReceipt(input: unknown): Promise<boolean> };
+    sourceState: { getCursor(input: unknown): Promise<unknown> };
+  };
   createPostgresDatabase?: (databaseUrl: string) => {
     check(): Promise<{
       databaseReachable: boolean;
@@ -82,6 +93,41 @@ function fakeClient(options: { ledgerExists?: boolean } = {}) {
 describe("PostgreSQL migration store", () => {
   it("exports the production database factory", () => {
     expect(db.createPostgresDatabase).toBeTypeOf("function");
+  });
+
+  it("builds migrations and all repositories over one shared application client", async () => {
+    expect(db.createApplicationDatabase).toBeTypeOf("function");
+    const fake = fakeClient({ ledgerExists: false });
+    const database = db.createApplicationDatabase?.(fake.client);
+
+    expect(database?.fixtureTruth).toBeDefined();
+    expect(database?.commentaryArtifacts).toBeDefined();
+    expect(database?.outbox).toBeDefined();
+    expect(database?.sourceState).toBeDefined();
+    await expect(database?.check()).resolves.toEqual({
+      databaseReachable: true,
+      migrationsCurrent: false,
+    });
+    await expect(
+      database?.fixtureTruth.get({ fixtureId: "fx-1", mode: "demo" }),
+    ).resolves.toBeNull();
+    await expect(
+      database?.sourceState.getCursor({
+        mode: "live",
+        source: "txline",
+        streamKey: "scores:mainnet",
+      }),
+    ).resolves.toBeNull();
+    await database?.close();
+    await database?.close();
+
+    expect(fake.queries.map(({ query }) => query)).toEqual([
+      "SELECT 1;",
+      expect.stringContaining("to_regclass"),
+      expect.stringContaining("FROM matchsense.fixtures"),
+      expect.stringContaining("FROM matchsense.source_cursors"),
+    ]);
+    expect(fake.end).toHaveBeenCalledTimes(1);
   });
 
   it("runs ledger and migration writes inside the advisory-locked transaction", async () => {
