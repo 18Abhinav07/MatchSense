@@ -34,6 +34,12 @@ A five-minute judge walkthrough is an accelerated **Recorded Replay**, never a
 synthetic simulation. A replay is labelled `RECORDED REPLAY · TXLINE DATA` at
 all times and cannot create new predictions or masquerade as a current match.
 
+The team reports that TxODDS confirmed the necessary hackathon/judge-facing
+data-retention and display approval in Discord. Before deployment, record the
+permalink or written confirmation in the private release evidence; this design
+uses that approval for the tournament archive and generated commentary cache,
+not as an assumption of permanent post-hackathon rights.
+
 ## 2. Product promise and non-goals
 
 ### Promise
@@ -82,6 +88,8 @@ type FixtureLifecycle =
   goal pushes, celebrations, or social reactions as if the event just happened.
 - VAR/amendment/correction always appends a revision. It never silently rewrites
   a prior Moment.
+- `result_unavailable` remains an internal diagnostic state. It is omitted from
+  all fan-facing fixture lists rather than displayed as an empty match.
 
 TxLINE documents fixture snapshots, score snapshots, updates, a scores SSE
 stream, and a historical-score endpoint; historical replay must still be
@@ -114,7 +122,7 @@ Memory. No circular flag-token alternative may appear.
 
 ```text
 Today
--> Live now | Upcoming | Verified finals | Result unavailable
+-> Live now | Upcoming | Verified finals
 -> Match Hub
 -> Follow / alert preference / Start Listening / eligible Room
 -> Live Companion
@@ -125,6 +133,8 @@ Today
 
 The Match Hub always shows source freshness and lifecycle. `LIVE` is earned
 only after a healthy reconciled source stream; cached state shows an exact age.
+Fixtures without sufficient current or canonical final data are not rendered to
+fans at all.
 
 ### 4.3 Recorded Replay and judge walkthrough
 
@@ -190,9 +200,27 @@ is:
 canonical event -> immediate distinct cue -> factual speech if audio is ready
 ```
 
+For every confirmed, narratable event, the server creates one shared commentary
+artifact independent of followers and listeners:
+
+```text
+fixture + canonical moment family + revision + language + voice
+-> factual transcript
+-> TTS job
+-> ready | failed | superseded audio artifact
+```
+
+The archive includes goals, cards, penalties, VAR state/resolution, selected
+shots/corners/substitutions when enabled, halftime, and full-time. It excludes
+raw transport frames, duplicate deliveries, reconciliation frames, and internal
+amendment mechanics. Fans choose `Key moments` or `Full match radio` without
+creating duplicate generation work.
+
 An LLM may improve phrasing after canonical facts exist, but cannot decide or
-invent match state. Each speech packet uses confirmed facts only. Slow packets
-are dropped when stale rather than creating a misleading commentary backlog.
+invent match state. Each speech packet uses confirmed facts only. A correction
+marks an earlier unfinished or ready artifact `superseded`; it never plays as
+the current event. One ready artifact serves all active listener sessions and
+is reused by Memory and Recorded Replay.
 
 The UI exposes `Connecting`, `Listening`, `Speaking`, `Reconnecting`,
 `Audio blocked`, and `Stopped`; it never silently shows a dead Start Listening
@@ -254,6 +282,8 @@ Required durable records are:
 - fixture schedule metadata with source timestamp and data freshness;
 - normalized canonical events, source identity, ordering, and revision lineage;
 - fixture projection and final decision metadata;
+- commentary transcript/audio-artifact metadata and the authorised stored audio
+  file for every narratable event revision;
 - fan profile, session, follows, notification subscriptions, and preferences;
 - Room invite, membership, calls, reactions, and final result; and
 - Memory metadata referencing the canonical event timeline.
@@ -262,9 +292,21 @@ Only after the transaction commits may an outbox worker fan out side effects.
 The client may cache a presentation snapshot for offline display, but it cannot
 create canonical history, a final result, or a Memory.
 
-Source retention must comply with the hackathon data terms and any explicit
-TxODDS permission. When raw retention is not allowed, retain only the minimum
-authorized normalized facts required for the verified product timeline.
+The collector records every approved TxLINE-covered fixture after deployment,
+independent of whether any fan follows it. Schedule sync discovers fixtures,
+live SSE captures real-time events, and historical reconciliation backfills an
+eligible completed fixture when needed. This builds one tournament history and
+one reusable commentary archive instead of user-specific fragments.
+
+Commentary artifacts must live in durable application-owned storage, never only
+in process memory or Railway's ephemeral filesystem. The implementation selects
+PostgreSQL binary storage or an approved durable object store through a focused
+storage spike; the artifact API remains the same for live multicast, Memory,
+and Recorded Replay.
+
+Source retention must comply with the sponsor confirmation and its duration.
+When raw retention is not allowed, retain only the authorized normalized facts
+and generated artifacts required for the verified product timeline.
 
 ## 8. Release gates and feature-cut policy
 
@@ -316,9 +358,12 @@ passed its relevant gate.
 
 - first launch, profile, favourite team, textile flags, accessible controls;
 - truthful schedule categories and source freshness;
+- an always-on collector for every approved covered fixture, independent of
+  follows;
 - live Companion, revision-safe Moment, and factual timeline;
 - follows, standard push setup, and a labelled test alert;
 - verified final result and Memory when data exists; and
+- one cached factual commentary artifact per narratable event revision;
 - reliable mobile/desktop responsive states.
 
 ### Conditional modules
