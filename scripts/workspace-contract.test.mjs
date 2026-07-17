@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   isAllowedEnvironmentExampleValue,
+  isForbiddenCommittedEnvironmentFile,
   scanCommittedSecrets,
 } from "./secret-scan.mjs";
 import {
@@ -365,11 +366,7 @@ test("the production workspace keeps its locked lean-monorepo contract", () => {
   }
 
   const files = projectFiles();
-  const unexpectedEnvFiles = files.filter(
-    (file) =>
-      path.basename(file).startsWith(".env") &&
-      path.basename(file) !== ".env.example",
-  );
+  const unexpectedEnvFiles = files.filter(isForbiddenCommittedEnvironmentFile);
   check(
     unexpectedEnvFiles.length === 0,
     `unexpected environment files: ${unexpectedEnvFiles.join(", ")}`,

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
+  forbiddenRuntimeInstallCommands,
   runtimeAptPackages,
   runtimeStageContents,
 } from "./dockerfile-policy.mjs";
@@ -17,6 +18,16 @@ function read(relativePath) {
 
 function readJson(relativePath) {
   return JSON.parse(read(relativePath));
+}
+
+function workflowJob(workflow, jobName) {
+  const marker = `  ${jobName}:\n`;
+  const start = workflow.indexOf(marker);
+  assert.notEqual(start, -1, `CI job is missing: ${jobName}`);
+
+  const remainder = workflow.slice(start + marker.length);
+  const nextJob = remainder.search(/^  [A-Za-z0-9_-]+:\n/mu);
+  return nextJob === -1 ? remainder : remainder.slice(0, nextJob);
 }
 
 test("production Dockerfile is immutable, portable, and least privileged", () => {
@@ -62,6 +73,11 @@ test("production Dockerfile is immutable, portable, and least privileged", () =>
     runtimeAptPackages(dockerfile),
     ["ffmpeg"],
     "ffmpeg is required for transcoding; no unrelated runtime package is allowed",
+  );
+  assert.deepEqual(
+    forbiddenRuntimeInstallCommands(dockerfile),
+    [],
+    "the runtime must not use alternate installers or package-download commands",
   );
   assert.match(
     runtimeStage,
@@ -179,6 +195,9 @@ test("container smoke uses isolated pinned infrastructure and validates the runt
 
 test("CI pins supply-chain actions and proves quality before container runtime", () => {
   const workflow = read(".github/workflows/ci.yml");
+  const secretScanJob = workflowJob(workflow, "secret-scan");
+  const qualityJob = workflowJob(workflow, "quality");
+  const dockerJob = workflowJob(workflow, "docker");
 
   assert.match(workflow, /^permissions:\n  contents: read$/mu);
   assert.match(
@@ -192,9 +211,31 @@ test("CI pins supply-chain actions and proves quality before container runtime",
   );
   assert.match(workflow, /node-version: 24\.18\.0/u);
   assert.match(
-    workflow,
+    secretScanJob,
     /gitleaks\/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e/u,
   );
+  assert.match(
+    secretScanJob,
+    /actions\/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0/u,
+  );
+  assert.match(secretScanJob, /fetch-depth: 0/u);
+  assert.equal(
+    secretScanJob.indexOf("actions/checkout@") <
+      secretScanJob.indexOf("gitleaks/gitleaks-action@"),
+    true,
+    "the isolated secret scan must check out full history before gitleaks",
+  );
+  assert.doesNotMatch(
+    secretScanJob,
+    /setup-node|corepack|\b(?:npm|pnpm|yarn)\b/iu,
+    "the secret-scan job must not install dependencies or execute project code",
+  );
+  assert.match(
+    qualityJob,
+    /^\s+needs: secret-scan$/mu,
+    "quality must wait for the isolated secret scan",
+  );
+  assert.doesNotMatch(qualityJob, /gitleaks/iu);
   assert.match(workflow, /corepack prepare pnpm@11\.13\.0 --activate/u);
   assert.match(workflow, /pnpm install --frozen-lockfile/u);
   for (const command of [
@@ -207,15 +248,14 @@ test("CI pins supply-chain actions and proves quality before container runtime",
   ]) {
     assert.equal(workflow.includes(command), true, `${command} must run in CI`);
   }
-  const installIndex = workflow.indexOf("run: pnpm install --frozen-lockfile");
-  const formatIndex = workflow.indexOf("run: pnpm format:check");
-  const gitleaksIndex = workflow.indexOf(
-    "uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e",
+  const installIndex = qualityJob.indexOf(
+    "run: pnpm install --frozen-lockfile",
   );
+  const formatIndex = qualityJob.indexOf("run: pnpm format:check");
   assert.equal(
-    installIndex < formatIndex && formatIndex < gitleaksIndex,
+    installIndex < formatIndex,
     true,
-    "CI must install, format-check the repository, then let gitleaks create results.sarif",
+    "quality must install before running the repository format check",
   );
   assert.match(
     workflow,
@@ -224,7 +264,11 @@ test("CI pins supply-chain actions and proves quality before container runtime",
   assert.match(workflow, /POSTGRES_DB: matchsense_integration_test/u);
   assert.match(workflow, /MATCHSENSE_ALLOW_DESTRUCTIVE_DB_TESTS: "true"/u);
   assert.match(workflow, /TEST_DATABASE_URL:/u);
-  assert.match(workflow, /docker:\n\s+needs: quality/u);
+  assert.match(
+    dockerJob,
+    /^\s+needs: \[secret-scan, quality\]$/mu,
+    "container verification must require both independent CI gates",
+  );
   assert.match(workflow, /pnpm test:container/u);
   assert.doesNotMatch(workflow, /redis|bullmq|minio|s3/iu);
 });

@@ -17,6 +17,10 @@ function lineNumberAt(contents, index) {
   return contents.slice(0, index).split("\n").length;
 }
 
+function isEnvironmentFilePath(filePath) {
+  return /(?:^|\.)env(?:\.|$)/u.test(path.basename(filePath).toLowerCase());
+}
+
 function isSensitiveIdentifier(identifier) {
   const normalizedIdentifier = identifier
     .replace(/([a-z0-9])([A-Z])/gu, "$1_$2")
@@ -251,6 +255,10 @@ export function isAllowedEnvironmentExampleValue(key, value) {
   return allowedEnvironmentExampleValues.get(key) === value;
 }
 
+export function isForbiddenCommittedEnvironmentFile(filePath) {
+  return isEnvironmentFilePath(filePath) && filePath !== ".env.example";
+}
+
 export function scanCommittedSecrets(filePath, contents) {
   const findings = [];
   const pemHeaderPattern =
@@ -266,7 +274,7 @@ export function scanCommittedSecrets(filePath, contents) {
   const basename = path.basename(filePath).toLowerCase();
   const extension = path.extname(basename);
 
-  if (basename === ".env" || basename.startsWith(".env.")) {
+  if (isEnvironmentFilePath(filePath)) {
     findings.push(...scanEnvironment(contents));
   } else if (
     [".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"].includes(

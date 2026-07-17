@@ -182,3 +182,43 @@ test("allows marked synthetic test literals while still detecting test-file secr
     "test files may contain explicit fixtures, but ordinary nonempty credentials must still be rejected",
   );
 });
+
+test("scans suffix-env files with environment assignment rules", async () => {
+  const scanner = await loadScanner();
+  assert.notEqual(scanner, null, "secret-scan helper must exist");
+
+  assert.deepEqual(
+    scanner.scanCommittedSecrets(
+      "production.env",
+      "API_KEY=generic-production-value",
+    ),
+    [{ kind: "secret-assignment", line: 1, key: "API_KEY" }],
+  );
+});
+
+test("forbids every committed environment file except the exact root example", async () => {
+  const scanner = await loadScanner();
+  assert.notEqual(scanner, null, "secret-scan helper must exist");
+
+  for (const filePath of [
+    ".env",
+    ".env.production",
+    "production.env",
+    "nested/.env.example",
+  ]) {
+    assert.equal(
+      scanner.isForbiddenCommittedEnvironmentFile(filePath),
+      true,
+      `${filePath} must be forbidden`,
+    );
+  }
+
+  assert.equal(
+    scanner.isForbiddenCommittedEnvironmentFile(".env.example"),
+    false,
+  );
+  assert.equal(
+    scanner.isForbiddenCommittedEnvironmentFile("environment.ts"),
+    false,
+  );
+});
