@@ -147,6 +147,8 @@ function DoorForm({
   initialName,
   initialNickname,
   inviteHost,
+  experience,
+  opponents,
   busy,
   error,
   onSubmit,
@@ -156,43 +158,84 @@ function DoorForm({
   initialName: string;
   initialNickname: string;
   inviteHost?: string;
+  experience?: boolean;
+  opponents?: readonly RoomTeam[];
   busy: boolean;
   error: string | null;
-  onSubmit(name: string, nickname: string): void;
+  onSubmit(name: string, nickname: string, awayTeam?: string): void;
   onExit: (() => void) | undefined;
 }) {
   const [name, setName] = useState(initialName);
   const [nickname, setNickname] = useState(initialNickname);
+  const [awayTeam, setAwayTeam] = useState(
+    opponents?.[0]?.code ?? fixture.awayTeam.code,
+  );
+  const shownFixture = opponents?.length
+    ? {
+        ...fixture,
+        awayTeam:
+          opponents.find((team) => team.code === awayTeam) ?? fixture.awayTeam,
+      }
+    : fixture;
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    onSubmit(name, nickname);
+    onSubmit(name, nickname, awayTeam);
   };
   return (
     <div
       className="msr-stage msr-stage--door"
-      data-room-stage={inviteHost ? "invite" : "create"}
+      data-room-stage={
+        inviteHost ? "invite" : experience ? "experience-create" : "create"
+      }
     >
       <Header
-        label={inviteHost ? "Room invite" : "Create room"}
+        label={
+          inviteHost
+            ? "Room invite"
+            : experience
+              ? "Experience with friends"
+              : "Create room"
+        }
         onExit={onExit}
       />
       <div className="msr-title-block">
         <p className="msr-kicker">
-          {inviteHost ? `${inviteHost} invited you` : "A private match ritual"}
+          {inviteHost
+            ? `${inviteHost} invited you`
+            : experience
+              ? "Your team · your friends · live in five"
+              : "A private match ritual"}
         </p>
         <h1>
           {inviteHost
             ? "Enter match night."
-            : "Put 100 Sense where your instinct is."}
+            : experience
+              ? "Start a five-minute match night."
+              : "Put 100 Sense where your instinct is."}
         </h1>
         <p>
           Five calls. Your friends. Picks stay secret until kickoff, then every
           swing lands together.
         </p>
       </div>
-      <FixtureBanner fixture={fixture} />
+      <FixtureBanner fixture={shownFixture} />
       <PointsNotice />
-      <form className="msr-door-form" onSubmit={submit}>
+      <form className="msr-room-form" onSubmit={submit}>
+        {experience && opponents?.length ? (
+          <label className="msr-select-field">
+            <span>Choose the rival</span>
+            <select
+              onChange={(event) => setAwayTeam(event.target.value)}
+              value={awayTeam}
+            >
+              {opponents.map((team) => (
+                <option key={team.code} value={team.code}>
+                  {team.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
         {!inviteHost ? (
           <label>
             <span>Room name</span>
@@ -229,7 +272,9 @@ function DoorForm({
               ? "Opening the room…"
               : inviteHost
                 ? "Join & get 100 Sense"
-                : "Create private room"}
+                : experience
+                  ? "Create & invite friends"
+                  : "Create private room"}
           </span>
           <i aria-hidden="true">→</i>
         </button>
@@ -752,15 +797,23 @@ export function RoomExperience({
     }
   };
 
-  const create = async (name: string, nickname: string) => {
+  const create = async (name: string, nickname: string, awayTeam?: string) => {
     setBusy(true);
     setError(null);
     try {
-      const created = await api.createRoom({
-        fixtureId: route.mode === "create" ? route.fixture.id : "",
-        name,
-        nickname,
-      });
+      const created =
+        route.mode === "experience-create"
+          ? await api.createExperienceRoom({
+              awayTeam: awayTeam ?? route.fixture.awayTeam.code,
+              homeTeam: route.fixture.homeTeam.code,
+              name,
+              nickname,
+            })
+          : await api.createRoom({
+              fixtureId: route.mode === "create" ? route.fixture.id : "",
+              name,
+              nickname,
+            });
       setRoom(created.room);
       onOpenRoom?.(created.room.id);
     } catch (cause) {
@@ -803,14 +856,18 @@ export function RoomExperience({
     }
   };
 
-  if (route.mode === "create" && !room)
+  if ((route.mode === "create" || route.mode === "experience-create") && !room)
     return (
       <DoorForm
         busy={busy}
         error={error}
+        experience={route.mode === "experience-create"}
         fixture={route.fixture}
         initialName={route.defaultRoomName ?? "Match Night"}
         initialNickname={route.defaultNickname ?? ""}
+        {...(route.mode === "experience-create"
+          ? { opponents: route.opponents }
+          : {})}
         onExit={exit}
         onSubmit={create}
       />

@@ -1151,6 +1151,27 @@ export function createProductRuntime(options: ProductRuntimeOptions) {
         runtimes.set(fixture.fixtureId, runtime);
       } else if (registration.projection) {
         runtime.restore(registration.projection, registration.events ?? []);
+      } else {
+        const current = runtime.fixture(fixture.fixtureId);
+        if (
+          current?.phase === "scheduled" &&
+          current.revision === 0 &&
+          (current.awayTeam !== fixture.awayTeam ||
+            current.homeTeam !== fixture.homeTeam ||
+            current.kickoffAt !== fixture.kickoffAt)
+        ) {
+          runtime.restore(
+            createFixtureProjection({
+              awayTeam: fixture.awayTeam,
+              fixtureId: fixture.fixtureId,
+              homeTeam: fixture.homeTeam,
+              kickoffAt: fixture.kickoffAt,
+              observedAt: now(),
+              provenance: fixture.provenance,
+            }),
+            [],
+          );
+        }
       }
       if (registration.public) publicFixtureIds.add(fixture.fixtureId);
       if (isNew) {

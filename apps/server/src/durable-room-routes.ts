@@ -22,6 +22,15 @@ const createBody = z
     name: z.string().trim().min(1).max(60),
   })
   .strict();
+const createExperienceRoomBody = z
+  .object({
+    awayTeam: teamCode,
+    homeTeam: teamCode,
+    name: z.string().trim().min(1).max(60),
+    nickname,
+  })
+  .strict()
+  .refine((value) => value.awayTeam !== value.homeTeam);
 const joinBody = z
   .object({
     inviteCode: z.string().regex(/^[A-Za-z0-9_-]{22}$/u),
@@ -92,6 +101,13 @@ interface DurableRoomRouteService {
 }
 
 export interface DurableRoomRouteDependencies {
+  prepareExperienceRoom?: (input: {
+    awayTeam: string;
+    fanId: string;
+    homeTeam: string;
+    name: string;
+    nickname: string;
+  }) => Promise<unknown>;
   service: DurableRoomRouteService;
   sessions: FanSessionService;
 }
@@ -135,6 +151,29 @@ export function registerDurableRoomRoutes(
   app: FastifyInstance,
   dependencies: DurableRoomRouteDependencies,
 ) {
+  if (dependencies.prepareExperienceRoom) {
+    app.post("/api/v1/experience/rooms", async (request, reply) => {
+      const session = await requireFanMutationSession(
+        request,
+        reply,
+        dependencies.sessions,
+      );
+      if (!session) return;
+      const parsed = createExperienceRoomBody.safeParse(request.body);
+      if (!parsed.success) return invalidRequest(reply);
+      try {
+        return reply.code(201).send(
+          await dependencies.prepareExperienceRoom!({
+            ...parsed.data,
+            fanId: session.fan.id,
+          }),
+        );
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    });
+  }
+
   app.post("/api/v1/rooms", async (request, reply) => {
     const session = await requireFanMutationSession(
       request,

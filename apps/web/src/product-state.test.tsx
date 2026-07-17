@@ -2,7 +2,14 @@ import { createElement, type FunctionComponent } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
-import { App, type AppProps, MomentOverlay, SampleMoment } from "./App.js";
+import {
+  App,
+  type AppProps,
+  MomentOverlay,
+  resolveRoomCreationFixture,
+  roomCreationPath,
+  SampleMoment,
+} from "./App.js";
 import {
   beginPreparedPlayback,
   decidePreparationRelease,
@@ -373,6 +380,48 @@ describe("fan journey state", () => {
 
     expect(markup).toContain("OPENING ROOMS");
     expect(markup).toContain("Finding the next match for your room");
+  });
+
+  it("serves a dedicated pre-match friends Experience route", () => {
+    const markup = renderToStaticMarkup(
+      createElement(App as FunctionComponent<AppProps>, {
+        initialFavoriteTeam: "ARG",
+        initialPath: "/experience/with-friends",
+      }),
+    );
+
+    expect(markup).toContain("Start a five-minute match night");
+    expect(markup).toContain("Create &amp; invite friends");
+    expect(markup).toContain("Argentina");
+    expect(markup).toContain("France");
+  });
+
+  it("carries the exact Experience fixture into room creation", async () => {
+    const exactFixture = { fixtureId: "experience:run-7" };
+    const fetchExact = vi.fn().mockResolvedValue(exactFixture);
+    const fetchSchedule = vi
+      .fn()
+      .mockResolvedValue([{ fixtureId: "schedule-default" }]);
+
+    expect(roomCreationPath("experience:run-7")).toBe(
+      "/rooms/new/experience%3Arun-7",
+    );
+    await expect(
+      resolveRoomCreationFixture("experience:run-7", {
+        fetchExact,
+        fetchSchedule,
+      }),
+    ).resolves.toBe(exactFixture);
+    expect(fetchExact).toHaveBeenCalledWith("experience:run-7");
+    expect(fetchSchedule).not.toHaveBeenCalled();
+
+    const markup = renderToStaticMarkup(
+      createElement(App as FunctionComponent<AppProps>, {
+        initialFavoriteTeam: "ARG",
+        initialPath: roomCreationPath("experience:run-7"),
+      }),
+    );
+    expect(markup).toContain("Opening this match for your room");
   });
 
   it("serves Match Memory replay as a dedicated route, not a final live screen", () => {

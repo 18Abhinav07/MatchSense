@@ -93,6 +93,74 @@ function rawRoom() {
 }
 
 describe("100-Sense browser API", () => {
+  it("creates a friends Experience through the dedicated orchestration endpoint", async () => {
+    const persisted = new Map<string, string>();
+    const inviteStorage = {
+      getItem: (key: string) => persisted.get(key) ?? null,
+      setItem: (key: string, value: string) => persisted.set(key, value),
+    };
+    const fetchImpl = vi.fn(
+      async (input: RequestInfo | URL, init?: RequestInit) =>
+        new Response(
+          JSON.stringify(
+            new URL(String(input)).pathname === "/api/v1/experience/rooms"
+              ? {
+                  fixtureId: "fixture-1",
+                  inviteCode: "abcdefghijklmnopqrstuv",
+                  invitePath: "/rooms/join/abcdefghijklmnopqrstuv",
+                  room: rawRoom(),
+                  runId: "run-one",
+                }
+              : rawRoom(),
+          ),
+          { headers: { "Content-Type": "application/json" }, status: 201 },
+        ),
+    );
+    const api = createRoomApi({
+      cookieSource: () => "matchsense_csrf=room%20csrf",
+      fanId: "fan-one",
+      favoriteTeam: "ARG",
+      fetchImpl: fetchImpl as typeof fetch,
+      inviteStorage,
+      origin: "https://matchsense.test",
+    });
+
+    const created = await api.createExperienceRoom({
+      awayTeam: "FRA",
+      homeTeam: "ARG",
+      name: "Rivals night",
+      nickname: "Abhinav",
+    });
+
+    const [url, init] = fetchImpl.mock.calls[0]!;
+    expect(new URL(String(url)).pathname).toBe("/api/v1/experience/rooms");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      awayTeam: "FRA",
+      homeTeam: "ARG",
+      name: "Rivals night",
+      nickname: "Abhinav",
+    });
+    expect(created.runId).toBe("run-one");
+    expect(created.fixtureId).toBe("fixture-1");
+    expect(created.room.inviteUrl).toBe(
+      "https://matchsense.test/rooms/join/abcdefghijklmnopqrstuv",
+    );
+    expect(persisted.get("matchsense.room-invite.room-one")).toBe(
+      created.inviteUrl,
+    );
+
+    const remountedApi = createRoomApi({
+      fanId: "fan-one",
+      favoriteTeam: "ARG",
+      fetchImpl: fetchImpl as typeof fetch,
+      inviteStorage,
+      origin: "https://matchsense.test",
+    });
+    await expect(remountedApi.getRoom(created.room.id)).resolves.toMatchObject({
+      inviteUrl: created.inviteUrl,
+    });
+  });
+
   it("uses the stable fan header and exact create/open/save happy path", async () => {
     const calls: {
       body: unknown;

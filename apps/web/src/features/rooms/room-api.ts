@@ -35,8 +35,15 @@ export interface CreateRoomApiOptions {
   readonly fanId: string;
   readonly favoriteTeam: string | null;
   readonly fetchImpl?: typeof fetch;
+  readonly inviteStorage?: {
+    getItem(key: string): string | null;
+    setItem(key: string, value: string): unknown;
+  };
   readonly origin: string;
 }
+
+const inviteMemory = new Map<string, string>();
+const INVITE_STORAGE_PREFIX = "matchsense.room-invite.";
 
 function csrfFromCookie(cookie: string) {
   const item = cookie
@@ -402,7 +409,37 @@ export function createRoomApi(options: CreateRoomApiOptions): RoomApi {
     (() => (typeof document === "undefined" ? "" : document.cookie));
   const eventSourceFactory =
     options.eventSourceFactory ?? defaultEventSourceFactory;
-  const invites = new Map<string, string>();
+  const inviteStorage =
+    options.inviteStorage ??
+    (typeof window === "undefined" ? null : window.localStorage);
+  const rememberInvite = (roomId: string, inviteUrl: string) => {
+    inviteMemory.set(roomId, inviteUrl);
+    try {
+      inviteStorage?.setItem(`${INVITE_STORAGE_PREFIX}${roomId}`, inviteUrl);
+    } catch {
+      // Private browsing/storage policy can reject writes; memory still works.
+    }
+  };
+  const rememberedInvite = (roomId: string) => {
+    let candidate: string | null = null;
+    try {
+      candidate =
+        inviteStorage?.getItem(`${INVITE_STORAGE_PREFIX}${roomId}`) ?? null;
+    } catch {
+      candidate = null;
+    }
+    candidate ??= inviteMemory.get(roomId) ?? null;
+    if (!candidate) return null;
+    try {
+      const parsed = new URL(candidate);
+      return parsed.origin === origin &&
+        parsed.pathname.startsWith("/rooms/join/")
+        ? parsed.href
+        : null;
+    } catch {
+      return null;
+    }
+  };
 
   const request = async (
     path: string,
@@ -460,7 +497,7 @@ export function createRoomApi(options: CreateRoomApiOptions): RoomApi {
       currentMoment: moment(raw.currentMoment, rawFixture),
       fixture: fixture(rawFixture),
       id: roomId,
-      inviteUrl: invites.get(roomId) ?? null,
+      inviteUrl: rememberedInvite(roomId),
       isHost: id(raw.hostParticipantId, 120) === viewerMemberId,
       members: roomMembers,
       name: text(raw.name, 60),
@@ -483,6 +520,34 @@ export function createRoomApi(options: CreateRoomApiOptions): RoomApi {
   };
 
   return {
+    async createExperienceRoom(input) {
+      const result = record(
+        await request(
+          "/api/v1/experience/rooms",
+          json("POST", {
+            awayTeam: teamCode(input.awayTeam),
+            homeTeam: teamCode(input.homeTeam),
+            name: text(input.name, 60),
+            nickname: text(input.nickname, 30),
+          }),
+        ),
+      );
+      const fixtureId = id(result.fixtureId, 80);
+      const runId = id(result.runId, 120);
+      const room = mapRoom(result.room);
+      const invitePath =
+        typeof result.invitePath === "string"
+          ? result.invitePath
+          : `/rooms/join/${id(result.inviteCode, 22)}`;
+      const inviteUrl = new URL(invitePath, origin).href;
+      rememberInvite(room.id, inviteUrl);
+      return {
+        fixtureId,
+        inviteUrl,
+        room: { ...room, inviteUrl },
+        runId,
+      };
+    },
     async createRoom(input) {
       const result = record(
         await request(
@@ -503,7 +568,7 @@ export function createRoomApi(options: CreateRoomApiOptions): RoomApi {
           ? result.invitePath
           : `/rooms/join/${id(result.inviteCode, 22)}`;
       const inviteUrl = new URL(invitePath, origin).href;
-      invites.set(room.id, inviteUrl);
+      rememberInvite(room.id, inviteUrl);
       return { inviteUrl, room: { ...room, inviteUrl } };
     },
     async getRoom(roomId) {

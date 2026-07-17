@@ -157,6 +157,64 @@ function productRuntime() {
 }
 
 describe("server-owned Experience Match", () => {
+  it("prepares a private fixture without beats and starts that same fixture idempotently", async () => {
+    const repository = memoryExperiences();
+    const product = productRuntime();
+    const experience = createExperienceRuntime({
+      countdownMs: 10_000,
+      id: () => "prepared-run",
+      now: () => "2026-07-17T12:00:00.000Z",
+      prepareWindowMs: 30 * 60_000,
+      processor: {
+        process: async () => ({ kind: "accepted_no_change" }),
+      },
+      productRuntime: product,
+      repository,
+    });
+
+    const prepared = await experience.prepareFixture({
+      awayTeam: "FRA",
+      homeTeam: "ARG",
+      ownerFanId: "fan-1",
+    });
+    expect(prepared).toMatchObject({
+      fixture: {
+        fixtureId: "experience:prepared-run",
+        kickoffAt: "2026-07-17T12:30:00.000Z",
+      },
+      runId: "prepared-run",
+    });
+    expect(await experience.getRun("prepared-run")).toBeNull();
+    expect(repository.beats.size).toBe(0);
+
+    const started = await experience.startRun({
+      awayTeam: "FRA",
+      homeTeam: "ARG",
+      ownerFanId: "fan-1",
+      runId: prepared.runId,
+    });
+    const duplicate = await experience.startRun({
+      awayTeam: "FRA",
+      homeTeam: "ARG",
+      ownerFanId: "fan-1",
+      runId: prepared.runId,
+    });
+    expect(started).toMatchObject({
+      fixtureId: prepared.fixture.fixtureId,
+      kickoffAt: "2026-07-17T12:00:10.000Z",
+      status: "countdown",
+    });
+    expect(duplicate).toEqual(started);
+    expect(product.fixture(started.fixtureId)).toMatchObject({
+      kickoffAt: started.kickoffAt,
+      phase: "scheduled",
+      revision: 0,
+    });
+    expect(repository.beats.size).toBe(11);
+    await experience.close();
+    await product.close();
+  });
+
   it("persists each due authored beat before publishing without a browser connection", async () => {
     const repository = memoryExperiences();
     const product = productRuntime();

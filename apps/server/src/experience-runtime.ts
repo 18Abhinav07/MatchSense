@@ -133,6 +133,7 @@ export interface ExperienceRuntimeOptions {
   lockTimeoutMs?: number;
   now?: () => string;
   persistFixture?: (fixture: ProductFixture) => Promise<void>;
+  prepareWindowMs?: number;
   pollIntervalMs?: number;
   processor: FixtureProcessor;
   productRuntime: ProductRuntime;
@@ -155,6 +156,10 @@ export interface StartExperienceRunInput {
 export interface ExperienceRuntime {
   close(): Promise<void>;
   getRun(runId: string): Promise<ExperienceRunRecord | null>;
+  prepareFixture(input: StartExperienceRunInput): Promise<{
+    fixture: ProductFixture;
+    runId: string;
+  }>;
   start(): Promise<void>;
   startRun(input: StartExperienceRunInput): Promise<ExperienceRunRecord>;
   tick(): Promise<void>;
@@ -235,6 +240,7 @@ export function createExperienceRuntime(
   const lockTimeoutMs = options.lockTimeoutMs ?? 30_000;
   const now = options.now ?? (() => new Date().toISOString());
   const pollIntervalMs = options.pollIntervalMs ?? 1_000;
+  const prepareWindowMs = options.prepareWindowMs ?? 30 * 60_000;
   const retryDelayMs = options.retryDelayMs ?? 2_000;
   let timer: ReturnType<typeof setInterval> | null = null;
   let activeTick: Promise<void> | null = null;
@@ -317,6 +323,33 @@ export function createExperienceRuntime(
       if (activeTick) await activeTick;
     },
     getRun: (runId) => options.repository.getRun(runId),
+    prepareFixture: async (input) => {
+      const runId = input.runId ?? id();
+      const fixtureId = `experience:${runId}`;
+      const existing = options.productRuntime.fixture(fixtureId);
+      if (existing) {
+        return {
+          fixture: {
+            awayTeam: existing.awayTeam,
+            fixtureId,
+            homeTeam: existing.homeTeam,
+            kickoffAt: existing.kickoffAt,
+            provenance: "synthetic_txline_shaped",
+          },
+          runId,
+        };
+      }
+      const fixture: ProductFixture = {
+        awayTeam: input.awayTeam,
+        fixtureId,
+        homeTeam: input.homeTeam,
+        kickoffAt: new Date(Date.parse(now()) + prepareWindowMs).toISOString(),
+        provenance: "synthetic_txline_shaped",
+      };
+      await options.persistFixture?.(fixture);
+      options.productRuntime.registerFixture(fixture, { public: false });
+      return { fixture, runId };
+    },
     start: async () => {
       if (timer || closed) return;
       if (options.recoverRun) {

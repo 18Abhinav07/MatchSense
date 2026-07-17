@@ -80,6 +80,12 @@ export interface DurableRoomServiceOptions {
   now?: (() => number) | undefined;
   repository: RoomAggregateRepository<DurableRoomAggregate>;
   roomId?: (() => string) | undefined;
+  startFixture?:
+    | ((input: {
+        fixture: FixtureSnapshot;
+        ownerFanId: string;
+      }) => Promise<FixtureSnapshot>)
+    | undefined;
 }
 
 function hashInvite(inviteCode: string) {
@@ -856,19 +862,51 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
         }));
       }
       if (current.status === "locked") {
-        current = await update(roomId, (record) => ({
-          aggregate: {
-            ...record.aggregate,
-            lifecycle: [
-              ...record.aggregate.lifecycle,
-              { at: now(), status: "LIVE" },
-            ],
-            room: { ...record.aggregate.room, status: "LIVE" },
-            sensePhase: "LIVE",
-            startedAt: now(),
-          },
-          status: "live",
-        }));
+        const startedFixture = options.startFixture
+          ? await options.startFixture({
+              fixture: current.aggregate.fixture,
+              ownerFanId: fanId,
+            })
+          : current.aggregate.fixture;
+        if (
+          startedFixture.fixtureId !== current.aggregate.fixture.fixtureId ||
+          startedFixture.provenance !== "synthetic_txline_shaped"
+        ) {
+          throw new RoomServiceError(
+            "DEMO_CONTROL_DISABLED",
+            409,
+            "Experience start returned a different fixture",
+          );
+        }
+        const kickoffAt = Date.parse(startedFixture.kickoffAt);
+        if (!Number.isFinite(kickoffAt)) {
+          throw new RoomServiceError(
+            "DEMO_CONTROL_DISABLED",
+            409,
+            "Experience start returned an invalid kickoff",
+          );
+        }
+        current = await update(roomId, (record) => {
+          if (record.status !== "locked") return null;
+          return {
+            aggregate: {
+              ...record.aggregate,
+              fixture: startedFixture,
+              lifecycle: [
+                ...record.aggregate.lifecycle,
+                { at: now(), status: "LIVE" },
+              ],
+              room: {
+                ...record.aggregate.room,
+                kickoffAt,
+                status: "LIVE",
+              },
+              sensePhase: "LIVE",
+              startedAt: now(),
+            },
+            status: "live",
+          };
+        });
       }
       return buildView(current, fanId);
     },

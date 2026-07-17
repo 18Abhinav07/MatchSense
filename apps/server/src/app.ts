@@ -91,6 +91,10 @@ const canonicalShellRoutes = [
   { pattern: /^\/$/u, template: "/" },
   { pattern: /^\/onboarding$/u, template: "/onboarding" },
   {
+    pattern: /^\/experience\/with-friends$/u,
+    template: "/experience/with-friends",
+  },
+  {
     pattern: new RegExp(`^/matches/${segment}$`, "u"),
     template: "/matches/:fixtureId",
   },
@@ -108,6 +112,10 @@ const canonicalShellRoutes = [
   },
   { pattern: /^\/rooms$/u, template: "/rooms" },
   { pattern: /^\/rooms\/new$/u, template: "/rooms/new" },
+  {
+    pattern: new RegExp(`^/rooms/new/${segment}$`, "u"),
+    template: "/rooms/new/:fixtureId",
+  },
   {
     pattern: new RegExp(`^/rooms/join/${segment}$`, "u"),
     template: "/rooms/join/:inviteCode",

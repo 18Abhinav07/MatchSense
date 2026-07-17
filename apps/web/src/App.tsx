@@ -101,6 +101,37 @@ function browserPath() {
   return typeof window === "undefined" ? "/" : window.location.pathname;
 }
 
+export function roomCreationPath(fixtureId: string) {
+  return `/rooms/new/${encodeURIComponent(fixtureId)}`;
+}
+
+export async function resolveRoomCreationFixture(
+  fixtureId: string | null,
+  dependencies: {
+    fetchExact(fixtureId: string): Promise<LiveSnapshot>;
+    fetchSchedule(): Promise<LiveSnapshot[]>;
+  } = {
+    fetchExact: fetchFixture,
+    fetchSchedule: fetchFixtures,
+  },
+) {
+  if (fixtureId) return dependencies.fetchExact(fixtureId);
+  const fixtures = await dependencies.fetchSchedule();
+  return (
+    fixtures.find((item) => fixtureState(item) === "upcoming") ??
+    fixtures[0] ??
+    null
+  );
+}
+
+export function shouldOfferRoomCreation(snapshot: LiveSnapshot) {
+  return (
+    fixtureState(snapshot) === "upcoming" &&
+    snapshot.provenance !== "synthetic_txline_shaped" &&
+    !snapshot.fixtureId.startsWith("experience:")
+  );
+}
+
 function previewFan(team: TeamCode | null): FanProfile | null {
   if (!team) return null;
   const now = "2026-07-17T00:00:00.000Z";
@@ -583,17 +614,30 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
     );
   }
 
+  if (path === "/experience/with-friends") {
+    return withProfileCompletion(
+      <ExperienceFriendsSurface
+        catalog={catalogState.catalog}
+        fanId={fanId}
+        favoriteTeam={supported}
+        navigate={navigate}
+      />,
+    );
+  }
+
   const momentRoute = path.match(/^\/matches\/([^/]+)\/moments\/([^/]+)$/u);
   if (momentRoute?.[1] && momentRoute[2]) {
+    const fixtureId = decodeURIComponent(momentRoute[1]);
     return withProfileCompletion(
       <LiveCompanion
         catalog={catalogState.catalog}
         favoriteTeam={supported}
-        fixtureId={decodeURIComponent(momentRoute[1])}
+        fixtureId={fixtureId}
         initialMomentIdentity={decodeURIComponent(momentRoute[2])}
         onBack={() => navigate("/")}
+        onCreateRoom={() => navigate(roomCreationPath(fixtureId))}
         onMomentClose={() =>
-          navigate(`/matches/${decodeURIComponent(momentRoute[1]!)}/live`)
+          navigate(`/matches/${encodeURIComponent(fixtureId)}/live`)
         }
       />,
     );
@@ -632,6 +676,21 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
         favoriteTeam={supported}
         navigate={navigate}
         route={{ mode: "create" }}
+      />,
+    );
+  }
+  const roomCreate = path.match(/^\/rooms\/new\/([^/]+)$/u);
+  if (roomCreate?.[1]) {
+    return withProfileCompletion(
+      <RoomsSurface
+        catalog={catalogState.catalog}
+        fanId={fanId}
+        favoriteTeam={supported}
+        navigate={navigate}
+        route={{
+          fixtureId: decodeURIComponent(roomCreate[1]),
+          mode: "create",
+        }}
       />,
     );
   }
@@ -708,6 +767,7 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
         favoriteTeam={supported}
         fixtureId={fixtureId}
         onBack={() => navigate("/")}
+        onCreateRoom={() => navigate(roomCreationPath(fixtureId))}
         onOpenMemory={() => navigate(`/matches/${fixtureId}/memory`)}
       />,
     );
@@ -722,6 +782,7 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
       onCreateRoom={() => navigate("/rooms/new")}
       onDemo={() => navigate("/demo")}
       onExperience={() => void startExperience()}
+      onExperienceWithFriends={() => navigate("/experience/with-friends")}
       experienceState={experienceState}
       onHistory={() => navigate("/history")}
       onOpen={(fixtureId) => navigate(`/matches/${fixtureId}/live`)}
@@ -1048,6 +1109,7 @@ function Today({
   onCreateRoom,
   onDemo,
   onExperience,
+  onExperienceWithFriends,
   onHistory,
   onOpen,
   onFollow,
@@ -1062,6 +1124,7 @@ function Today({
   onCreateRoom(): void;
   onDemo(): void;
   onExperience(): void;
+  onExperienceWithFriends(): void;
   onHistory(): void;
   onOpen(fixtureId: string): void;
   onFollow(
@@ -1209,19 +1272,24 @@ function Today({
           <h2>Put your team into a complete five-minute live match.</h2>
           <p>
             Real companion, lock-screen goal alerts, canonical VAR, continuous
-            commentary, Rooms and Memory—all on the same server-owned event
-            engine as a live fixture.
+            commentary and Memory—all on the same server-owned event engine as a
+            live fixture.
           </p>
-          <button
-            disabled={experienceState === "starting"}
-            onClick={onExperience}
-            type="button"
-          >
-            {experienceState === "starting"
-              ? "Preparing your match…"
-              : "Start Experience Match"}{" "}
-            <ArrowIcon />
-          </button>
+          <div className="experience-launch-actions">
+            <button
+              disabled={experienceState === "starting"}
+              onClick={onExperience}
+              type="button"
+            >
+              {experienceState === "starting"
+                ? "Preparing your match…"
+                : "Start solo"}{" "}
+              <ArrowIcon />
+            </button>
+            <button onClick={onExperienceWithFriends} type="button">
+              Start with friends <ArrowIcon />
+            </button>
+          </div>
           {experienceState === "error" ? (
             <small role="status">
               The Experience match could not start. Tap again to retry.
@@ -2054,6 +2122,7 @@ function LiveCompanion({
   fixtureId,
   initialMomentIdentity,
   onBack,
+  onCreateRoom,
   onMomentClose,
   onOpenMemory,
 }: {
@@ -2062,6 +2131,7 @@ function LiveCompanion({
   fixtureId: string;
   initialMomentIdentity?: string;
   onBack(): void;
+  onCreateRoom?: () => void;
   onMomentClose?: () => void;
   onOpenMemory?: () => void;
 }) {
@@ -2346,14 +2416,25 @@ function LiveCompanion({
             the PWA or lock your screen.
           </p>
         </div>
-        <button
-          className="primary-control"
-          disabled={!prepared && !activeListening}
-          onClick={startListening}
-          type="button"
-        >
-          <SoundIcon /> {listeningLabel}
-        </button>
+        <div className="control-rail-actions">
+          <button
+            className="primary-control"
+            disabled={!prepared && !activeListening}
+            onClick={startListening}
+            type="button"
+          >
+            <SoundIcon /> {listeningLabel}
+          </button>
+          {onCreateRoom && shouldOfferRoomCreation(current) ? (
+            <button
+              className="quiet-button"
+              onClick={onCreateRoom}
+              type="button"
+            >
+              Create a Room for this match
+            </button>
+          ) : null}
+        </div>
       </section>
       <section className="match-detail-grid">
         <div className="timeline-panel">
@@ -3020,6 +3101,93 @@ function HistorySurface({
   );
 }
 
+const EXPERIENCE_TEAM_NAMES: Readonly<Record<string, string>> = {
+  ARG: "Argentina",
+  BRA: "Brazil",
+  ENG: "England",
+  ESP: "Spain",
+  FRA: "France",
+  JPN: "Japan",
+};
+
+function ExperienceFriendsSurface({
+  catalog,
+  fanId,
+  favoriteTeam,
+  navigate,
+}: {
+  catalog: ProductCatalog;
+  fanId: string;
+  favoriteTeam: TeamCode;
+  navigate(path: string): void;
+}) {
+  const homeTeam = momentTeam(
+    teamFor(
+      favoriteTeam,
+      catalog,
+      EXPERIENCE_TEAM_NAMES[favoriteTeam] ?? favoriteTeam,
+    ),
+  );
+  const catalogOpponents = catalog.teams.filter(
+    (team) => team.code !== favoriteTeam,
+  );
+  const fallbackOpponentCode = favoriteTeam === "FRA" ? "ARG" : "FRA";
+  const opponents = (
+    catalogOpponents.length
+      ? catalogOpponents
+      : [
+          fallbackTeam(
+            fallbackOpponentCode,
+            EXPERIENCE_TEAM_NAMES[fallbackOpponentCode] ?? fallbackOpponentCode,
+          ),
+        ]
+  ).map(momentTeam);
+  const fixture = {
+    awayTeam: opponents[0]!,
+    homeTeam,
+    id: "experience:pending",
+    isReplay: true,
+    kickoffAt: new Date(Date.now() + 300_000).toISOString(),
+  } satisfies RoomFixture;
+  const roomApi = useMemo(
+    () =>
+      createRoomApi({
+        fanId,
+        favoriteTeam,
+        origin:
+          typeof window === "undefined"
+            ? "http://matchsense.local"
+            : window.location.origin,
+      }),
+    [fanId, favoriteTeam],
+  );
+  const defaultNickname =
+    typeof window === "undefined"
+      ? ""
+      : (window.localStorage.getItem("matchsense.nickname") ?? "");
+  return (
+    <main className="rooms-shell" id="main-content">
+      <RoomExperience
+        api={roomApi}
+        onExit={() => navigate("/")}
+        onOpenMatch={(fixtureId) =>
+          navigate(`/matches/${encodeURIComponent(fixtureId)}/live`)
+        }
+        onOpenRoom={(roomId) =>
+          navigate(`/rooms/${encodeURIComponent(roomId)}`)
+        }
+        route={{
+          defaultNickname,
+          defaultRoomName: `${homeTeam.name} match night`,
+          fixture,
+          mode: "experience-create",
+          opponents,
+        }}
+      />
+    </main>
+  );
+}
+
 function RoomsSurface({
   catalog,
   fanId,
@@ -3032,7 +3200,7 @@ function RoomsSurface({
   favoriteTeam: TeamCode;
   navigate(path: string): void;
   route:
-    | { mode: "create" }
+    | { fixtureId?: string; mode: "create" }
     | { inviteCode: string; mode: "invite" }
     | { mode: "room"; roomId: string };
 }) {
@@ -3040,19 +3208,17 @@ function RoomsSurface({
   const [fixtureStateValue, setFixtureStateValue] = useState<
     "loading" | "ready" | "empty"
   >("loading");
+  const createFixtureId =
+    route.mode === "create" ? (route.fixtureId ?? null) : null;
   useEffect(() => {
     if (route.mode !== "create") return;
-    fetchFixtures()
-      .then((fixtures) => {
-        const upcoming =
-          fixtures.find((item) => fixtureState(item) === "upcoming") ??
-          fixtures[0] ??
-          null;
-        setFixture(upcoming);
-        setFixtureStateValue(upcoming ? "ready" : "empty");
+    resolveRoomCreationFixture(createFixtureId)
+      .then((selectedFixture) => {
+        setFixture(selectedFixture);
+        setFixtureStateValue(selectedFixture ? "ready" : "empty");
       })
       .catch(() => setFixtureStateValue("empty"));
-  }, [route.mode]);
+  }, [createFixtureId, route.mode]);
   const roomApi = useMemo(
     () =>
       createRoomApi({
@@ -3069,7 +3235,11 @@ function RoomsSurface({
     return (
       <main className="rooms-shell">
         <Masthead end="OPENING ROOMS" />
-        <p className="memory-loading">Finding the next match for your room…</p>
+        <p className="memory-loading">
+          {createFixtureId
+            ? "Opening this match for your room…"
+            : "Finding the next match for your room…"}
+        </p>
       </main>
     );
   if (route.mode === "create" && !fixture)

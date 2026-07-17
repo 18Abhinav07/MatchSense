@@ -1108,6 +1108,10 @@ svg {
   min-height: 58px;
   padding: 0 26px;
 }
+.control-rail-actions {
+  display: grid;
+  gap: 10px;
+}
 .primary-control:disabled {
   cursor: wait;
   opacity: 0.58;
@@ -2680,6 +2684,14 @@ audio {
 }
 .experience-card button {
   margin-top: 16px;
+}
+.experience-launch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 24px;
+}
+.experience-launch-actions button:last-child {
+  color: var(--grass);
 }
 .listening-card {
   background:

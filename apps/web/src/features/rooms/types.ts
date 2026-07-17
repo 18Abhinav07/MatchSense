@@ -118,6 +118,13 @@ export interface CreateRoomInput {
   readonly nickname: string;
 }
 
+export interface CreateExperienceRoomInput {
+  readonly awayTeam: string;
+  readonly homeTeam: string;
+  readonly name: string;
+  readonly nickname: string;
+}
+
 export interface JoinRoomInput {
   readonly inviteCode: string;
   readonly nickname: string;
@@ -132,6 +139,12 @@ export interface SendReactionInput {
 }
 
 export interface RoomApi {
+  createExperienceRoom(input: CreateExperienceRoomInput): Promise<{
+    readonly fixtureId: string;
+    readonly inviteUrl: string;
+    readonly room: RoomView;
+    readonly runId: string;
+  }>;
   createRoom(
     input: CreateRoomInput,
   ): Promise<{ readonly inviteUrl: string; readonly room: RoomView }>;
@@ -161,6 +174,13 @@ export type RoomExperienceRoute =
       readonly defaultRoomName?: string;
       readonly fixture: RoomFixture;
       readonly mode: "create";
+    }
+  | {
+      readonly defaultNickname?: string;
+      readonly defaultRoomName?: string;
+      readonly fixture: RoomFixture;
+      readonly mode: "experience-create";
+      readonly opponents: readonly RoomTeam[];
     }
   | {
       readonly defaultNickname?: string;

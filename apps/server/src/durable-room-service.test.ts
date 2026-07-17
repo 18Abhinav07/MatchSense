@@ -112,6 +112,86 @@ function inMemoryRepository(): RoomAggregateRepository<DurableRoomAggregate> & {
 }
 
 describe("durable Room happy path", () => {
+  it("joins, saves picks, starts the prepared Experience, and projects its first beat", async () => {
+    const repository = inMemoryRepository();
+    let now = Date.parse("2026-07-17T12:00:00.000Z");
+    const preparedFixture = {
+      ...fixture,
+      kickoffAt: "2026-07-17T12:30:00.000Z",
+      updatedAt: "2026-07-17T12:00:00.000Z",
+    };
+    const startedFixture = {
+      ...preparedFixture,
+      kickoffAt: "2026-07-17T12:00:10.000Z",
+      updatedAt: "2026-07-17T12:00:00.000Z",
+    };
+    const starts: string[] = [];
+    const service = createDurableRoomService({
+      fixture: async (fixtureId) =>
+        fixtureId === preparedFixture.fixtureId ? preparedFixture : null,
+      now: () => now,
+      repository,
+      roomId: () => "room-orchestrated",
+      startFixture: async ({ fixture: candidate, ownerFanId }) => {
+        starts.push(candidate.fixtureId);
+        expect(ownerFanId).toBe("fan-host");
+        expect(repository.records.get("room-orchestrated")?.status).toBe(
+          "locked",
+        );
+        return startedFixture;
+      },
+    });
+
+    const created = await service.create({
+      fixtureId: preparedFixture.fixtureId,
+      host: { fanId: "fan-host", nickname: "Abhinav", teamCode: "ARG" },
+      name: "Experience night",
+    });
+    await service.join({
+      fanId: "fan-friend",
+      inviteCode: created.inviteCode,
+      nickname: "Pratik",
+      teamCode: "FRA",
+    });
+    await service.openPicks(created.room.id, "fan-host");
+    await service.saveSensePicks({
+      fanId: "fan-friend",
+      picks,
+      roomId: created.room.id,
+    });
+
+    const live = await service.startExperience(created.room.id, "fan-host");
+    expect(live).toMatchObject({
+      fixture: { kickoffAt: startedFixture.kickoffAt },
+      kickoffAt: Date.parse(startedFixture.kickoffAt),
+      status: "LIVE",
+    });
+    expect(starts).toEqual([preparedFixture.fixtureId]);
+
+    const duplicate = await service.startExperience(
+      created.room.id,
+      "fan-host",
+    );
+    expect(duplicate.status).toBe("LIVE");
+    expect(starts).toEqual([preparedFixture.fixtureId]);
+
+    now = Date.parse(startedFixture.kickoffAt);
+    await service.projectFixture({
+      ...startedFixture,
+      minute: "0'",
+      phase: "first_half",
+      revision: 1,
+      updatedAt: startedFixture.kickoffAt,
+    });
+    await expect(
+      service.get(created.room.id, "fan-friend"),
+    ).resolves.toMatchObject({
+      fixture: { phase: "first_half", revision: 1 },
+      sense: { phase: "LIVE" },
+      status: "LIVE",
+    });
+  });
+
   it("persists members, 100-Sense predictions, lifecycle, and final ledger", async () => {
     const repository = inMemoryRepository();
     let now = Date.parse("2026-07-17T13:00:00.000Z");

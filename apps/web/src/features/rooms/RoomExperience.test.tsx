@@ -110,6 +110,12 @@ function room(phase: RoomView["sense"]["phase"]): RoomView {
 }
 
 const api: RoomApi = {
+  createExperienceRoom: async () => ({
+    fixtureId: fixture.id,
+    inviteUrl: "",
+    room: room("DRAFT"),
+    runId: "run-one",
+  }),
   createRoom: async () => ({ inviteUrl: "", room: room("DRAFT") }),
   getRoom: async () => room("OPEN"),
   joinRoom: async () => ({ lateJoin: false, room: room("OPEN") }),

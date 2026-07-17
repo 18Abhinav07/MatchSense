@@ -51,6 +51,67 @@ function fanSessions() {
 }
 
 describe("durable Room routes", () => {
+  it("prepares one private Experience fixture and its Room for the signed-in host", async () => {
+    const sessions = fanSessions();
+    const host = await sessions.createGuest();
+    const prepareExperienceRoom = vi.fn(async (input) => ({
+      fixtureId: "experience:room-run",
+      inviteCode: "BwcHBwcHBwcHBwcHBwcHBw",
+      invitePath: "/rooms/join/BwcHBwcHBwcHBwcHBwcHBw",
+      room: { id: "room-1" },
+      runId: "room-run",
+      owner: input.fanId,
+    }));
+    const service = {
+      create: vi.fn(),
+      get: vi.fn(),
+      join: vi.fn(),
+      list: vi.fn(),
+      openPicks: vi.fn(),
+      preview: vi.fn(),
+      react: vi.fn(),
+      saveSensePicks: vi.fn(),
+      startExperience: vi.fn(),
+      subscribe: vi.fn(async () => () => undefined),
+    } satisfies DurableRoomRouteDependencies["service"];
+    const app = Fastify();
+    registerDurableRoomRoutes(app, {
+      prepareExperienceRoom,
+      service,
+      sessions,
+    });
+
+    const response = await app.inject({
+      headers: {
+        cookie: `matchsense_session=${host.sessionToken}`,
+        "x-matchsense-csrf": host.csrfToken,
+      },
+      method: "POST",
+      payload: {
+        awayTeam: "FRA",
+        homeTeam: "ARG",
+        name: "Final night",
+        nickname: "Abhinav",
+      },
+      url: "/api/v1/experience/rooms",
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json()).toMatchObject({
+      fixtureId: "experience:room-run",
+      room: { id: "room-1" },
+      runId: "room-run",
+    });
+    expect(prepareExperienceRoom).toHaveBeenCalledWith({
+      awayTeam: "FRA",
+      fanId: host.fan.id,
+      homeTeam: "ARG",
+      name: "Final night",
+      nickname: "Abhinav",
+    });
+    await app.close();
+  });
+
   it("ignores spoofed fan headers and owns every mutation through session plus CSRF", async () => {
     const sessions = fanSessions();
     const host = await sessions.createGuest();

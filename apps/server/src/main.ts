@@ -727,6 +727,29 @@ export async function startServer(options: StartServerOptions = {}) {
             fixture: (fixtureId) => runtime.fixture(fixtureId),
             repository:
               databaseRuntime.rooms as RoomAggregateRepository<DurableRoomAggregate>,
+            ...(experienceRuntime
+              ? {
+                  startFixture: async ({ fixture, ownerFanId }) => {
+                    const runId = fixture.fixtureId.startsWith("experience:")
+                      ? fixture.fixtureId.slice("experience:".length)
+                      : "";
+                    if (!runId) {
+                      throw new Error("Experience fixture id is invalid");
+                    }
+                    const run = await experienceRuntime!.startRun({
+                      awayTeam: fixture.awayTeam,
+                      homeTeam: fixture.homeTeam,
+                      ownerFanId,
+                      runId,
+                    });
+                    const startedFixture = runtime.fixture(run.fixtureId);
+                    if (!startedFixture) {
+                      throw new Error("Started Experience fixture is missing");
+                    }
+                    return startedFixture;
+                  },
+                }
+              : {}),
           })
         : null;
     const memoryService =
@@ -889,6 +912,37 @@ export async function startServer(options: StartServerOptions = {}) {
       ...(durableRoomService && fanSessions
         ? {
             durableRooms: {
+              ...(experienceRuntime
+                ? {
+                    prepareExperienceRoom: async (input: {
+                      awayTeam: string;
+                      fanId: string;
+                      homeTeam: string;
+                      name: string;
+                      nickname: string;
+                    }) => {
+                      const prepared = await experienceRuntime!.prepareFixture({
+                        awayTeam: input.awayTeam,
+                        homeTeam: input.homeTeam,
+                        ownerFanId: input.fanId,
+                      });
+                      const created = await durableRoomService.create({
+                        fixtureId: prepared.fixture.fixtureId,
+                        host: {
+                          fanId: input.fanId,
+                          nickname: input.nickname,
+                          teamCode: input.homeTeam,
+                        },
+                        name: input.name,
+                      });
+                      return {
+                        ...created,
+                        fixtureId: prepared.fixture.fixtureId,
+                        runId: prepared.runId,
+                      };
+                    },
+                  }
+                : {}),
               service: durableRoomService,
               sessions: fanSessions,
             },
