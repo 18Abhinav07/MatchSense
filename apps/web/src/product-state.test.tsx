@@ -26,10 +26,8 @@ describe("fan journey state", () => {
 
     expect(markup).toContain("Who do you support?");
     expect(markup).toContain('aria-label="Search teams"');
-    expect(markup).toContain("Argentina");
-    expect(markup).toContain("Brazil");
-    expect(markup).toContain("France");
-    expect(markup).toContain("Japan");
+    expect(markup).toContain("Loading the tournament team sheet");
+    expect(markup).toContain("TXLINE TOURNAMENT CATALOG");
   });
 
   it("makes canonical truth render before the cinematic moment opens", () => {
@@ -300,9 +298,11 @@ describe("fan journey state", () => {
       }),
     );
 
-    expect(markup).toContain("Make three calls. Settle the group chat.");
+    expect(markup).toContain(
+      "Make five calls, then let the match settle the chat.",
+    );
     expect(markup).toContain("Create a room");
-    expect(markup).toContain("Friend points only");
+    expect(markup).toContain("free Sense");
     expect(markup).not.toContain("Place a bet");
   });
 
@@ -314,8 +314,7 @@ describe("fan journey state", () => {
       }),
     );
 
-    expect(markup).toContain("Create the match ritual.");
-    expect(markup).toContain("Your nickname");
-    expect(markup).toContain("No money. No prizes.");
+    expect(markup).toContain("OPENING ROOMS");
+    expect(markup).toContain("Finding the next match for your room");
   });
 });

@@ -1,29 +1,36 @@
-export type TeamCode = "ARG" | "BRA" | "ESP" | "FRA" | "JPN";
+export type TeamCode = string;
 
 export interface LiveSnapshot {
   fixtureId: string;
-  kickoffAt?: string;
+  kickoffAt?: string | undefined;
   homeTeam: TeamCode;
   awayTeam: TeamCode;
+  homeTeamName?: string | undefined;
+  awayTeamName?: string | undefined;
+  competition?: string | undefined;
+  venue?: string | undefined;
   minute: string;
   score: { home: number; away: number };
-  phase?: string;
-  provenance?: string;
-  sourceLabel?: string;
-  revision?: number;
-  updatedAt?: string;
-  lastEvent?: LiveMoment | null;
+  phase?: string | undefined;
+  provenance?: string | undefined;
+  sourceLabel?: string | undefined;
+  revision?: number | undefined;
+  updatedAt?: string | undefined;
+  lastEvent?: LiveMoment | null | undefined;
 }
 
 export interface LiveMoment {
   eventTeam: TeamCode;
   id: string;
   identity: string;
-  kind: "goal";
+  kind: string;
   minute: string;
   revision: number;
   score: { home: number; away: number };
-  status: "confirmed";
+  status: string;
+  title?: string | undefined;
+  detail?: string | undefined;
+  playerName?: string | undefined;
 }
 
 export interface CanonicalEventPayload {
@@ -98,7 +105,7 @@ export function createInitialLiveState(): LiveViewState {
       minute: "—",
       provenance: "synthetic_txline_shaped",
       score: { away: 0, home: 0 },
-      sourceLabel: "SIMULATION · TXLINE-SHAPED DATA",
+      sourceLabel: "MATCH DATA CONNECTING",
     },
     timeline: [],
     transportHealth: "connecting",
@@ -123,11 +130,17 @@ export function liveViewReducer(
   }
   if (action.type === "canonical_event") {
     if (state.lastEventId === action.payload.id) return state;
-    const timeline = state.timeline.some(
-      (moment) => moment.identity === action.payload.moment.identity,
-    )
-      ? state.timeline
-      : [action.payload.moment, ...state.timeline];
+    const priorIndex = state.timeline.findIndex(
+      (moment) =>
+        moment.identity === action.payload.moment.identity ||
+        moment.id === action.payload.moment.id,
+    );
+    const timeline =
+      priorIndex < 0
+        ? [action.payload.moment, ...state.timeline]
+        : state.timeline.map((moment, index) =>
+            index === priorIndex ? action.payload.moment : moment,
+          );
     return {
       ...state,
       currentRevision: action.payload.moment.revision,

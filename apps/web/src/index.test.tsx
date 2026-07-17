@@ -20,8 +20,8 @@ describe("MatchSense web product", () => {
     expect(markup).toContain("MatchSense");
     expect(markup).toContain("Who do you support?");
     expect(markup).toContain("Search teams");
-    expect(markup).toContain("SIMULATION · TXLINE-SHAPED DATA");
-    expect(markup).not.toContain("REPLAY · SYNTHETIC TXLINE-SHAPED DATA");
-    expect(markup).not.toContain("LIVE · TXLINE");
+    expect(markup).toContain("TXLINE TOURNAMENT CATALOG");
+    expect(markup).not.toContain("SIMULATION · TXLINE-SHAPED DATA");
+    expect(markup).not.toContain("DEMO MODE");
   });
 });
