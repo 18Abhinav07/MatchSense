@@ -321,4 +321,78 @@ describe("first vertical product contract", () => {
     ).resolves.toBe("closed");
     await expect(second.reader.read()).resolves.toMatchObject({ done: true });
   });
+
+  it("serves the real multi-fixture schedule while keeping replay demo out of the live list", async () => {
+    const runtime = createProductRuntime({
+      cueBytes: Buffer.from("cue"),
+      fixtures: [
+        {
+          awayTeam: "ENG",
+          fixtureId: "18257865",
+          homeTeam: "FRA",
+          kickoffAt: "2026-07-18T21:00:00.000Z",
+          provenance: "live_txline",
+        },
+        {
+          awayTeam: "ARG",
+          fixtureId: "18257739",
+          homeTeam: "ESP",
+          kickoffAt: "2026-07-19T19:00:00.000Z",
+          provenance: "live_txline",
+        },
+      ],
+      includeDemoFixture: true,
+      mode: "live",
+      now: () => "2026-07-17T06:30:00.000Z",
+      silenceBytes: Buffer.from("silence"),
+      writeIntervalMs: 60_000,
+    });
+    const app = buildApp({ readinessProbe, runtime, webDistPath });
+
+    const fixtures = await app.inject({ url: "/api/v1/fixtures" });
+    expect(fixtures.statusCode).toBe(200);
+    expect(fixtures.json()).toMatchObject({
+      fixtures: [
+        { awayTeam: "ENG", fixtureId: "18257865", homeTeam: "FRA" },
+        { awayTeam: "ARG", fixtureId: "18257739", homeTeam: "ESP" },
+      ],
+    });
+    expect(
+      (fixtures.json() as { fixtures: Array<{ fixtureId: string }> }).fixtures,
+    ).not.toEqual(expect.arrayContaining([{ fixtureId: "arg-fra-demo" }]));
+
+    const catalog = await app.inject({ url: "/api/v1/catalog" });
+    expect(catalog.json()).toMatchObject({
+      provenance: "live_txline",
+      source: { mode: "live", state: "scheduled" },
+      teams: expect.arrayContaining([
+        expect.objectContaining({ code: "ENG", name: "England" }),
+        expect.objectContaining({ code: "ARG", name: "Argentina" }),
+      ]),
+    });
+    expect(
+      (await app.inject({ url: "/api/v1/fixtures/18257739" })).json(),
+    ).toMatchObject({ fixtureId: "18257739", provenance: "live_txline" });
+    expect(
+      (await app.inject({ url: "/api/v1/fixtures/arg-fra-demo" })).json(),
+    ).toMatchObject({
+      fixtureId: "arg-fra-demo",
+      provenance: "synthetic_txline_shaped",
+    });
+
+    const listening = await app.inject({
+      method: "POST",
+      payload: { perspectiveTeam: "ENG" },
+      url: "/api/v1/fixtures/18257865/listening-sessions",
+    });
+    expect(listening.statusCode).toBe(201);
+    expect(listening.json()).toMatchObject({
+      awayTeam: "ENG",
+      fixtureId: "18257865",
+      homeTeam: "FRA",
+      perspectiveTeam: "ENG",
+    });
+
+    await app.close();
+  });
 });

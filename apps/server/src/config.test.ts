@@ -7,21 +7,31 @@ describe("parseServerEnv", () => {
     "postgres://db.example/matchsense",
     "postgresql://db.example/matchsense",
   ])("accepts the %s database protocol", (databaseUrl) => {
-    expect(parseServerEnv({ DATABASE_URL: databaseUrl }).databaseUrl).toBe(
-      databaseUrl,
-    );
+    expect(
+      parseServerEnv({
+        DATABASE_URL: databaseUrl,
+        DATA_RIGHTS_MODE: "synthetic_demo",
+      }).databaseUrl,
+    ).toBe(databaseUrl);
   });
 
-  it("requires a PostgreSQL URL and applies safe local defaults", () => {
+  it("defaults the product to live TxLINE and never silently substitutes demo", () => {
+    expect(() =>
+      parseServerEnv({
+        DATABASE_URL: "postgresql://db.example/matchsense",
+      }),
+    ).toThrow("Invalid MatchSense server configuration");
     const config = parseServerEnv({
       DATABASE_URL: "postgresql://db.example/matchsense",
+      TXLINE_API_TOKEN: "fixture-server-only-token",
     });
 
     expect(config).toEqual({
       databaseUrl: "postgresql://db.example/matchsense",
-      dataRightsMode: "synthetic_demo",
+      dataRightsMode: "txline_hackathon",
       host: "0.0.0.0",
       port: 8080,
+      txlineApiToken: "fixture-server-only-token",
     });
   });
 
@@ -48,6 +58,7 @@ describe("parseServerEnv", () => {
     expect(
       parseServerEnv({
         DATABASE_URL: "postgresql://db.example/matchsense",
+        DATA_RIGHTS_MODE: "synthetic_demo",
         VAPID_PRIVATE_KEY: "fixture-private-key",
         VAPID_PUBLIC_KEY: "public-key",
         VAPID_SUBJECT: "mailto:team@matchsense.app",
@@ -60,6 +71,7 @@ describe("parseServerEnv", () => {
     expect(() =>
       parseServerEnv({
         DATABASE_URL: "postgresql://db.example/matchsense",
+        DATA_RIGHTS_MODE: "synthetic_demo",
         VAPID_PUBLIC_KEY: "public-key-only",
       }),
     ).toThrow("Invalid MatchSense server configuration");

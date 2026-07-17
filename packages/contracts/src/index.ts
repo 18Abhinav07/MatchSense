@@ -1,4 +1,4 @@
-export const TEAM_CODES = ["ARG", "BRA", "ESP", "FRA", "JPN"] as const;
+export const TEAM_CODES = ["ARG", "BRA", "ENG", "ESP", "FRA", "JPN"] as const;
 export const SIMULATION_SOURCE_LABEL =
   "SIMULATION · TXLINE-SHAPED DATA" as const;
 export const TXLINE_DEVNET_SOURCE_LABEL = "TXLINE · DEVNET SOURCE" as const;

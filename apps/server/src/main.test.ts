@@ -33,7 +33,11 @@ type StartServerContract = (options: {
   productRuntime?: { close(): unknown; fixtures(): readonly unknown[] };
   shutdownTimeoutMs?: number;
   signalSource: EventEmitter;
-  txlineSourceFactory?: () => {
+  txlineScheduleFetcher?: () => Promise<readonly unknown[]>;
+  txlineSourceFactory?: (options?: {
+    fixtures?: readonly unknown[];
+    onState?: (state: { attempt: number; state: "live" }) => void;
+  }) => {
     run(signal: AbortSignal): Promise<void>;
   };
   webDistPath: string;
@@ -62,6 +66,136 @@ describe("server entrypoint", () => {
     expect(entrypoint.startServer).toBeTypeOf("function");
   });
 
+  it("maps verified schedule participants to home/away product fixtures without inventing identity", () => {
+    expect(
+      serverModule.productFixtureFromTxline({
+        competition: "World Cup",
+        competitionId: "72",
+        fixtureGroupId: "10115676",
+        fixtureId: "18257739",
+        gameState: 1,
+        participant1: { id: "3021", name: "Spain" },
+        participant1IsHome: false,
+        participant2: { id: "1489", name: "Argentina" },
+        sourceTimestampMs: 1_784_000_000_002,
+        startTimeMs: 1_784_487_600_000,
+      }),
+    ).toMatchObject({
+      context: {
+        fixtureId: "18257739",
+        participant1IsHome: false,
+      },
+      product: {
+        awayTeam: "ESP",
+        fixtureId: "18257739",
+        homeTeam: "ARG",
+        participant1IsHome: false,
+        provenance: "live_txline",
+      },
+    });
+    expect(
+      serverModule.productFixtureFromTxline({
+        competition: "World Cup",
+        competitionId: "72",
+        fixtureGroupId: "unsupported",
+        fixtureId: "unsupported",
+        gameState: 1,
+        participant1: { id: "1", name: "Unknown FC" },
+        participant1IsHome: true,
+        participant2: { id: "2", name: "France" },
+        sourceTimestampMs: 0,
+        startTimeMs: 0,
+      }),
+    ).toBeNull();
+  });
+
+  it("boots live mode from the TxLINE schedule and exposes every supported fixture", async () => {
+    const webDistPath = await temporaryWebShell();
+    const signalSource = new EventEmitter();
+    const database = {
+      check: vi.fn(async () => ({
+        databaseReachable: true,
+        migrationsCurrent: true,
+      })),
+      close: vi.fn(async () => undefined),
+      migrate: vi.fn(async () => undefined),
+      outbox: {},
+    };
+    const sourceOptions: Array<{ fixtures?: readonly unknown[] }> = [];
+    const sourceFactory = vi.fn(
+      (options?: { fixtures?: readonly unknown[] }) => {
+        sourceOptions.push(options ?? {});
+        return {
+          run: async (signal: AbortSignal) =>
+            new Promise<void>((resolve) => {
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            }),
+        };
+      },
+    );
+    const startServer =
+      serverModule.startServer as unknown as StartServerContract;
+    let app: Awaited<ReturnType<StartServerContract>> | undefined;
+
+    try {
+      app = await startServer({
+        databaseFactory: () => database,
+        environment: {
+          DATABASE_URL: "postgresql://db.example/matchsense",
+          DATA_RIGHTS_MODE: "txline_hackathon",
+          TXLINE_API_TOKEN: "fixture-server-only-token",
+        },
+        listen: false,
+        outboxWorker: {
+          start: vi.fn(),
+          stop: vi.fn(async () => undefined),
+        },
+        signalSource,
+        txlineScheduleFetcher: async () => [
+          {
+            competition: "World Cup",
+            competitionId: "72",
+            fixtureGroupId: "10115771",
+            fixtureId: "18257865",
+            gameState: 1,
+            participant1: { id: "1999", name: "France" },
+            participant1IsHome: true,
+            participant2: { id: "1888", name: "England" },
+            sourceTimestampMs: 1_784_000_000_001,
+            startTimeMs: 1_784_408_400_000,
+          },
+          {
+            competition: "World Cup",
+            competitionId: "72",
+            fixtureGroupId: "10115676",
+            fixtureId: "18257739",
+            gameState: 1,
+            participant1: { id: "3021", name: "Spain" },
+            participant1IsHome: true,
+            participant2: { id: "1489", name: "Argentina" },
+            sourceTimestampMs: 1_784_000_000_002,
+            startTimeMs: 1_784_487_600_000,
+          },
+        ],
+        txlineSourceFactory: sourceFactory,
+        webDistPath,
+      });
+
+      const response = await app.inject({ url: "/api/v1/fixtures" });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        fixtures: [
+          { fixtureId: "18257865", homeTeam: "FRA", awayTeam: "ENG" },
+          { fixtureId: "18257739", homeTeam: "ESP", awayTeam: "ARG" },
+        ],
+      });
+      expect(sourceOptions[0]?.fixtures).toHaveLength(2);
+    } finally {
+      if (app) await app.close();
+      await rm(webDistPath, { force: true, recursive: true });
+    }
+  });
+
   it("uses real database readiness by default and closes HTTP plus DB once", async () => {
     const webDistPath = await temporaryWebShell();
     const signalSource = new EventEmitter();
@@ -88,6 +222,7 @@ describe("server entrypoint", () => {
         databaseFactory,
         environment: {
           DATABASE_URL: "postgresql://db.example/matchsense",
+          DATA_RIGHTS_MODE: "synthetic_demo",
         },
         listen: false,
         outboxWorker,
@@ -292,6 +427,7 @@ describe("server entrypoint", () => {
           databaseFactory: () => runtime,
           environment: {
             DATABASE_URL: "postgresql://db.example/matchsense",
+            DATA_RIGHTS_MODE: "synthetic_demo",
           },
           listen: false,
           outboxWorkerFactory: () => {
@@ -364,6 +500,7 @@ describe("server entrypoint", () => {
         databaseFactory: () => runtime,
         environment: {
           DATABASE_URL: "postgresql://db.example/matchsense",
+          DATA_RIGHTS_MODE: "synthetic_demo",
         },
         listen: false,
         outboxWorkerFactory: factory,
@@ -425,6 +562,7 @@ describe("server entrypoint", () => {
         databaseFactory: () => runtime,
         environment: {
           DATABASE_URL: "postgresql://db.example/matchsense",
+          DATA_RIGHTS_MODE: "synthetic_demo",
         },
         listen: false,
         outboxWorkerFactory: (mode) =>

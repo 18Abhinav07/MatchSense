@@ -49,6 +49,11 @@ const teams: TeamSummary[] = [
     name: "Brazil",
   },
   {
+    code: "ENG",
+    colors: { primary: "#F5F5F2", secondary: "#C8102E" },
+    name: "England",
+  },
+  {
     code: "ESP",
     colors: { primary: "#B51F32", secondary: "#F4C84A" },
     name: "Spain",
@@ -80,28 +85,6 @@ export interface ListeningSessionView {
 type FixtureSubscriber = (event: FixtureStreamEvent) => void;
 type CanonicalEventSubscriber = (event: TxlineCanonicalEvent) => void;
 
-function minuteFromTxlineClock(
-  statusId: number | null,
-  secondsRemaining: number | null,
-) {
-  const periods: Record<number, { base: number; duration: number }> = {
-    2: { base: 0, duration: 45 * 60 },
-    4: { base: 45 * 60, duration: 45 * 60 },
-    7: { base: 90 * 60, duration: 15 * 60 },
-    9: { base: 105 * 60, duration: 15 * 60 },
-  };
-  const period = statusId === null ? undefined : periods[statusId];
-  if (
-    !period ||
-    secondsRemaining === null ||
-    secondsRemaining < 0 ||
-    secondsRemaining > period.duration
-  ) {
-    return "—";
-  }
-  return `${Math.floor((period.base + period.duration - secondsRemaining) / 60) + 1}'`;
-}
-
 export interface ProductFixture {
   awayTeam: TeamCode;
   fixtureId: string;
@@ -111,11 +94,32 @@ export interface ProductFixture {
   provenance: "synthetic_txline_shaped" | "live_txline";
 }
 
-export function createProductRuntime(options: {
+export type ProductSourceState =
+  | "authenticating"
+  | "connecting"
+  | "error"
+  | "forbidden"
+  | "live"
+  | "reconnecting"
+  | "reconciling"
+  | "scheduled"
+  | "stopped";
+
+export interface ProductSourceHealth {
+  detail: string | null;
+  mode: "demo" | "live";
+  state: ProductSourceState;
+  updatedAt: string;
+}
+
+export interface ProductRuntimeOptions {
   commentaryPipeline?: Pick<CommentaryPipeline, "generate">;
   silenceBytes: Buffer;
   cueBytes: Buffer;
   fixture?: ProductFixture;
+  fixtures?: readonly ProductFixture[];
+  includeDemoFixture?: boolean;
+  mode?: "demo" | "live";
   notifyMoment?: (
     moment: CanonicalMoment,
     snapshot: FixtureSnapshot,
@@ -124,17 +128,16 @@ export function createProductRuntime(options: {
   writeIntervalMs: number;
   now?: () => string;
   id?: () => string;
-}) {
+}
+
+function createSingleFixtureRuntime(
+  options: ProductRuntimeOptions & {
+    fixture: ProductFixture;
+  },
+) {
   const now = options.now ?? (() => new Date().toISOString());
   const id = options.id ?? randomUUID;
-  const fixtureDefinition: ProductFixture = options.fixture ?? {
-    awayTeam: "FRA",
-    fixtureId: DEMO_FIXTURE_ID,
-    homeTeam: "ARG",
-    kickoffAt: "2026-07-16T18:00:00.000Z",
-    participant1IsHome: true,
-    provenance: "synthetic_txline_shaped",
-  };
+  const fixtureDefinition = options.fixture;
   let projection = createFixtureProjection({
     awayTeam: fixtureDefinition.awayTeam,
     fixtureId: fixtureDefinition.fixtureId,
@@ -464,7 +467,9 @@ export function createProductRuntime(options: {
     const previousScore = projection.score;
     const fact: SourceFact = {
       fixtureId: event.fixtureId,
-      minute: minuteFromTxlineClock(event.statusId, event.clockSeconds),
+      // TxLINE's observed Clock.Seconds direction is not stable enough to
+      // derive a display minute. Keep the verified score and show no minute.
+      minute: "—",
       provenance: "live_txline",
       receivedAt: event.receivedAt,
       score: event.score,
@@ -587,6 +592,152 @@ export function createProductRuntime(options: {
       }
       subscribers.add(subscriber);
       return () => subscribers?.delete(subscriber);
+    },
+  };
+}
+
+type SingleFixtureRuntime = ReturnType<typeof createSingleFixtureRuntime>;
+
+const DEMO_PRODUCT_FIXTURE: ProductFixture = {
+  awayTeam: "FRA",
+  fixtureId: DEMO_FIXTURE_ID,
+  homeTeam: "ARG",
+  kickoffAt: "2026-07-16T18:00:00.000Z",
+  participant1IsHome: true,
+  provenance: "synthetic_txline_shaped",
+};
+
+/**
+ * Hosts every scheduled fixture behind one stable product API. The explicit
+ * demo fixture can coexist as a hidden deep-link target without appearing in
+ * the live schedule returned by `fixtures()`.
+ */
+export function createProductRuntime(options: ProductRuntimeOptions) {
+  const explicitFixtures = options.fixtures;
+  const publicFixtures = explicitFixtures
+    ? [...explicitFixtures]
+    : [options.fixture ?? DEMO_PRODUCT_FIXTURE];
+  const allFixtures = [...publicFixtures];
+  if (
+    explicitFixtures &&
+    options.includeDemoFixture &&
+    !allFixtures.some(({ fixtureId }) => fixtureId === DEMO_FIXTURE_ID)
+  ) {
+    allFixtures.push(DEMO_PRODUCT_FIXTURE);
+  }
+
+  const runtimes = new Map<string, SingleFixtureRuntime>();
+  for (const fixture of allFixtures) {
+    runtimes.set(
+      fixture.fixtureId,
+      createSingleFixtureRuntime({ ...options, fixture }),
+    );
+  }
+  const publicFixtureIds = new Set(
+    publicFixtures.map(({ fixtureId }) => fixtureId),
+  );
+  const replayOwners = new Map<string, SingleFixtureRuntime>();
+  const listeningOwners = new Map<string, SingleFixtureRuntime>();
+  const mode =
+    options.mode ??
+    (publicFixtures.some(({ provenance }) => provenance === "live_txline")
+      ? "live"
+      : "demo");
+  const now = options.now ?? (() => new Date().toISOString());
+  let sourceHealth: ProductSourceHealth = {
+    detail: null,
+    mode,
+    state: mode === "live" ? "scheduled" : "live",
+    updatedAt: now(),
+  };
+
+  const runtimeForFixture = (fixtureId: string) =>
+    runtimes.get(fixtureId) ?? null;
+
+  return {
+    acceptTxlineEvent: (event: TxlineCanonicalEvent) =>
+      runtimeForFixture(event.fixtureId)?.acceptTxlineEvent(event) ?? {
+        kind: "ignored" as const,
+      },
+    attachListeningClient: (sessionId: string, client: AudioWritable) =>
+      listeningOwners
+        .get(sessionId)
+        ?.attachListeningClient(sessionId, client) ?? false,
+    catalog: () => ({
+      provenance:
+        mode === "live"
+          ? ("live_txline" as const)
+          : ("synthetic_txline_shaped" as const),
+      source: sourceHealth,
+      sourceLabel:
+        mode === "live"
+          ? ("TXLINE · DEVNET SOURCE" as const)
+          : ("SIMULATION · TXLINE-SHAPED DATA" as const),
+      teams,
+    }),
+    close: async () => {
+      await Promise.all(
+        [...runtimes.values()].map((runtime) => runtime.close()),
+      );
+    },
+    commandReplay: (sessionId: string, command: ReplayCommand) =>
+      replayOwners.get(sessionId)?.commandReplay(sessionId, command) ?? {
+        kind: "missing" as const,
+      },
+    createListeningSession: (fixtureId: string, perspectiveTeam: TeamCode) => {
+      const owner = runtimeForFixture(fixtureId);
+      const session = owner?.createListeningSession(fixtureId, perspectiveTeam);
+      if (owner && session) listeningOwners.set(session.id, owner);
+      return session ?? null;
+    },
+    createReplaySession: (fixtureId: string) => {
+      const owner = runtimeForFixture(fixtureId);
+      if (!owner) throw new Error("Fixture not found");
+      const session = owner.createReplaySession(fixtureId);
+      replayOwners.set(session.id, owner);
+      return session;
+    },
+    deleteListeningSession: (sessionId: string) => {
+      const owner = listeningOwners.get(sessionId);
+      if (!owner) return false;
+      listeningOwners.delete(sessionId);
+      return owner.deleteListeningSession(sessionId);
+    },
+    fixture: (fixtureId: string) =>
+      runtimeForFixture(fixtureId)?.fixture(fixtureId) ?? null,
+    fixtureEvents: (fixtureId: string) =>
+      runtimeForFixture(fixtureId)?.fixtureEvents(fixtureId) ?? [],
+    fixtures: () =>
+      [...publicFixtureIds]
+        .map((fixtureId) => runtimeForFixture(fixtureId)?.fixture(fixtureId))
+        .filter(
+          (fixture): fixture is FixtureSnapshot =>
+            fixture !== null && fixture !== undefined,
+        )
+        .sort((left, right) => left.kickoffAt.localeCompare(right.kickoffAt)),
+    listeningSession: (sessionId: string) =>
+      listeningOwners.get(sessionId)?.listeningSession(sessionId) ?? null,
+    setSourceHealth: (
+      state: ProductSourceState,
+      detail: string | null = null,
+    ) => {
+      sourceHealth = { detail, mode, state, updatedAt: now() };
+    },
+    subscribeCanonicalEvent: (
+      fixtureId: string,
+      subscriber: CanonicalEventSubscriber,
+    ) =>
+      runtimeForFixture(fixtureId)?.subscribeCanonicalEvent(
+        fixtureId,
+        subscriber,
+      ) ?? null,
+    subscribeFixture: (fixtureId: string, subscriber: FixtureSubscriber) =>
+      runtimeForFixture(fixtureId)?.subscribeFixture(fixtureId, subscriber) ??
+      null,
+    waitForCommentary: async () => {
+      await Promise.all(
+        [...runtimes.values()].map((runtime) => runtime.waitForCommentary()),
+      );
     },
   };
 }

@@ -8,7 +8,14 @@ import {
   type OutboxRepository,
   type PersistenceMode,
 } from "@matchsense/db";
-import { createTxlineLiveScoreSource } from "@matchsense/txline-adapter";
+import type { TeamCode } from "@matchsense/contracts";
+import {
+  createTxlineAuthenticatedClient,
+  createTxlineLiveScoreSource,
+  fetchTxlineWorldCupSchedule,
+  type TxlineFixtureContext,
+  type TxlineScheduleFixture,
+} from "@matchsense/txline-adapter";
 import type { FastifyInstance } from "fastify";
 
 import { buildApp, type ReadinessProbe } from "./app.js";
@@ -35,12 +42,44 @@ interface ServerDatabaseRuntime extends ReadinessProbe {
   outbox: OutboxRepository;
 }
 
-const VERIFIED_HACKATHON_FIXTURE = {
-  fixtureId: "18237038",
-  participant1: { id: "1999", name: "France" },
-  participant1IsHome: true,
-  participant2: { id: "3021", name: "Spain" },
-} as const;
+const TEAM_CODES_BY_NAME: Readonly<Record<string, TeamCode>> = {
+  argentina: "ARG",
+  brazil: "BRA",
+  england: "ENG",
+  france: "FRA",
+  japan: "JPN",
+  spain: "ESP",
+};
+
+function teamCodeFor(name: string) {
+  return TEAM_CODES_BY_NAME[name.trim().toLowerCase()] ?? null;
+}
+
+export function productFixtureFromTxline(fixture: TxlineScheduleFixture) {
+  const participant1Code = teamCodeFor(fixture.participant1.name);
+  const participant2Code = teamCodeFor(fixture.participant2.name);
+  if (!participant1Code || !participant2Code) return null;
+  return {
+    context: {
+      fixtureId: fixture.fixtureId,
+      participant1: fixture.participant1,
+      participant1IsHome: fixture.participant1IsHome,
+      participant2: fixture.participant2,
+    } satisfies TxlineFixtureContext,
+    product: {
+      awayTeam: fixture.participant1IsHome
+        ? participant2Code
+        : participant1Code,
+      fixtureId: fixture.fixtureId,
+      homeTeam: fixture.participant1IsHome
+        ? participant1Code
+        : participant2Code,
+      kickoffAt: new Date(fixture.startTimeMs).toISOString(),
+      participant1IsHome: fixture.participant1IsHome,
+      provenance: "live_txline" as const,
+    },
+  };
+}
 
 export interface StartServerOptions {
   databaseFactory?: (databaseUrl: string) => ServerDatabaseRuntime;
@@ -57,6 +96,9 @@ export interface StartServerOptions {
   shutdownTimeoutMs?: number;
   productRuntime?: ProductRuntime;
   signalSource?: ShutdownSignalSource;
+  txlineScheduleFetcher?: (
+    apiToken: string,
+  ) => Promise<readonly TxlineScheduleFixture[]>;
   txlineSourceFactory?: typeof createTxlineLiveScoreSource;
   webDistPath?: string;
 }
@@ -112,6 +154,8 @@ export async function startServer(options: StartServerOptions = {}) {
   let outboxWorkers: OutboxWorker[] = [];
   let txlineAbort: AbortController | null = null;
   let txlineTask: Promise<void> | null = null;
+  let txlineFixtureContexts: readonly TxlineFixtureContext[] = [];
+  let txlineScheduleError: string | null = null;
   let unregisterSignals: () => void = () => undefined;
 
   try {
@@ -129,6 +173,33 @@ export async function startServer(options: StartServerOptions = {}) {
         path.resolve(import.meta.dirname, "../assets/goal-cue.mp3"),
       );
       const streamContract = inspectMp3(cueBytes);
+      let liveFixtures: ReturnType<typeof productFixtureFromTxline>[] = [];
+      if (config.dataRightsMode === "txline_hackathon") {
+        try {
+          const scheduleFetcher =
+            options.txlineScheduleFetcher ??
+            (async (apiToken: string) => {
+              const client = createTxlineAuthenticatedClient({ apiToken });
+              return fetchTxlineWorldCupSchedule(client, {
+                startEpochDay: Math.floor(Date.now() / 86_400_000),
+              });
+            });
+          const schedule = await scheduleFetcher(config.txlineApiToken!);
+          liveFixtures = schedule.map(productFixtureFromTxline);
+          if (liveFixtures.every((fixture) => fixture === null)) {
+            txlineScheduleError =
+              "No supported World Cup fixtures are currently available";
+          }
+        } catch {
+          txlineScheduleError = "TxLINE schedule is temporarily unavailable";
+        }
+      }
+      const supportedLiveFixtures = liveFixtures.filter(
+        (fixture): fixture is NonNullable<typeof fixture> => fixture !== null,
+      );
+      txlineFixtureContexts = supportedLiveFixtures.map(
+        ({ context }) => context,
+      );
       productRuntime = createProductRuntime({
         commentaryPipeline: createCommentaryPipeline({
           env: options.environment ?? process.env,
@@ -142,6 +213,7 @@ export async function startServer(options: StartServerOptions = {}) {
                   BRA: "Brazil",
                   ESP: "Spain",
                   FRA: "France",
+                  ENG: "England",
                   JPN: "Japan",
                 } as const;
                 await deliverMomentPush(
@@ -160,14 +232,9 @@ export async function startServer(options: StartServerOptions = {}) {
           : {}),
         ...(config.dataRightsMode === "txline_hackathon"
           ? {
-              fixture: {
-                awayTeam: "ESP" as const,
-                fixtureId: VERIFIED_HACKATHON_FIXTURE.fixtureId,
-                homeTeam: "FRA" as const,
-                kickoffAt: "2026-07-14T15:00:00.000Z",
-                participant1IsHome: true,
-                provenance: "live_txline" as const,
-              },
+              fixtures: supportedLiveFixtures.map(({ product }) => product),
+              includeDemoFixture: true,
+              mode: "live" as const,
             }
           : {}),
         silenceBytes: await readFile(
@@ -177,6 +244,9 @@ export async function startServer(options: StartServerOptions = {}) {
           transcodeWavToStreamMp3(wavBytes, { expected: streamContract }),
         writeIntervalMs: 940,
       });
+      if (txlineScheduleError) {
+        productRuntime.setSourceHealth("error", txlineScheduleError);
+      }
     }
     const runtime = productRuntime;
     const workerFactory =
@@ -254,18 +324,29 @@ export async function startServer(options: StartServerOptions = {}) {
     for (const worker of outboxWorkers) {
       worker.start();
     }
-    if (config.dataRightsMode === "txline_hackathon") {
+    if (
+      config.dataRightsMode === "txline_hackathon" &&
+      (txlineFixtureContexts.length > 0 || options.productRuntime !== undefined)
+    ) {
       txlineAbort = new AbortController();
       const sourceFactory =
         options.txlineSourceFactory ?? createTxlineLiveScoreSource;
       const source = sourceFactory({
         apiToken: config.txlineApiToken!,
-        fixtures: [VERIFIED_HACKATHON_FIXTURE],
+        fixtures: txlineFixtureContexts,
         onEvent: (event) => {
           runtime.acceptTxlineEvent(event);
         },
+        onState: ({ state }) => {
+          runtime.setSourceHealth(state === "replay" ? "live" : state, null);
+        },
       });
-      txlineTask = source.run(txlineAbort.signal).catch(() => undefined);
+      txlineTask = source.run(txlineAbort.signal).catch(() => {
+        runtime.setSourceHealth(
+          "error",
+          "TxLINE live updates are temporarily unavailable",
+        );
+      });
     }
   } catch (error) {
     const cleanupFailures: unknown[] = [];

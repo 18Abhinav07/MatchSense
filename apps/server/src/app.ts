@@ -197,7 +197,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   return app;
 }
 
-const teamCode = z.enum(["ARG", "BRA", "ESP", "FRA", "JPN"]);
+const teamCode = z.enum(["ARG", "BRA", "ENG", "ESP", "FRA", "JPN"]);
 const replaySessionBody = z
   .object({ fixtureId: z.string().min(1).max(80) })
   .strict();
