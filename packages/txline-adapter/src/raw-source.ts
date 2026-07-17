@@ -129,6 +129,10 @@ export function createTxlineRawScoreSource(
   const state = (name: TxlineRawSourceStateName, attempt: number) => {
     options.onState?.({ attempt, state: name });
   };
+
+  const isEventStream = (contentType: string) =>
+    contentType.split(";", 1)[0]?.trim().toLowerCase() ===
+    "text/event-stream";
   const warn = (
     code: TxlineRawSourceWarningCode,
     message: string,
@@ -165,7 +169,7 @@ export function createTxlineRawScoreSource(
       });
       if (authenticationObserved) state("reconciling", attempt);
       const contentType = response.headers.get("content-type") ?? "";
-      if (contentType.toLowerCase().includes("text/event-stream")) {
+      if (isEventStream(contentType)) {
         for (const frame of await framesFromResponse(response)) {
           let payloads: unknown[];
           try {
@@ -221,7 +225,7 @@ export function createTxlineRawScoreSource(
     });
     if (authenticationObserved) state("connecting", connectionAttempt);
     const contentType = response.headers.get("content-type") ?? "";
-    if (!contentType.toLowerCase().includes("text/event-stream")) {
+    if (!isEventStream(contentType)) {
       try {
         await response.body?.cancel();
       } catch (error) {

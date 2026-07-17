@@ -182,7 +182,9 @@ describe("raw TxLINE score source", () => {
       if (url.includes("/api/scores/historical/")) {
         return new Response("[]", {
           status: 200,
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": 'application/json; profile="text/event-stream"',
+          },
         });
       }
       return new Response(

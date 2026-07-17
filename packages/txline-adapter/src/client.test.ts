@@ -314,6 +314,50 @@ describe("authenticated TxLINE client", () => {
     expect(authenticationAttempt).toBe(2);
   });
 
+  it("does not let an abandoned authentication overwrite a newer JWT", async () => {
+    const firstController = new AbortController();
+    const authResolvers: Array<(response: Response) => void> = [];
+    const protectedAuthorizations: Array<string | null> = [];
+    const fetchImpl: typeof fetch = vi.fn(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/auth/guest/start")) {
+        return await new Promise<Response>((resolve) => {
+          authResolvers.push(resolve);
+        });
+      }
+      protectedAuthorizations.push(
+        new Headers(init?.headers).get("Authorization"),
+      );
+      return new Response("[]", { status: 200 });
+    });
+    const client = createTxlineAuthenticatedClient({
+      apiToken: "fixture-activated-server-token",
+      fetchImpl,
+    });
+
+    const abandoned = client.prepare({ signal: firstController.signal });
+    firstController.abort();
+    await expect(abandoned).rejects.toMatchObject({ name: "AbortError" });
+
+    const replacement = client.prepare();
+    authResolvers[1]?.(
+      new Response(JSON.stringify({ token: "fixture-current-jwt" }), {
+        status: 200,
+      }),
+    );
+    await replacement;
+
+    authResolvers[0]?.(
+      new Response(JSON.stringify({ token: "fixture-stale-jwt" }), {
+        status: 200,
+      }),
+    );
+    await Promise.resolve();
+    await client.get("/api/fixtures/snapshot");
+
+    expect(protectedAuthorizations).toEqual(["Bearer fixture-current-jwt"]);
+  });
+
   it("cancels every non-OK response body before retrying or throwing", async () => {
     let authCount = 0;
     let protectedCount = 0;

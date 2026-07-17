@@ -118,7 +118,9 @@ export function createTxlineAuthenticatedClient(
       if (typeof token !== "string" || token.length === 0) {
         throw new Error("TxLINE guest session returned no JWT");
       }
-      guestJwt = token;
+      if (guestFlight === flight && !flight.controller.signal.aborted) {
+        guestJwt = token;
+      }
       return token;
     })();
     guestFlight = flight;
