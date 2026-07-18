@@ -20,6 +20,13 @@ export interface TxlineRawRecord {
   payload: unknown;
 }
 
+export interface FetchTxlineHistoricalRecordsOptions {
+  client: TxlineAuthenticatedClient;
+  fixtureId: string;
+  now?: (() => string) | undefined;
+  signal?: AbortSignal | undefined;
+}
+
 /**
  * One committed SSE frame. Supplying this handler moves the durable boundary
  * from "record then cursor" to one downstream transaction that owns both.
@@ -81,6 +88,12 @@ function recordsFromJson(payload: unknown): unknown[] {
   return [payload];
 }
 
+function isEventStream(contentType: string) {
+  return (
+    contentType.split(";", 1)[0]?.trim().toLowerCase() === "text/event-stream"
+  );
+}
+
 function parseFrame(frame: TxlineSseFrame) {
   if (
     frame.event === "heartbeat" ||
@@ -123,6 +136,45 @@ async function framesFromResponse(response: Response) {
   return [...decoder.push(body), ...decoder.finish()];
 }
 
+export async function fetchTxlineHistoricalRecords(
+  options: FetchTxlineHistoricalRecordsOptions,
+): Promise<TxlineRawRecord[]> {
+  if (options.fixtureId.trim().length === 0) {
+    throw new Error("TxLINE fixture ID must not be empty");
+  }
+  const path = VERIFIED_TXLINE_DEVNET_ENDPOINTS.historicalScorePath(
+    options.fixtureId,
+  );
+  const now = options.now ?? (() => new Date().toISOString());
+  const response = await options.client.get(path, {
+    accept: "text/event-stream, application/json",
+    signal: options.signal,
+  });
+  const metadata = (sseEventId: string | null): TxlineRawRecordMetadata => ({
+    delivery: "reconciliation",
+    receivedAt: now(),
+    requestedFixtureId: options.fixtureId,
+    sourcePath: path,
+    sseEventId,
+  });
+
+  if (isEventStream(response.headers.get("content-type") ?? "")) {
+    const records: TxlineRawRecord[] = [];
+    for (const frame of await framesFromResponse(response)) {
+      for (const payload of parseFrame(frame)) {
+        records.push({ metadata: metadata(frame.id), payload });
+      }
+    }
+    return records;
+  }
+
+  const payload: unknown = await response.json();
+  return recordsFromJson(payload).map((record) => ({
+    metadata: metadata(null),
+    payload: record,
+  }));
+}
+
 export function createTxlineRawScoreSource(
   options: TxlineRawScoreSourceOptions,
 ) {
@@ -146,8 +198,6 @@ export function createTxlineRawScoreSource(
     options.onState?.({ attempt, state: name });
   };
 
-  const isEventStream = (contentType: string) =>
-    contentType.split(";", 1)[0]?.trim().toLowerCase() === "text/event-stream";
   const warn = (
     code: TxlineRawSourceWarningCode,
     message: string,

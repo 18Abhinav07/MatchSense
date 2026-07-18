@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createTxlineAuthenticatedClient,
   createTxlineRawScoreSource,
+  fetchTxlineHistoricalRecords,
 } from "./index.js";
 
 const historicalGoal = {
@@ -55,6 +56,211 @@ function openSseResponse(body: string, onCancel: () => void) {
     },
   );
 }
+
+describe("finite TxLINE historical record fetch", () => {
+  it("rejects a blank fixture ID before it can make a provider request", async () => {
+    const client = {
+      get: vi.fn(async () => {
+        throw new Error("The historical endpoint must not be called");
+      }),
+      prepare: vi.fn(),
+    };
+
+    await expect(
+      fetchTxlineHistoricalRecords({ client, fixtureId: "   " }),
+    ).rejects.toThrow("TxLINE fixture ID must not be empty");
+    expect(client.get).not.toHaveBeenCalled();
+  });
+
+  it("fetches a JSON array exactly once and preserves every reconciliation payload", async () => {
+    const fixtureId = "18257865";
+    const historicalPath = `/api/scores/historical/${fixtureId}`;
+    const first = { Action: "goal", Seq: 41 };
+    const second = { Update: { Action: "red_card", Seq: 42 } };
+    const requested: string[] = [];
+    const fetchImpl: typeof fetch = vi.fn(async (input) => {
+      const url = String(input);
+      requested.push(url);
+      if (url.endsWith("/auth/guest/start")) return authResponse();
+      if (url.endsWith(historicalPath)) {
+        return new Response(JSON.stringify([first, second]), {
+          status: 200,
+          headers: { "content-type": "application/json; charset=utf-8" },
+        });
+      }
+      throw new Error(`Unexpected URL ${url}`);
+    });
+
+    const records = await fetchTxlineHistoricalRecords({
+      client: createTxlineAuthenticatedClient({
+        apiToken: "fixture-activated-server-token",
+        fetchImpl,
+      }),
+      fixtureId,
+      now: () => "2026-07-18T12:00:00.000Z",
+    });
+
+    expect(
+      requested.filter((url) => url.endsWith(historicalPath)),
+    ).toHaveLength(1);
+    expect(requested).toHaveLength(2);
+    expect(records).toEqual([
+      {
+        metadata: {
+          delivery: "reconciliation",
+          receivedAt: "2026-07-18T12:00:00.000Z",
+          requestedFixtureId: fixtureId,
+          sourcePath: historicalPath,
+          sseEventId: null,
+        },
+        payload: first,
+      },
+      {
+        metadata: {
+          delivery: "reconciliation",
+          receivedAt: "2026-07-18T12:00:00.000Z",
+          requestedFixtureId: fixtureId,
+          sourcePath: historicalPath,
+          sseEventId: null,
+        },
+        payload: second,
+      },
+    ]);
+  });
+
+  it("wraps a JSON object unchanged as one reconciliation record", async () => {
+    const fixtureId = "18257739";
+    const historicalPath = `/api/scores/historical/${fixtureId}`;
+    const payload = { Action: "future_provider_action", Nested: { value: 1 } };
+    const client = {
+      get: vi.fn(
+        async () =>
+          new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+      prepare: vi.fn(),
+    };
+
+    const records = await fetchTxlineHistoricalRecords({
+      client,
+      fixtureId,
+      now: () => "2026-07-18T12:01:00.000Z",
+    });
+
+    expect(client.get).toHaveBeenCalledTimes(1);
+    expect(client.get).toHaveBeenCalledWith(historicalPath, {
+      accept: "text/event-stream, application/json",
+      signal: undefined,
+    });
+    expect(records).toEqual([
+      {
+        metadata: {
+          delivery: "reconciliation",
+          receivedAt: "2026-07-18T12:01:00.000Z",
+          requestedFixtureId: fixtureId,
+          sourcePath: historicalPath,
+          sseEventId: null,
+        },
+        payload,
+      },
+    ]);
+  });
+
+  it("parses a finite historical SSE body and retains each SSE id", async () => {
+    const fixtureId = "18257739";
+    const historicalPath = `/api/scores/historical/${fixtureId}`;
+    const first = { Action: "corner", Seq: 43 };
+    const second = { Action: "shot", Seq: 44 };
+    const client = {
+      get: vi.fn(
+        async () =>
+          new Response(
+            `id: historical:43\nevent: score\ndata: ${JSON.stringify(first)}\n\nid: historical:44\nevent: score\ndata: ${JSON.stringify(second)}\n\n`,
+            {
+              status: 200,
+              headers: { "content-type": "text/event-stream; charset=utf-8" },
+            },
+          ),
+      ),
+      prepare: vi.fn(),
+    };
+
+    const records = await fetchTxlineHistoricalRecords({
+      client,
+      fixtureId,
+      now: () => "2026-07-18T12:02:00.000Z",
+    });
+
+    expect(client.get).toHaveBeenCalledTimes(1);
+    expect(records).toEqual([
+      {
+        metadata: {
+          delivery: "reconciliation",
+          receivedAt: "2026-07-18T12:02:00.000Z",
+          requestedFixtureId: fixtureId,
+          sourcePath: historicalPath,
+          sseEventId: "historical:43",
+        },
+        payload: first,
+      },
+      {
+        metadata: {
+          delivery: "reconciliation",
+          receivedAt: "2026-07-18T12:02:00.000Z",
+          requestedFixtureId: fixtureId,
+          sourcePath: historicalPath,
+          sseEventId: "historical:44",
+        },
+        payload: second,
+      },
+    ]);
+  });
+
+  it("throws malformed archival SSE JSON instead of silently dropping it", async () => {
+    const client = {
+      get: vi.fn(
+        async () =>
+          new Response("id: historical:bad\nevent: score\ndata: {broken\n\n", {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          }),
+      ),
+      prepare: vi.fn(),
+    };
+
+    await expect(
+      fetchTxlineHistoricalRecords({
+        client,
+        fixtureId: "18257739",
+      }),
+    ).rejects.toThrow(SyntaxError);
+    expect(client.get).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates an authenticated non-success response", async () => {
+    const fixtureId = "18257739";
+    const historicalPath = `/api/scores/historical/${fixtureId}`;
+    const fetchImpl: typeof fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/auth/guest/start")) return authResponse();
+      if (url.endsWith(historicalPath))
+        return new Response(null, { status: 502 });
+      throw new Error(`Unexpected URL ${url}`);
+    });
+
+    await expect(
+      fetchTxlineHistoricalRecords({
+        client: createTxlineAuthenticatedClient({
+          apiToken: "fixture-activated-server-token",
+          fetchImpl,
+        }),
+        fixtureId,
+      }),
+    ).rejects.toMatchObject({ path: historicalPath, status: 502 });
+  });
+});
 
 describe("raw TxLINE score source", () => {
   it("reconciles JSON and SSE history before live, resumes the durable SSE cursor, and delivers unknown actions unchanged", async () => {
