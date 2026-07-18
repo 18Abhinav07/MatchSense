@@ -43,6 +43,7 @@ describe("MatchSense web product", () => {
 
     expect(markup).toContain("Every match has a pulse.");
     expect(markup).toContain("Skip intro");
+    expect(markup).toContain("persistent-listening-audio");
     expect(markup).not.toContain("SIMULATION");
     expect(markup).not.toContain("DEMO MODE");
   });

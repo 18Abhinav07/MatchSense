@@ -1,4 +1,5 @@
 import { AppRouter, type AppRouterProps } from "./routes/AppRouter.js";
+import { ListeningProvider } from "./ListeningProvider.js";
 
 export type AppProps = AppRouterProps;
 
@@ -8,5 +9,9 @@ export type AppProps = AppRouterProps;
  * match, archive, stream, or profile is not currently available.
  */
 export function App(props: AppProps = {}) {
-  return <AppRouter {...props} />;
+  return (
+    <ListeningProvider>
+      <AppRouter {...props} />
+    </ListeningProvider>
+  );
 }

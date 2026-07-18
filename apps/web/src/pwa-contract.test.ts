@@ -18,14 +18,17 @@ describe("installable PWA contract", () => {
     expect(manifest.icons?.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("never intercepts API or continuous MP3 stream requests", async () => {
+  it("never caches API, SSE, audio, range, or mutation requests", async () => {
     const serviceWorker = await readFile(
       new URL("../public/sw.js", import.meta.url),
       "utf8",
     );
 
     expect(serviceWorker).toContain('pathname.startsWith("/api/")');
-    expect(serviceWorker).toContain('pathname.endsWith("stream.mp3")');
+    expect(serviceWorker).toContain('pathname.endsWith(".mp3")');
+    expect(serviceWorker).toContain('accept.includes("text/event-stream")');
+    expect(serviceWorker).toContain('requestHeader(request, "range")');
+    expect(serviceWorker).not.toContain("skipWaiting");
     expect(serviceWorker).toContain("return;");
   });
 
@@ -45,7 +48,9 @@ describe("installable PWA contract", () => {
     expect(serviceWorker).toContain("existing.postMessage");
     expect(serviceWorker).toContain("existing.focus()");
     expect(serviceWorker).not.toContain("existing.navigate");
-    expect(notificationContract).toContain("momentId");
+    expect(notificationContract).toContain("familyId");
+    expect(notificationContract).toContain("intentId");
+    expect(notificationContract).toContain("kind");
     expect(notificationContract).toContain("revision");
     expect(notificationContract).toContain("momentIdentity");
   });

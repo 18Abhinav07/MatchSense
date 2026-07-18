@@ -32,83 +32,75 @@ beforeAll(async () => {
 
 const envelope = {
   body: "Argentina lead France 1–0 in the 23rd minute.",
+  familyId: "arg-fra:score:1-0",
   fixtureId: "arg-fra-demo",
-  identity: "arg-fra-demo:score:1-0:1",
-  momentId: "arg-fra-demo:score:1-0",
+  identity: "arg-fra:score:1-0:1",
+  intentId: "intent_0123456789abcdef",
+  kind: "moment",
+  momentId: "arg-fra:score:1-0",
   occurredAt: "2026-07-16T12:12:07.000Z",
   revision: 1,
+  route: "/matches/arg-fra-demo/moments/arg-fra%3Ascore%3A1-0%3A1",
   schemaVersion: 1,
+  tag: "matchsense:arg-fra-demo:arg-fra:score:1-0",
   title: "GOAL — ARGENTINA",
   type: "matchsense.moment",
 };
 
-describe("service-worker push presentation contract", () => {
-  it("renders a factual notification tagged by momentId:revision", () => {
+describe("service-worker PushPayloadV1 presentation contract", () => {
+  it("preserves the server's canonical Moment route and family replacement tag", () => {
     const presentation = contract.notificationFor(envelope);
 
     expect(presentation.title).toBe("GOAL — ARGENTINA");
     expect(presentation.options).toMatchObject({
       data: {
-        identity: "arg-fra-demo:score:1-0:1",
-        url: "/matches/arg-fra-demo/moments/arg-fra-demo%3Ascore%3A1-0%3A1",
+        familyId: "arg-fra:score:1-0",
+        identity: "arg-fra:score:1-0:1",
+        intentId: "intent_0123456789abcdef",
+        kind: "moment",
+        route: envelope.route,
+        url: envelope.route,
       },
-      tag: "matchsense:arg-fra-demo:score:1-0:1",
+      tag: "matchsense:arg-fra-demo:arg-fra:score:1-0",
       timestamp: Date.parse("2026-07-16T12:12:07.000Z"),
     });
   });
 
-  it("preserves an Experience fixture id with a colon in the exact Moment route", () => {
-    const experienceEnvelope = {
+  it("keeps a test delivery in its separate namespace while retaining its real target", () => {
+    const testEnvelope = {
       ...envelope,
-      fixtureId: "experience:run_abc123",
-      identity: "run_abc123:event:opening-goal:4",
-      momentId: "run_abc123:event:opening-goal",
-      revision: 4,
+      identity: "test:registration-1:arg-fra:score:1-0:1",
+      intentId: "test_0123456789abcdef",
+      kind: "test",
+      tag: "matchsense:test:registration-1:arg-fra-demo:arg-fra:score:1-0",
     };
 
-    const presentation = contract.notificationFor(experienceEnvelope);
+    const presentation = contract.notificationFor(testEnvelope);
 
-    expect(presentation.title).toBe("GOAL — ARGENTINA");
-    expect(presentation.options.data).toMatchObject({
-      fixtureId: "experience:run_abc123",
-      identity: "run_abc123:event:opening-goal:4",
-      url: "/matches/experience%3Arun_abc123/moments/run_abc123%3Aevent%3Aopening-goal%3A4",
+    expect(presentation.options).toMatchObject({
+      data: {
+        kind: "test",
+        route: envelope.route,
+      },
+      tag: "matchsense:test:registration-1:arg-fra-demo:arg-fra:score:1-0",
     });
     expect(
       contract.routeFromNotificationData(presentation.options.data),
     ).toMatchObject({
-      fixtureId: "experience:run_abc123",
-      url: "/matches/experience%3Arun_abc123/moments/run_abc123%3Aevent%3Aopening-goal%3A4",
+      fixtureId: "arg-fra-demo",
+      momentIdentity: "arg-fra:score:1-0:1",
+      url: envelope.route,
     });
   });
 
   it.each([
-    "experience/../../rooms",
-    "experience:..",
-    "experience:%2Frooms",
-    "experience\\rooms",
-  ])("rejects unsafe fixture id %s", (fixtureId) => {
-    const presentation = contract.notificationFor({
-      ...envelope,
-      fixtureId,
-    });
+    "/rooms/attacker",
+    "https://attacker.example/matches/a/moments/b",
+    "/matches/arg-fra-demo/moments/another%3A9",
+  ])("rejects an unsafe or mismatched server route %s", (route) => {
+    const presentation = contract.notificationFor({ ...envelope, route });
 
     expect(presentation.title).toBe("MatchSense update");
     expect(presentation.options.data).toEqual({ url: "/" });
-  });
-
-  it("refuses a mismatched identity and never trusts a supplied URL", () => {
-    const presentation = contract.notificationFor({
-      ...envelope,
-      identity: "another-moment:7",
-      url: "https://attacker.example/",
-    });
-    const route = contract.routeFromNotificationData({
-      ...presentation.options.data,
-      url: "https://attacker.example/",
-    });
-
-    expect(presentation.title).toBe("MatchSense update");
-    expect(route).toEqual({ url: "/" });
   });
 });

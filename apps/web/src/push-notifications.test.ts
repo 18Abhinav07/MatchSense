@@ -145,7 +145,7 @@ describe("browser push activation", () => {
 });
 
 describe("test Moment notifications", () => {
-  it("can preview through the service worker without pretending it is remote push", async () => {
+  it("keeps a local preview separate from a real Moment replacement tag", async () => {
     const showNotification = vi.fn(async () => undefined);
     await showLocalMomentNotification(moment, {
       pushManager: {} as PushManager,
@@ -156,9 +156,10 @@ describe("test Moment notifications", () => {
       moment.title,
       expect.objectContaining({
         data: expect.objectContaining({
+          kind: "test",
           identity: "arg-fra-demo:score:1-0:1",
         }),
-        tag: "matchsense:arg-fra-demo:score:1-0:1",
+        tag: "matchsense:preview:arg-fra-demo:arg-fra-demo:score:1-0",
       }),
     );
   });

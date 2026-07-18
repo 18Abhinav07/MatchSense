@@ -6,11 +6,24 @@ export interface SerializedPushSubscription {
 
 export interface MomentPushInput {
   body: string;
+  familyId?: string;
   fixtureId: string;
   momentId: string;
   occurredAt: string;
   revision: number;
   title: string;
+}
+
+/** Matches the factual server payload used by the service-worker contract. */
+export interface PushPayloadV1 extends MomentPushInput {
+  familyId: string;
+  identity: string;
+  intentId: string;
+  kind: "moment" | "test";
+  route: string;
+  schemaVersion: 1;
+  tag: string;
+  type: "matchsense.moment";
 }
 
 interface NotificationPermissionAdapter {
@@ -150,27 +163,32 @@ export async function enableMomentPush(options: {
 }
 
 export function momentDeepLink(input: MomentPushInput) {
-  const identity = `${input.momentId}:${input.revision}`;
+  const identity = `${input.familyId ?? input.momentId}:${input.revision}`;
   return `/matches/${encodeURIComponent(input.fixtureId)}/moments/${encodeURIComponent(identity)}`;
 }
 
 export function momentNotificationOptions(
   input: MomentPushInput,
 ): ServiceWorkerNotificationOptions {
-  const identity = `${input.momentId}:${input.revision}`;
+  const familyId = input.familyId ?? input.momentId;
+  const identity = `${familyId}:${input.revision}`;
+  const route = momentDeepLink({ ...input, familyId });
   return {
     body: input.body,
     data: {
+      familyId,
       fixtureId: input.fixtureId,
       identity,
-      momentId: input.momentId,
+      intentId: `preview_${input.fixtureId}_${familyId}_${input.revision}`,
+      kind: "test",
       momentIdentity: identity,
       revision: input.revision,
-      url: momentDeepLink(input),
+      route,
+      url: route,
     },
     icon: "/icons/matchsense-icon.svg",
     renotify: true,
-    tag: `matchsense:${identity}`,
+    tag: `matchsense:preview:${input.fixtureId}:${familyId}`,
     timestamp: Date.parse(input.occurredAt),
   };
 }
