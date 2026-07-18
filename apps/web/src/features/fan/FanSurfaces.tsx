@@ -18,13 +18,6 @@ export interface FanCardDraft {
   handle: string;
 }
 
-const FALLBACK_TEAM: ProductTeam = {
-  code: "ARG",
-  name: "Argentina",
-  primary: "#75aadb",
-  secondary: "#f4f1e8",
-};
-
 function avatarKey(team: ProductTeam, variant: string) {
   const suffix = variant.split("-").at(-1) ?? "pulse";
   return `${team.code.toLowerCase()}-${suffix}`;
@@ -221,11 +214,32 @@ export function ProfileCompletionOverlay({
   error: string | null;
   onComplete(draft: FanCardDraft): void;
 }) {
-  const teams = catalog.teams.length ? catalog.teams : [FALLBACK_TEAM];
-  const [teamCode, setTeamCode] = useState(teams[0]!.code);
+  const teams = catalog.teams;
+  const [teamCode, setTeamCode] = useState(teams[0]?.code ?? "");
   const [handle, setHandle] = useState("");
-  const team = teams.find(({ code }) => code === teamCode) ?? teams[0]!;
+  const team = teams.find(({ code }) => code === teamCode) ?? null;
   const valid = /^[A-Za-z0-9_]{3,24}$/u.test(handle.trim());
+
+  if (!team) {
+    return (
+      <div className="ms-completion-scrim">
+        <section
+          aria-label="Team catalogue unavailable"
+          aria-modal="true"
+          className="ms-completion-card"
+          role="dialog"
+        >
+          <p className="kicker">Supporter identity</p>
+          <h2>Team catalogue unavailable</h2>
+          <p>
+            MatchSense will not choose a team for you. Reconnect when the real
+            tournament catalogue is available.
+          </p>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="ms-completion-scrim">
       <section
@@ -319,8 +333,10 @@ export function ProfileSurface({
   onDeleted(): void;
   onSaved(fan: FanProfile): void;
 }) {
-  const teams = catalog.teams.length ? catalog.teams : [FALLBACK_TEAM];
-  const [teamCode, setTeamCode] = useState(fan.favoriteTeam ?? teams[0]!.code);
+  const teams = catalog.teams;
+  const [teamCode, setTeamCode] = useState(
+    fan.favoriteTeam ?? teams[0]?.code ?? "",
+  );
   const [handle, setHandle] = useState(fan.handle ?? "supporter");
   const [language, setLanguage] = useState(() =>
     textPreference(fan.preferences, "commentaryLanguage", "en"),
@@ -346,13 +362,14 @@ export function ProfileSurface({
   const [state, setState] = useState<
     "idle" | "saving" | "saved" | "error" | "confirm-delete" | "deleting"
   >("idle");
-  const team = teams.find(({ code }) => code === teamCode) ?? teams[0]!;
+  const team = teams.find(({ code }) => code === teamCode) ?? null;
   const avatarVariant = useMemo(
-    () => avatarKey(team, fan.avatarVariant ?? "pulse"),
+    () => (team ? avatarKey(team, fan.avatarVariant ?? "pulse") : ""),
     [fan.avatarVariant, team],
   );
 
   const save = async () => {
+    if (!team) return;
     setState("saving");
     try {
       const updated = await api.updateProfile({
@@ -392,6 +409,50 @@ export function ProfileSurface({
     }
   };
 
+  if (!team) {
+    return (
+      <main className="ms-profile" id="main-content">
+        <header className="ms-profile-header">
+          <button onClick={onBack} type="button">
+            ← Today
+          </button>
+          <span>YOU · PRIVATE FAN PROFILE</span>
+        </header>
+        <section className="ms-router-unavailable" role="status">
+          <p>
+            {teams.length
+              ? "Saved team unavailable"
+              : "Team catalogue unavailable"}
+          </p>
+          <span>
+            {teams.length
+              ? "MatchSense will not replace your saved team. Choose a real team to continue."
+              : "MatchSense will not replace your saved team with an invented team. Reconnect when the real tournament catalogue is available."}
+          </span>
+          {teams.length ? (
+            <label>
+              <span>Favorite team</span>
+              <select
+                aria-label="Choose a real team"
+                onChange={(event) => setTeamCode(event.target.value)}
+                value=""
+              >
+                <option disabled value="">
+                  Choose a real team
+                </option>
+                {teams.map((entry) => (
+                  <option key={entry.code} value={entry.code}>
+                    {entry.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="ms-profile" id="main-content">
       <header className="ms-profile-header">
@@ -403,12 +464,13 @@ export function ProfileSurface({
       <section className="ms-profile-hero">
         <FanAvatar handle={handle} team={team} variant={avatarVariant} />
         <div>
-          <p className="kicker">Your supporter identity</p>
+          <p className="kicker">SUPPORTER PROFILE</p>
           <h1>This is your MatchSense.</h1>
           <strong>@{handle}</strong>
           <span>
             <TeamFlag size="compact" team={team} /> {team.name}
           </span>
+          <small>SUPPORTER ID · {fan.id}</small>
         </div>
       </section>
       <section className="ms-profile-grid">

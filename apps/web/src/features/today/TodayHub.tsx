@@ -12,6 +12,7 @@ export interface TodayHubProps {
   favoriteTeam: string | null;
   fixtures: readonly LiveSnapshot[];
   onOpenFixture(fixtureId: string): void;
+  onOpenProfile(): void;
   onOpenReplays?: (() => void) | undefined;
   state: TodayHubState;
 }
@@ -70,6 +71,7 @@ export function TodayHub({
   favoriteTeam,
   fixtures,
   onOpenFixture,
+  onOpenProfile,
   onOpenReplays,
   state,
 }: TodayHubProps) {
@@ -95,6 +97,13 @@ export function TodayHub({
         </a>
         <div>
           <span>World Cup match desk</span>
+          <button
+            aria-label="Your profile"
+            onClick={onOpenProfile}
+            type="button"
+          >
+            Your profile
+          </button>
           {onOpenReplays ? (
             <button onClick={onOpenReplays} type="button">
               Recorded replays

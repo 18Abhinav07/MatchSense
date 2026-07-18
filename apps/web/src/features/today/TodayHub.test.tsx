@@ -64,6 +64,7 @@ describe("TodayHub", () => {
           },
         ],
         onOpenFixture: () => undefined,
+        onOpenProfile: () => undefined,
         state: "ready",
       }),
     );
@@ -84,6 +85,7 @@ describe("TodayHub", () => {
         favoriteTeam: null,
         fixtures: [],
         onOpenFixture: () => undefined,
+        onOpenProfile: () => undefined,
         state: "unavailable",
       }),
     );
@@ -99,11 +101,28 @@ describe("TodayHub", () => {
         favoriteTeam: null,
         fixtures: [],
         onOpenFixture: () => undefined,
+        onOpenProfile: () => undefined,
         onOpenReplays: () => undefined,
         state: "ready",
       }),
     );
 
     expect(markup).toContain("Recorded replays");
+  });
+
+  it("offers an accessible route to the fan's editable profile", () => {
+    const markup = renderToStaticMarkup(
+      createElement(TodayHub, {
+        catalog: { teams: [] },
+        favoriteTeam: null,
+        fixtures: [],
+        onOpenFixture: () => undefined,
+        onOpenProfile: () => undefined,
+        state: "ready",
+      }),
+    );
+
+    expect(markup).toContain("Your profile");
+    expect(markup).toContain('aria-label="Your profile"');
   });
 });

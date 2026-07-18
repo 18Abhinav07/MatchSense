@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { TeamFlag } from "../components/TeamFlag.js";
 import { MemorySourceNotice } from "../MemorySourceNotice.js";
 import {
   createFanProfileApi,
@@ -8,7 +7,7 @@ import {
   type FanProfile,
   type FanProfileApi,
 } from "../fan-profile.js";
-import { FanAvatar } from "../features/fan/FanSurfaces.js";
+import { ProfileSurface } from "../features/fan/FanSurfaces.js";
 import { MemorySurface } from "../features/memory/MemorySurface.js";
 import { MomentController } from "../features/moments/MomentController.js";
 import {
@@ -32,7 +31,6 @@ import {
   type MomentResolutionApi,
   type ProductApi,
   type ProductCatalog,
-  type ProductTeam,
 } from "../live-api.js";
 import {
   createMemoryApi,
@@ -137,80 +135,6 @@ function roomIdFrom(path: string) {
   const matched = /^\/rooms\/([^/]+)$/u.exec(path);
   const roomId = decodeRouteSegment(matched?.[1]);
   return roomId && /^[A-Za-z0-9_:.@-]+$/u.test(roomId) ? roomId : null;
-}
-
-function teamFor(
-  catalog: ProductCatalog,
-  code: string | null,
-): ProductTeam | null {
-  return catalog.teams.find((team) => team.code === code) ?? null;
-}
-
-function ProfileHub({
-  catalog,
-  onBack,
-  profile,
-}: {
-  catalog: ProductCatalog;
-  onBack(): void;
-  profile: FanProfile;
-}) {
-  const team = teamFor(catalog, profile.favoriteTeam);
-  return (
-    <main className="ms-profile-hub" id="main-content">
-      <header>
-        <button onClick={onBack} type="button">
-          Match day
-        </button>
-        <span>YOUR MATCHSENSE</span>
-      </header>
-      <section className="ms-profile-hub-card" aria-labelledby="profile-title">
-        {team ? (
-          <TeamFlag size="hero" team={team} />
-        ) : (
-          <span className="ms-profile-hub-mark" aria-hidden="true">
-            MS
-          </span>
-        )}
-        <div>
-          <p>SUPPORTER PROFILE</p>
-          <h1 id="profile-title">@{profile.handle ?? "supporter"}</h1>
-          <span>
-            {team
-              ? `${team.name} supporter`
-              : "Favourite team awaiting catalogue"}
-          </span>
-        </div>
-        {team ? (
-          <FanAvatar
-            handle={profile.handle ?? "supporter"}
-            team={team}
-            variant={
-              profile.avatarVariant ?? `${team.code.toLowerCase()}-pulse`
-            }
-          />
-        ) : null}
-      </section>
-      <section className="ms-profile-hub-details" aria-label="Profile details">
-        <article>
-          <span>SUPPORTER ID</span>
-          <b>{profile.id}</b>
-          <p>
-            This is the identity MatchSense uses for private follows and future
-            Room invitations.
-          </p>
-        </article>
-        <article>
-          <span>FAVOURITE TEAM</span>
-          <b>{team?.name ?? "Awaiting catalogue"}</b>
-          <p>
-            Your team is prioritised on Match Day when qualified fixtures are
-            available.
-          </p>
-        </article>
-      </section>
-    </main>
-  );
 }
 
 function OpeningShell() {
@@ -805,6 +729,7 @@ export function AppRouter({
         onOpenFixture={(fixtureId) =>
           navigate(`/matches/${encodeURIComponent(fixtureId)}`)
         }
+        onOpenProfile={() => navigate("/you")}
         onOpenReplays={() => navigate("/replays")}
         state={todayState}
       />
@@ -831,10 +756,17 @@ export function AppRouter({
 
   if (path === "/you") {
     return (
-      <ProfileHub
+      <ProfileSurface
+        api={profiles}
         catalog={catalog}
+        fan={profile}
         onBack={() => navigate("/")}
-        profile={profile}
+        onDeleted={() => {
+          setProfile(null);
+          setProfileState("ready");
+          navigate("/");
+        }}
+        onSaved={setProfile}
       />
     );
   }

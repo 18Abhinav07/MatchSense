@@ -7,6 +7,7 @@ import {
   FanAvatar,
   HandleStep,
   ProfileCompletionOverlay,
+  ProfileSurface,
 } from "./FanSurfaces.js";
 
 const argentina = {
@@ -14,6 +15,26 @@ const argentina = {
   name: "Argentina",
   primary: "#74acdf",
   secondary: "#f6f2e8",
+};
+
+const france = {
+  code: "FRA",
+  name: "France",
+  primary: "#203c7c",
+  secondary: "#f4f1e8",
+};
+
+const savedArgentinaFan = {
+  avatarVariant: "arg-pulse",
+  createdAt: "2026-07-18T00:00:00.000Z",
+  deletedAt: null,
+  favoriteTeam: "ARG",
+  handle: "matchfan",
+  handleNormalized: "matchfan",
+  id: "fan-42",
+  preferences: {},
+  profile: {},
+  updatedAt: "2026-07-18T00:00:00.000Z",
 };
 
 describe("fan identity surfaces", () => {
@@ -77,5 +98,36 @@ describe("fan identity surfaces", () => {
     expect(markup).toContain('role="dialog"');
     expect(markup).toContain("Finish your fan card");
     expect(markup).toContain("Your destination is ready behind this card");
+  });
+
+  it("does not create a fallback team while the real catalogue is unavailable", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ProfileCompletionOverlay, {
+        busy: false,
+        catalog: { teams: [] },
+        error: null,
+        onComplete: () => undefined,
+      }),
+    );
+
+    expect(markup).toContain("Team catalogue unavailable");
+    expect(markup).not.toContain("Argentina");
+  });
+
+  it("requires an explicit real-team reselect when the saved team is absent from the catalogue", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ProfileSurface, {
+        api: {} as never,
+        catalog: { teams: [france] },
+        fan: savedArgentinaFan,
+        onBack: () => undefined,
+        onDeleted: () => undefined,
+        onSaved: () => undefined,
+      }),
+    );
+
+    expect(markup).toContain("Saved team unavailable");
+    expect(markup).toContain("Choose a real team");
+    expect(markup).not.toContain("Save profile");
   });
 });

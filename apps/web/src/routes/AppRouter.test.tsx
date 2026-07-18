@@ -206,7 +206,29 @@ describe("truthful application router", () => {
 
     expect(markup).toContain("Live now");
     expect(markup).toContain("Argentina");
+    expect(markup).toContain("Your profile");
     expect(markup).not.toContain("DEMO MODE");
+  });
+
+  it("routes a completed supporter to the editable private profile surface", () => {
+    const markup = render({ initialPath: "/you" });
+
+    expect(markup).toContain("YOU · PRIVATE FAN PROFILE");
+    expect(markup).toContain("Save profile");
+    expect(markup).toContain("Delete profile");
+    expect(markup).toContain("Public handle");
+    expect(markup).toContain("SUPPORTER ID · fan-42");
+    expect(markup).not.toContain("Profile details");
+  });
+
+  it("does not invent a fallback team on the editable profile when the catalogue is unavailable", () => {
+    const markup = render({
+      initialCatalog: { teams: [] },
+      initialPath: "/you",
+    });
+
+    expect(markup).toContain("Team catalogue unavailable");
+    expect(markup).not.toContain("Argentina");
   });
 
   it("renders the exact Match Hub route without inventing its score", () => {
