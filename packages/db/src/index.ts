@@ -40,6 +40,24 @@ export type {
   RightsGrantWrite,
   VerifyArchiveInput,
 } from "./archive-repositories.js";
+export {
+  createArchiveImportJobRepository,
+  createFeaturedReplayRepository,
+} from "./archive-import-job-repository.js";
+export type {
+  ArchiveImportJob,
+  ArchiveImportJobInput,
+  ArchiveImportJobRepository,
+  ArchiveImportJobState,
+  ArchiveImportReason,
+  FeaturedReplayConfig,
+  FeaturedReplayConfigInput,
+  FeaturedReplayReady,
+  FeaturedReplayRepository,
+  MarkArchiveImportReplayReady,
+  RetryArchiveImportJob,
+  TerminalArchiveImportJob,
+} from "./archive-import-job-repository.js";
 export { createCommentaryJobRepository } from "./commentary-job-repository.js";
 export type {
   CommentaryJob,

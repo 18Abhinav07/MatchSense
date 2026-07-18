@@ -17,6 +17,7 @@ interface TestPostgresClient {
 
 type DatabaseModuleContract = {
   createApplicationDatabase?: (client: TestPostgresClient) => {
+    archiveImportJobs: { claim(input: string, now: Date): Promise<unknown> };
     check(): Promise<{
       databaseReachable: boolean;
       migrationsCurrent: boolean;
@@ -25,6 +26,7 @@ type DatabaseModuleContract = {
     commentaryArtifacts: { get(input: unknown): Promise<unknown> };
     experiences: { getRun(input: string): Promise<unknown> };
     fans: { getProfile(input: string): Promise<unknown> };
+    featuredReplays: { ready(input: string): Promise<unknown> };
     fixtureTruth: { get(input: unknown): Promise<unknown> };
     memories: { latestForFanFixture(input: unknown): Promise<unknown> };
     outbox: { hasConsumerReceipt(input: unknown): Promise<boolean> };
@@ -107,9 +109,11 @@ describe("PostgreSQL migration store", () => {
     const database = db.createApplicationDatabase?.(fake.client);
 
     expect(database?.fixtureTruth).toBeDefined();
+    expect(database?.archiveImportJobs).toBeDefined();
     expect(database?.commentaryArtifacts).toBeDefined();
     expect(database?.experiences).toBeDefined();
     expect(database?.fans).toBeDefined();
+    expect(database?.featuredReplays).toBeDefined();
     expect(database?.memories).toBeDefined();
     expect(database?.outbox).toBeDefined();
     expect(database?.pushDevices).toBeDefined();

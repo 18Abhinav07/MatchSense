@@ -50,7 +50,7 @@ const prefixCatalog = [
 
 describe("migration catalog and planning", () => {
   it("publishes a deterministic schema-only baseline migration", () => {
-    expect(db.migrationCatalog).toHaveLength(5);
+    expect(db.migrationCatalog).toHaveLength(6);
 
     const migration = db.migrationCatalog?.[0];
     expect(migration).toMatchObject({
@@ -214,7 +214,7 @@ describe("migration catalog and planning", () => {
   it("retires synthetic public modes and adds the authorised archive/job foundation in v4", () => {
     const migration = db.migrationCatalog?.[3];
 
-    expect(db.migrationCatalog).toHaveLength(5);
+    expect(db.migrationCatalog).toHaveLength(6);
     expect(migration).toMatchObject({
       description:
         "retire synthetic public modes and add authorised archive jobs",
@@ -313,6 +313,44 @@ describe("migration catalog and planning", () => {
     );
     expect(migration?.sql).not.toContain("fixture_id");
     expect(migration?.sql).not.toContain("payload jsonb");
+  });
+
+  it("adds durable archive-import leases and manifest-pinned featured replay readiness in v6", () => {
+    const migration = db.migrationCatalog?.[5];
+
+    expect(db.migrationCatalog).toHaveLength(6);
+    expect(migration).toMatchObject({
+      description:
+        "create durable archive import jobs and featured replay readiness",
+      version: 6,
+    });
+    expect(migration?.checksum).toBe(
+      createHash("sha256")
+        .update(migration?.sql ?? "")
+        .digest("hex"),
+    );
+    expect(migration?.sql).toMatch(
+      /CREATE TABLE matchsense\.archive_import_jobs \(/u,
+    );
+    expect(migration?.sql).toMatch(/fixture_id text PRIMARY KEY/u);
+    expect(migration?.sql).toMatch(/participant1_is_home boolean NOT NULL/u);
+    expect(migration?.sql).toMatch(
+      /context_hash text NOT NULL CHECK \(length\(context_hash\) = 64\)/u,
+    );
+    expect(migration?.sql).toContain(
+      "'featured_bootstrap', 'live_terminal', 'live_correction'",
+    );
+    expect(migration?.sql).toContain(
+      "'queued', 'claimed', 'retry_wait', 'replay_ready', 'blocked_rights', 'rejected'",
+    );
+    expect(migration?.sql).toContain(
+      "CREATE INDEX archive_import_jobs_claim_idx",
+    );
+    expect(migration?.sql).toContain(
+      "CREATE TABLE matchsense.featured_replay_configs",
+    );
+    expect(migration?.sql).toContain("archive_manifest_id text NOT NULL");
+    expect(migration?.sql).toContain("featured_replay_configs_manifest_fk");
   });
 
   it("orders pending migrations and reports a repeat run as current", () => {

@@ -844,6 +844,66 @@ CREATE TABLE matchsense.team_catalog_entries (
 CREATE INDEX team_catalog_entries_code_idx
   ON matchsense.team_catalog_entries (code ASC, participant_id ASC);`.trim(),
   ),
+  defineMigration(
+    6,
+    "create durable archive import jobs and featured replay readiness",
+    `CREATE TABLE matchsense.archive_import_jobs (
+  fixture_id text PRIMARY KEY CHECK (length(btrim(fixture_id)) > 0),
+  home_team_id text NOT NULL CHECK (length(btrim(home_team_id)) > 0),
+  away_team_id text NOT NULL CHECK (length(btrim(away_team_id)) > 0),
+  kickoff_at timestamptz NOT NULL,
+  participant1_is_home boolean NOT NULL,
+  context_hash text NOT NULL CHECK (length(context_hash) = 64),
+  reason text NOT NULL CHECK (reason IN (
+    'featured_bootstrap', 'live_terminal', 'live_correction'
+  )),
+  state text NOT NULL DEFAULT 'queued' CHECK (state IN (
+    'queued', 'claimed', 'retry_wait', 'replay_ready', 'blocked_rights', 'rejected'
+  )),
+  archive_manifest_id text,
+  attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  last_error text,
+  available_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  claimed_by text,
+  claim_expires_at timestamptz,
+  source_terminal_record_id text NOT NULL
+    CHECK (length(btrim(source_terminal_record_id)) > 0),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT archive_import_jobs_distinct_teams
+    CHECK (home_team_id <> away_team_id),
+  CONSTRAINT archive_import_jobs_claim_pair
+    CHECK ((claimed_by IS NULL) = (claim_expires_at IS NULL)),
+  CONSTRAINT archive_import_jobs_claimed_state
+    CHECK ((state = 'claimed') = (claimed_by IS NOT NULL)),
+  CONSTRAINT archive_import_jobs_replay_ready_manifest
+    CHECK ((state = 'replay_ready') = (archive_manifest_id IS NOT NULL)),
+  CONSTRAINT archive_import_jobs_manifest_fk
+    FOREIGN KEY (archive_manifest_id) REFERENCES matchsense.archive_manifests (id)
+);
+
+CREATE INDEX archive_import_jobs_claim_idx
+  ON matchsense.archive_import_jobs (available_at ASC, created_at ASC, fixture_id ASC)
+  WHERE state IN ('queued', 'retry_wait');
+CREATE INDEX archive_import_jobs_expired_claim_idx
+  ON matchsense.archive_import_jobs (claim_expires_at ASC, fixture_id ASC)
+  WHERE state = 'claimed';
+
+CREATE TABLE matchsense.featured_replay_configs (
+  slot text PRIMARY KEY CHECK (length(btrim(slot)) > 0),
+  fixture_id text NOT NULL CHECK (length(btrim(fixture_id)) > 0),
+  archive_manifest_id text NOT NULL,
+  enabled boolean NOT NULL DEFAULT true,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  CONSTRAINT featured_replay_configs_manifest_fk
+    FOREIGN KEY (archive_manifest_id) REFERENCES matchsense.archive_manifests (id)
+);
+
+CREATE INDEX featured_replay_configs_enabled_idx
+  ON matchsense.featured_replay_configs (slot ASC)
+  WHERE enabled;`.trim(),
+  ),
 ]);
 
 export function planMigrations(

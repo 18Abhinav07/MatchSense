@@ -5,6 +5,12 @@ import {
   type ArchiveRepository,
 } from "./archive-repositories.js";
 import {
+  createArchiveImportJobRepository,
+  createFeaturedReplayRepository,
+  type ArchiveImportJobRepository,
+  type FeaturedReplayRepository,
+} from "./archive-import-job-repository.js";
+import {
   createCommentaryJobRepository,
   type CommentaryJobRepository,
 } from "./commentary-job-repository.js";
@@ -61,10 +67,12 @@ export interface PostgresClient extends QueryExecutor {
 
 export interface ApplicationDatabase extends DatabaseRuntime {
   archive: ArchiveRepository;
+  archiveImportJobs: ArchiveImportJobRepository;
   commentaryArtifacts: CommentaryArtifactRepository;
   commentaryJobs: CommentaryJobRepository;
   experiences: ExperienceRepository;
   fans: FanRepository;
+  featuredReplays: FeaturedReplayRepository;
   fixtureReads: FixtureReadRepository;
   fixtureTruth: FixtureTruthRepository;
   memories: MemoryRepository;
@@ -182,10 +190,12 @@ export function createApplicationDatabase(
 
   return Object.assign(runtime, {
     archive: createArchiveRepository(client),
+    archiveImportJobs: createArchiveImportJobRepository(client),
     commentaryArtifacts: createCommentaryArtifactRepository(client),
     commentaryJobs: createCommentaryJobRepository(client),
     experiences: createExperienceRepository(client),
     fans: createFanRepository(client),
+    featuredReplays: createFeaturedReplayRepository(client),
     fixtureReads: createFixtureReadRepository(client),
     fixtureTruth: createFixtureTruthRepository(client),
     memories: createMemoryRepository(client),

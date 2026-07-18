@@ -171,8 +171,8 @@ describe.sequential("real PostgreSQL migration runtime", () => {
     const runtime = trackedDatabase();
 
     await expect(runtime.migrate()).resolves.toEqual({
-      appliedVersions: [1, 2, 3, 4, 5],
-      currentVersion: 5,
+      appliedVersions: [1, 2, 3, 4, 5, 6],
+      currentVersion: 6,
     });
     await expect(runtime.check()).resolves.toEqual({
       databaseReachable: true,
@@ -180,7 +180,7 @@ describe.sequential("real PostgreSQL migration runtime", () => {
     });
     await expect(runtime.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 5,
+      currentVersion: 6,
     });
 
     const schemas = await admin.unsafe<{ schema_name: string }[]>(
@@ -192,7 +192,7 @@ describe.sequential("real PostgreSQL migration runtime", () => {
       "SELECT version, checksum, applied_at FROM public.matchsense_schema_migrations ORDER BY version;",
     );
     expect(schemas).toHaveLength(1);
-    expect(ledger).toHaveLength(5);
+    expect(ledger).toHaveLength(6);
     expect(ledger).toEqual([
       expect.objectContaining({
         checksum: migrationCatalog[0]?.checksum,
@@ -213,6 +213,10 @@ describe.sequential("real PostgreSQL migration runtime", () => {
       expect.objectContaining({
         checksum: migrationCatalog[4]?.checksum,
         version: 5,
+      }),
+      expect.objectContaining({
+        checksum: migrationCatalog[5]?.checksum,
+        version: 6,
       }),
     ]);
     expect(ledger.every(({ applied_at }) => applied_at instanceof Date)).toBe(
@@ -315,6 +319,117 @@ VALUES ('invalid-team', 'INV', 'Invalid Team', 0, 'recorded', 'other');`,
     ).rejects.toMatchObject({ code: "23514" });
   });
 
+  it("preserves a frozen archive-import context while leasing, recovering, and retrying work", async () => {
+    const runtime = trackedDatabase();
+    await runtime.migrate();
+    const queued = await runtime.archiveImportJobs.enqueue({
+      awayTeamId: "ESP",
+      contextHash: "a".repeat(64),
+      fixtureId: "archive-job-fx-1",
+      homeTeamId: "FRA",
+      kickoffAt: "2026-07-18T12:00:00.000Z",
+      participant1IsHome: true,
+      reason: "featured_bootstrap",
+      sourceTerminalRecordId: "terminal-record-1",
+    });
+    const duplicate = await runtime.archiveImportJobs.enqueue({
+      awayTeamId: "ARG",
+      contextHash: "b".repeat(64),
+      fixtureId: queued.fixtureId,
+      homeTeamId: "BRA",
+      kickoffAt: "2030-01-01T00:00:00.000Z",
+      participant1IsHome: false,
+      reason: "featured_bootstrap",
+      sourceTerminalRecordId: "terminal-record-1",
+    });
+    expect(duplicate).toMatchObject({
+      awayTeamId: "ESP",
+      contextHash: "a".repeat(64),
+      homeTeamId: "FRA",
+      kickoffAt: "2026-07-18T12:00:00.000Z",
+      participant1IsHome: true,
+      reason: "featured_bootstrap",
+      sourceTerminalRecordId: "terminal-record-1",
+      state: "queued",
+    });
+    const correction = await runtime.archiveImportJobs.enqueue({
+      awayTeamId: "ARG",
+      contextHash: "b".repeat(64),
+      fixtureId: queued.fixtureId,
+      homeTeamId: "BRA",
+      kickoffAt: "2030-01-01T00:00:00.000Z",
+      participant1IsHome: false,
+      reason: "live_correction",
+      sourceTerminalRecordId: "terminal-record-correction-1",
+    });
+    expect(correction).toMatchObject({
+      awayTeamId: "ESP",
+      contextHash: "a".repeat(64),
+      homeTeamId: "FRA",
+      kickoffAt: "2026-07-18T12:00:00.000Z",
+      participant1IsHome: true,
+      reason: "live_correction",
+      sourceTerminalRecordId: "terminal-record-correction-1",
+      state: "queued",
+    });
+
+    const claimed = await runtime.archiveImportJobs.claim(
+      "archive-worker-a",
+      new Date("2026-07-18T12:00:00.000Z"),
+    );
+    expect(claimed).toMatchObject({
+      attemptCount: 1,
+      claimedBy: "archive-worker-a",
+      fixtureId: queued.fixtureId,
+      state: "claimed",
+    });
+    await expect(
+      runtime.archiveImportJobs.recoverExpiredClaims(
+        new Date("2026-07-18T12:03:00.000Z"),
+      ),
+    ).resolves.toBe(1);
+    const reclaimed = await runtime.archiveImportJobs.claim(
+      "archive-worker-b",
+      new Date("2026-07-18T12:03:00.000Z"),
+    );
+    expect(reclaimed).toMatchObject({
+      attemptCount: 2,
+      claimedBy: "archive-worker-b",
+      state: "claimed",
+    });
+    await expect(
+      runtime.archiveImportJobs.markRetry({
+        availableAt: "2026-07-18T12:10:00.000Z",
+        error: "temporary history timeout",
+        fixtureId: queued.fixtureId,
+        workerId: "archive-worker-b",
+      }),
+    ).resolves.toMatchObject({
+      claimedBy: null,
+      lastError: "temporary history timeout",
+      state: "retry_wait",
+    });
+    await expect(
+      admin.unsafe<
+        {
+          away_team_id: string;
+          context_hash: string;
+          home_team_id: string;
+          participant1_is_home: boolean;
+        }[]
+      >(`SELECT home_team_id, away_team_id, participant1_is_home, context_hash
+FROM matchsense.archive_import_jobs
+WHERE fixture_id = 'archive-job-fx-1';`),
+    ).resolves.toEqual([
+      {
+        away_team_id: "ESP",
+        context_hash: "a".repeat(64),
+        home_team_id: "FRA",
+        participant1_is_home: true,
+      },
+    ]);
+  });
+
   it("upgrades a populated v3 immutable raw row and restores its immutability in v4", async () => {
     await seedV3MigrationLedger();
     await admin.unsafe(`INSERT INTO matchsense.fixtures (
@@ -337,8 +452,8 @@ VALUES (
 
     const runtime = trackedDatabase();
     await expect(runtime.migrate()).resolves.toEqual({
-      appliedVersions: [4, 5],
-      currentVersion: 5,
+      appliedVersions: [4, 5, 6],
+      currentVersion: 6,
     });
 
     const rows = await admin.unsafe<
