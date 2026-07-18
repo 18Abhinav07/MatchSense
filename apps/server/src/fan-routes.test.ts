@@ -213,6 +213,29 @@ describe("fan identity and profile routes", () => {
     await app.close();
   });
 
+  it("deletes an authenticated profile without a request body and clears its cookies", async () => {
+    const deps = harness();
+    const app = Fastify();
+    registerFanRoutes(app, deps);
+    const headers = await fanMutationHeaders(app);
+
+    const removed = await app.inject({
+      headers,
+      method: "DELETE",
+      url: "/api/v1/profile",
+    });
+
+    expect(removed.statusCode).toBe(204);
+    expect(deps.repository.deleteFan).toHaveBeenCalledWith("fan-1");
+    expect(removed.headers["set-cookie"]).toEqual(
+      expect.arrayContaining([
+        "matchsense_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax",
+        "matchsense_csrf=; Path=/; Max-Age=0; SameSite=Strict",
+      ]),
+    );
+    await app.close();
+  });
+
   it("follows a public live TxLINE upcoming fixture", async () => {
     const deps = harness();
     const app = Fastify();

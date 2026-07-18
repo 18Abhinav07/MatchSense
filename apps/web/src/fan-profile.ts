@@ -186,12 +186,12 @@ export function createFanProfileApi(
     return normalizeFan(payload?.fan);
   };
 
-  const mutationHeaders = () => {
+  const mutationHeaders = (hasJsonBody = true) => {
     const csrf = issuedCsrf ?? csrfFromCookie(cookieSource());
     if (!csrf) throw new FanProfileError("csrf_missing", 403);
     return {
       Accept: "application/json",
-      "Content-Type": "application/json",
+      ...(hasJsonBody ? { "Content-Type": "application/json" } : {}),
       "x-matchsense-csrf": csrf,
     };
   };
@@ -220,7 +220,7 @@ export function createFanProfileApi(
     deleteProfile: async () => {
       const response = await fetcher("/api/v1/profile", {
         credentials: "same-origin",
-        headers: mutationHeaders(),
+        headers: mutationHeaders(false),
         method: "DELETE",
       });
       if (!response.ok) throw await failure(response);

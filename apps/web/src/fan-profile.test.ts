@@ -140,6 +140,33 @@ describe("fan profile client", () => {
     );
   });
 
+  it("sends an authenticated bodyless request when deleting a profile", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const api = createFanProfileApi({
+      cookieSource: () => "matchsense_csrf=csrf%20token",
+      fetcher,
+    });
+
+    await api.deleteProfile();
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/profile",
+      expect.objectContaining({
+        credentials: "same-origin",
+        headers: expect.objectContaining({
+          Accept: "application/json",
+          "x-matchsense-csrf": "csrf token",
+        }),
+        method: "DELETE",
+      }),
+    );
+    expect(fetcher.mock.calls[0]?.[1]?.headers).not.toHaveProperty(
+      "Content-Type",
+    );
+  });
+
   it("surfaces handle conflicts as a stable client error", async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify({ error: "handle_unavailable" }), {
