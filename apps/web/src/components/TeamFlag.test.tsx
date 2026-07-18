@@ -4,6 +4,38 @@ import { describe, expect, it } from "vitest";
 
 import { BUNDLED_FLAG_CODES, TeamFlag } from "./TeamFlag.js";
 
+const CURRENT_TOURNAMENT_CODES = [
+  "ALG",
+  "ARG",
+  "AUS",
+  "AUT",
+  "BEL",
+  "BIH",
+  "BRA",
+  "CAN",
+  "CIV",
+  "COD",
+  "COL",
+  "CPV",
+  "CRO",
+  "ECU",
+  "EGY",
+  "ENG",
+  "ESP",
+  "FRA",
+  "GHA",
+  "MAR",
+  "MEX",
+  "NED",
+  "NOR",
+  "PAR",
+  "POR",
+  "SEN",
+  "SUI",
+  "SWE",
+  "USA",
+] as const;
+
 const argentina = {
   code: "ARG",
   name: "Argentina",
@@ -21,41 +53,21 @@ describe("TeamFlag", () => {
 
       expect(markup).toContain(`ms-team-flag--${size}`);
       expect(markup).toContain('aria-label="Argentina flag"');
+      expect(markup).toContain('data-flag-frame="3:2"');
+      expect(markup).toContain('data-flag-shape="rectangular"');
       expect(markup).toContain('data-flag-code="ARG"');
       expect(markup).toContain("ms-team-flag__art");
+      expect(markup).toContain("ms-team-flag__weave");
+      expect(markup).toContain('aria-hidden="true"');
       expect(markup).toContain("<svg");
       expect(markup).not.toContain("ms-team-flag__textile");
       expect(markup).not.toContain("<img");
     },
   );
 
-  it("bundles every product-catalog flag and a broad 2026 team set", () => {
+  it("bundles artwork for every current real tournament participant", () => {
     expect(BUNDLED_FLAG_CODES).toEqual(
-      expect.arrayContaining([
-        "ARG",
-        "BRA",
-        "ENG",
-        "ESP",
-        "FRA",
-        "JPN",
-        "GER",
-        "POR",
-        "NED",
-        "BEL",
-        "BIH",
-        "ITA",
-        "CRO",
-        "URU",
-        "COL",
-        "USA",
-        "CAN",
-        "MEX",
-        "MAR",
-        "SEN",
-        "KOR",
-        "AUS",
-        "NZL",
-      ]),
+      expect.arrayContaining([...CURRENT_TOURNAMENT_CODES]),
     );
     expect(new Set(BUNDLED_FLAG_CODES).size).toBe(BUNDLED_FLAG_CODES.length);
 
@@ -71,7 +83,10 @@ describe("TeamFlag", () => {
         }),
       );
       expect(markup, code).toContain(`data-flag-code="${code}"`);
+      expect(markup, code).toContain('data-flag-frame="3:2"');
+      expect(markup, code).toContain('data-flag-shape="rectangular"');
       expect(markup, code).toContain("<svg");
+      expect(markup, code).toContain("ms-team-flag__weave");
       expect(markup, code).not.toContain("ms-team-flag__textile");
     }
   });
@@ -89,6 +104,7 @@ describe("TeamFlag", () => {
     );
 
     expect(markup).toContain("ms-team-flag__textile");
+    expect(markup).toContain("ms-team-flag__weave");
     expect(markup).not.toContain("<svg");
   });
 
@@ -108,6 +124,7 @@ describe("TeamFlag", () => {
 
     expect(markup).toContain('src="/flags/nation-25.svg"');
     expect(markup).toContain('alt=""');
+    expect(markup).toContain("ms-team-flag__weave");
     expect(markup).not.toContain("ms-team-flag__textile");
   });
 });

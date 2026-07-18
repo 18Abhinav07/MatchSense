@@ -27,6 +27,28 @@
   pointer-events: none;
 }
 
+.ms-team-flag__weave {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  opacity: 0.38;
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      transparent 0 2px,
+      rgb(255 255 255 / 18%) 2px 3px,
+      transparent 3px 5px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      transparent 0 3px,
+      rgb(6 22 15 / 18%) 3px 4px,
+      transparent 4px 6px
+    );
+  mix-blend-mode: soft-light;
+}
+
 .ms-team-flag--compact {
   width: 2rem;
 }

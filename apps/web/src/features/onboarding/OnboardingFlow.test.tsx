@@ -1,5 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { OnboardingFlow } from "./OnboardingFlow.js";
@@ -12,6 +13,20 @@ const argentina = {
 };
 
 describe("OnboardingFlow", () => {
+  it("keeps the pitch intro copy white and readable against its green field", () => {
+    const stylesheet = readFileSync(
+      new URL("./onboarding.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(stylesheet).toMatch(
+      /\.ms-onboarding--intro\s*\{[\s\S]*?color:\s*#ffffff;/u,
+    );
+    expect(stylesheet).toMatch(
+      /\.ms-onboarding-intro-copy h1\s*\{[\s\S]*?color:\s*#ffffff;/u,
+    );
+  });
+
   it("makes the real team choice the first durable profile action", () => {
     const markup = renderToStaticMarkup(
       createElement(OnboardingFlow, {

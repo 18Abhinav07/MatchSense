@@ -34,6 +34,8 @@ export function TeamFlag({
     <span
       aria-label={`${team.name} flag`}
       className={classes}
+      data-flag-frame="3:2"
+      data-flag-shape="rectangular"
       role="img"
       style={
         {
@@ -50,6 +52,7 @@ export function TeamFlag({
       ) : (
         <span aria-hidden="true" className="ms-team-flag__textile" />
       )}
+      <span aria-hidden="true" className="ms-team-flag__weave" />
     </span>
   );
 }
