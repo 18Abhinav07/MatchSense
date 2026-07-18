@@ -1,242 +1,738 @@
-import {
-  type CSSProperties,
-  type FormEvent,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
+import { type FormEvent, useEffect, useState } from "react";
 
 import { TeamFlag } from "../../components/TeamFlag.js";
+import type { ProductTeam } from "../../live-api.js";
+
+import {
+  assignCallThreeConfidence,
+  createInitialCallThreeDraft,
+  isCallThreeDraftComplete,
+  selectCallThreeAnswer,
+  toCallThreeSubmission,
+  type CallThreeConfidence,
+  type CallThreeDraft,
+  type CallThreeTarget,
+} from "./model.js";
+import type {
+  CallThreeRoomApi,
+  CallThreeRoomView,
+  RoomCreationFixture,
+  RoomExperienceRoute,
+  RoomInvitePreview,
+  RoomMember,
+  RoomStatus,
+} from "./types.js";
 
 import "./rooms.css";
 
-import {
-  createInitialSenseDraft,
-  createSenseDraftFromSlate,
-  isSenseDraftComplete,
-  moveSense,
-  selectSenseOption,
-  senseAllocated,
-  toSensePicks,
-  type SenseDraft,
-} from "./model.js";
-import type {
-  ReactionType,
-  RoomApi,
-  RoomExperienceRoute,
-  RoomFixture,
-  RoomMember,
-  RoomTeam,
-  RoomView,
-  SenseMarket,
-} from "./types.js";
-
 export interface RoomExperienceProps {
-  readonly api: RoomApi;
-  readonly onClose?: () => void;
-  readonly onExit?: () => void;
-  readonly onOpenMatch?: (fixtureId: string) => void;
-  readonly onOpenRoom?: (roomId: string) => void;
+  readonly api: CallThreeRoomApi;
+  readonly defaultNickname: string;
+  readonly favoriteTeam: string | null;
+  readonly onExit?: (() => void) | undefined;
+  readonly onOpenRoom?: ((roomId: string) => void) | undefined;
   readonly route: RoomExperienceRoute;
+  readonly teams: readonly ProductTeam[];
 }
 
-const REACTIONS: readonly { type: ReactionType; label: string }[] = [
-  { type: "roar", label: "ROAR" },
-  { type: "cold", label: "COLD" },
-  { type: "called_it", label: "CALLED IT" },
-];
+const FALLBACK_TEAM_COLORS: Readonly<Record<string, ProductTeam>> = {
+  ARG: {
+    code: "ARG",
+    name: "Argentina",
+    primary: "#78bde9",
+    secondary: "#f5f0df",
+  },
+  BRA: {
+    code: "BRA",
+    name: "Brazil",
+    primary: "#ddc94c",
+    secondary: "#1c8a4d",
+  },
+  ENG: {
+    code: "ENG",
+    name: "England",
+    primary: "#f7f5ed",
+    secondary: "#c92232",
+  },
+  ESP: { code: "ESP", name: "Spain", primary: "#bf2434", secondary: "#edc64a" },
+  FRA: {
+    code: "FRA",
+    name: "France",
+    primary: "#1d4d91",
+    secondary: "#e9eceb",
+  },
+  JPN: { code: "JPN", name: "Japan", primary: "#f5f1e8", secondary: "#c63a4d" },
+};
 
-function teamStyle(team: RoomTeam): CSSProperties {
-  return {
-    "--msr-team": team.primary,
-    "--msr-team-ink": team.foreground ?? "#0b0d0c",
-    "--msr-team-secondary": team.secondary,
-  } as CSSProperties;
+const REACTION_LABELS = [
+  ["ROAR", "ROAR"],
+  ["COLD", "COLD"],
+  ["CALLED_IT", "CALLED IT"],
+] as const;
+
+function teamFor(code: string, teams: readonly ProductTeam[]): ProductTeam {
+  return (
+    teams.find((team) => team.code === code) ??
+    FALLBACK_TEAM_COLORS[code] ?? {
+      code,
+      name: code,
+      primary: "#7a897c",
+      secondary: "#eae5d8",
+    }
+  );
 }
 
-function formatKickoff(value: string) {
-  const time = Date.parse(value);
-  if (!Number.isFinite(time)) return "Kickoff pending";
+function timeLabel(value: number | string) {
+  const at = typeof value === "number" ? value : Date.parse(value);
+  if (!Number.isFinite(at)) return "Kickoff time unavailable";
   return new Intl.DateTimeFormat(undefined, {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
     month: "short",
-  }).format(time);
+  }).format(at);
 }
 
-function errorText(error: unknown) {
-  return error instanceof Error ? error.message : "The room could not update.";
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "The Room could not update.";
 }
 
-function initials(name: string) {
-  return name
-    .split(/\s+/u)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("");
+function roomStatusLabel(status: RoomStatus) {
+  if (status === "PRE_KICKOFF") return "PRE-KICKOFF";
+  if (status === "LIVE") return "LIVE · PROVISIONAL";
+  return "VERIFIED FINAL";
+}
+
+function isEligibleFixture(fixture: RoomCreationFixture) {
+  const kickoffAt = fixture.kickoffAt
+    ? Date.parse(fixture.kickoffAt)
+    : Number.NaN;
+  return (
+    fixture.provenance === "live_txline" &&
+    fixture.mode !== "recorded" &&
+    fixture.lifecycle === "SCHEDULED" &&
+    (fixture.phase === undefined || fixture.phase === "scheduled") &&
+    Number.isFinite(kickoffAt) &&
+    kickoffAt > Date.now()
+  );
+}
+
+function callsToDraft(room: CallThreeRoomView): CallThreeDraft {
+  if (!room.myCalls) return createInitialCallThreeDraft();
+  return {
+    cards: room.myCalls.calls.cards,
+    goals: room.myCalls.calls.goals,
+    result: room.myCalls.calls.result,
+  };
 }
 
 function Header({
   label,
   onExit,
 }: {
-  label: string;
-  onExit: (() => void) | undefined;
+  readonly label: string;
+  readonly onExit: (() => void) | undefined;
 }) {
   return (
     <header className="msr-header">
       <span className="msr-wordmark">
-        Match<b>Sense</b>
+        Match<span>Sense</span>
       </span>
-      <span className="msr-header-state">{label}</span>
+      <span className="msr-header-status">{label}</span>
       {onExit ? (
-        <button
-          aria-label="Close room"
-          className="msr-close"
-          onClick={onExit}
-          type="button"
-        >
-          <span />
-          <span />
+        <button className="msr-quiet-button" onClick={onExit} type="button">
+          Back to Match Day
         </button>
       ) : null}
     </header>
   );
 }
 
-export function PointsNotice() {
-  return (
-    <aside className="msr-sense-notice">
-      <span>100 free Sense each</span>
-      <b>FRIEND SENSE · NO MONEY · NO PRIZES</b>
-      <small>Not purchasable, transferable, or redeemable.</small>
-    </aside>
-  );
-}
-
-export function FixtureBanner({ fixture }: { fixture: RoomFixture }) {
+function FixtureStrip({
+  fixture,
+  teams,
+}: {
+  readonly fixture: {
+    readonly awayTeam: string;
+    readonly homeTeam: string;
+    readonly kickoffAt: string;
+  };
+  readonly teams: readonly ProductTeam[];
+}) {
+  const home = teamFor(fixture.homeTeam, teams);
+  const away = teamFor(fixture.awayTeam, teams);
   return (
     <section
-      className="msr-fixture msr-sense-fixture"
-      aria-label={`${fixture.homeTeam.name} versus ${fixture.awayTeam.name}`}
+      className="msr-fixture-strip"
+      aria-label={`${home.name} versus ${away.name}`}
     >
-      <div className="msr-team-lockup" style={teamStyle(fixture.homeTeam)}>
-        <TeamFlag size="standard" team={fixture.homeTeam} />
-        <span>{fixture.homeTeam.code}</span>
-        <b>{fixture.homeTeam.name}</b>
+      <div className="msr-fixture-team">
+        <TeamFlag size="standard" team={home} />
+        <div>
+          <b>{home.code}</b>
+          <span>{home.name}</span>
+        </div>
       </div>
-      <div className="msr-fixture-center">
-        <strong>V</strong>
-        <span>{formatKickoff(fixture.kickoffAt)}</span>
+      <div className="msr-fixture-time">
+        <b>V</b>
+        <span>{timeLabel(fixture.kickoffAt)}</span>
       </div>
-      <div
-        className="msr-team-lockup is-away"
-        style={teamStyle(fixture.awayTeam)}
-      >
-        <TeamFlag size="standard" team={fixture.awayTeam} />
-        <span>{fixture.awayTeam.code}</span>
-        <b>{fixture.awayTeam.name}</b>
+      <div className="msr-fixture-team is-away">
+        <div>
+          <b>{away.code}</b>
+          <span>{away.name}</span>
+        </div>
+        <TeamFlag size="standard" team={away} />
       </div>
     </section>
   );
 }
 
-function DoorForm({
-  fixture,
-  initialName,
-  initialNickname,
-  inviteHost,
-  experience,
-  opponents,
-  busy,
-  error,
-  onSubmit,
-  onExit,
-}: {
-  fixture: RoomFixture;
-  initialName: string;
-  initialNickname: string;
-  inviteHost?: string;
-  experience?: boolean;
-  opponents?: readonly RoomTeam[];
-  busy: boolean;
-  error: string | null;
-  onSubmit(name: string, nickname: string, awayTeam?: string): void;
-  onExit: (() => void) | undefined;
-}) {
-  const [name, setName] = useState(initialName);
-  const [nickname, setNickname] = useState(initialNickname);
-  const [awayTeam, setAwayTeam] = useState(
-    opponents?.[0]?.code ?? fixture.awayTeam.code,
-  );
-  const shownFixture = opponents?.length
-    ? {
-        ...fixture,
-        awayTeam:
-          opponents.find((team) => team.code === awayTeam) ?? fixture.awayTeam,
-      }
-    : fixture;
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    onSubmit(name, nickname, awayTeam);
-  };
+function PointsBand({ room }: { readonly room: CallThreeRoomView }) {
   return (
-    <div
-      className="msr-stage msr-stage--door"
-      data-room-stage={
-        inviteHost ? "invite" : experience ? "experience-create" : "create"
-      }
-    >
-      <Header
-        label={
-          inviteHost
-            ? "Room invite"
-            : experience
-              ? "Experience with friends"
-              : "Create room"
-        }
-        onExit={onExit}
-      />
-      <div className="msr-title-block">
-        <p className="msr-kicker">
-          {inviteHost
-            ? `${inviteHost} invited you`
-            : experience
-              ? "Your team · your friends · live in five"
-              : "A private match ritual"}
-        </p>
-        <h1>
-          {inviteHost
-            ? "Enter match night."
-            : experience
-              ? "Start a five-minute match night."
-              : "Put 100 Sense where your instinct is."}
-        </h1>
-        <p>
-          Five calls. Your friends. Picks stay secret until kickoff, then every
-          swing lands together.
-        </p>
+    <aside className="msr-points-band">
+      <span>{room.points.label}</span>
+      <b>{room.points.lifetimeTotal} lifetime</b>
+      <small>{room.points.roomPoints} from this Room</small>
+    </aside>
+  );
+}
+
+function CallCard({
+  disabled,
+  draft,
+  label,
+  options,
+  target,
+  onAnswer,
+  onConfidence,
+}: {
+  readonly disabled: boolean;
+  readonly draft: CallThreeDraft;
+  readonly label: string;
+  readonly options: readonly {
+    readonly label: string;
+    readonly value: string;
+  }[];
+  readonly target: CallThreeTarget;
+  readonly onAnswer: (value: string) => void;
+  readonly onConfidence: (value: CallThreeConfidence) => void;
+}) {
+  const entry = draft[target];
+  return (
+    <article className="msr-call-card">
+      <header>
+        <span>
+          {target === "result"
+            ? "CALL 01"
+            : target === "goals"
+              ? "CALL 02"
+              : "CALL 03"}
+        </span>
+        <b>{label}</b>
+      </header>
+      <div className="msr-option-row" role="group" aria-label={label}>
+        {options.map((option) => (
+          <button
+            className={entry.answer === option.value ? "is-selected" : ""}
+            disabled={disabled}
+            key={option.value}
+            onClick={() => onAnswer(option.value)}
+            type="button"
+          >
+            {option.label}
+          </button>
+        ))}
       </div>
-      <FixtureBanner fixture={shownFixture} />
-      <PointsNotice />
-      <form className="msr-room-form" onSubmit={submit}>
-        {experience && opponents?.length ? (
-          <label className="msr-select-field">
-            <span>Choose the rival</span>
-            <select
-              onChange={(event) => setAwayTeam(event.target.value)}
-              value={awayTeam}
+      <div
+        className="msr-confidence-row"
+        role="group"
+        aria-label={`${label} confidence`}
+      >
+        <span>Confidence</span>
+        {([3, 2, 1] as const).map((value) => (
+          <button
+            className={entry.confidence === value ? "is-selected" : ""}
+            disabled={disabled}
+            key={value}
+            onClick={() => onConfidence(value)}
+            type="button"
+          >
+            {value}
+          </button>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function CallThreeComposer({
+  api,
+  room,
+  onRoom,
+}: {
+  readonly api: CallThreeRoomApi;
+  readonly room: CallThreeRoomView;
+  readonly onRoom: (room: CallThreeRoomView) => void;
+}) {
+  const [draft, setDraft] = useState<CallThreeDraft>(() => callsToDraft(room));
+  const [busy, setBusy] = useState<"save" | "lock" | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [fault, setFault] = useState<string | null>(null);
+  const viewer = room.members.find(
+    (member) => member.id === room.viewerParticipantId,
+  );
+  const callsAreLocked = room.myCalls?.lockedAt != null;
+  const editable =
+    room.status === "PRE_KICKOFF" &&
+    viewer?.role === "PLAYER" &&
+    !callsAreLocked;
+  const disabled = !editable;
+  useEffect(
+    () => setDraft(callsToDraft(room)),
+    [room.id, room.myCalls?.changedAt, room.myCalls?.lockedAt],
+  );
+
+  const save = async (lock: boolean) => {
+    if (!isCallThreeDraftComplete(draft)) {
+      setFault(
+        "Choose all three calls and assign confidence 3, 2, and 1 once each.",
+      );
+      return;
+    }
+    setBusy(lock ? "lock" : "save");
+    setFault(null);
+    try {
+      const saved = await api.setCalls(room.id, toCallThreeSubmission(draft));
+      const next = lock ? await api.lockCalls(saved.id) : saved;
+      onRoom(next);
+      setNotice(
+        lock
+          ? "Your Calls are locked for this match."
+          : "Your Calls are saved. You can still edit them before kickoff.",
+      );
+    } catch (error) {
+      setFault(errorMessage(error));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (viewer?.role === "SPECTATOR") {
+    return (
+      <section className="msr-call-locked" role="status">
+        <b>Viewer seat</b>
+        <span>
+          You joined after kickoff, so you can follow the Room but cannot make
+          Calls.
+        </span>
+      </section>
+    );
+  }
+
+  if (room.status !== "PRE_KICKOFF" || callsAreLocked) {
+    return (
+      <section className="msr-call-locked" role="status">
+        <b>Calls locked at official kickoff</b>
+        <span>
+          {room.myCalls
+            ? "Your three Calls are sealed. The table will update from verified match facts."
+            : "No Calls were locked before kickoff."}
+        </span>
+      </section>
+    );
+  }
+
+  return (
+    <section className="msr-calls" aria-labelledby="call-three-title">
+      <header className="msr-section-heading">
+        <div>
+          <span>PRE-MATCH RITUAL</span>
+          <h2 id="call-three-title">Call Three</h2>
+        </div>
+        <p>Three calls. Confidence 3, 2, and 1, used once each.</p>
+      </header>
+      <div className="msr-call-grid">
+        <CallCard
+          disabled={disabled}
+          draft={draft}
+          label="Regulation result"
+          onAnswer={(answer) =>
+            setDraft((current) =>
+              selectCallThreeAnswer(
+                current,
+                "result",
+                answer as "HOME" | "DRAW" | "AWAY",
+              ),
+            )
+          }
+          onConfidence={(confidence) =>
+            setDraft((current) =>
+              assignCallThreeConfidence(current, "result", confidence),
+            )
+          }
+          options={[
+            { label: room.fixture.homeTeam, value: "HOME" },
+            { label: "Draw", value: "DRAW" },
+            { label: room.fixture.awayTeam, value: "AWAY" },
+          ]}
+          target="result"
+        />
+        <CallCard
+          disabled={disabled}
+          draft={draft}
+          label="3+ total goals"
+          onAnswer={(answer) =>
+            setDraft((current) =>
+              selectCallThreeAnswer(current, "goals", answer as "YES" | "NO"),
+            )
+          }
+          onConfidence={(confidence) =>
+            setDraft((current) =>
+              assignCallThreeConfidence(current, "goals", confidence),
+            )
+          }
+          options={[
+            { label: "Yes", value: "YES" },
+            { label: "No", value: "NO" },
+          ]}
+          target="goals"
+        />
+        <CallCard
+          disabled={disabled}
+          draft={draft}
+          label="5+ total cards"
+          onAnswer={(answer) =>
+            setDraft((current) =>
+              selectCallThreeAnswer(current, "cards", answer as "YES" | "NO"),
+            )
+          }
+          onConfidence={(confidence) =>
+            setDraft((current) =>
+              assignCallThreeConfidence(current, "cards", confidence),
+            )
+          }
+          options={[
+            { label: "Yes", value: "YES" },
+            { label: "No", value: "NO" },
+          ]}
+          target="cards"
+        />
+      </div>
+      <div className="msr-call-actions">
+        <button
+          className="msr-secondary-action"
+          disabled={busy !== null || !isCallThreeDraftComplete(draft)}
+          onClick={() => void save(false)}
+          type="button"
+        >
+          {busy === "save" ? "Saving Calls" : "Save Calls"}
+        </button>
+        <button
+          className="msr-primary-action"
+          disabled={busy !== null || !isCallThreeDraftComplete(draft)}
+          onClick={() => void save(true)}
+          type="button"
+        >
+          {busy === "lock" ? "Locking Calls" : "Lock Calls"}
+        </button>
+      </div>
+      {notice ? (
+        <p className="msr-inline-notice" role="status">
+          {notice}
+        </p>
+      ) : null}
+      {fault ? (
+        <p className="msr-inline-error" role="alert">
+          {fault}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function TargetResolution({
+  label,
+  target,
+}: {
+  readonly label: string;
+  readonly target: CallThreeRoomView["targets"][CallThreeTarget];
+}) {
+  if (!target) {
+    return (
+      <span className="msr-target-state">Awaiting verified final fact</span>
+    );
+  }
+  if (target.state === "VOID") {
+    return (
+      <span className="msr-target-state is-void">
+        <b>VOID</b>
+        <small>
+          {label}: {target.reason}
+        </small>
+      </span>
+    );
+  }
+  return (
+    <span className="msr-target-state is-resolved">
+      <b>{target.answer}</b>
+      <small>{label} confirmed</small>
+    </span>
+  );
+}
+
+function Leaderboard({ room }: { readonly room: CallThreeRoomView }) {
+  return (
+    <section className="msr-leaderboard" aria-labelledby="room-table-title">
+      <header className="msr-section-heading">
+        <div>
+          <span>
+            {room.status === "FINAL" ? "VERIFIED FINAL" : "LIVE · PROVISIONAL"}
+          </span>
+          <h2 id="room-table-title">Room table</h2>
+        </div>
+        <p>Correct Calls add MatchSense Points after verified facts arrive.</p>
+      </header>
+      <div className="msr-resolution-grid">
+        <TargetResolution
+          label="Regulation result"
+          target={room.targets.result}
+        />
+        <TargetResolution label="3+ total goals" target={room.targets.goals} />
+        <TargetResolution label="5+ total cards" target={room.targets.cards} />
+      </div>
+      {room.leaderboard.length ? (
+        <ol className="msr-table-list">
+          {room.leaderboard.map((entry) => (
+            <li key={entry.participantId}>
+              <span>{entry.rank}</span>
+              <b>{entry.nickname}</b>
+              <small>
+                {entry.correctCalls} correct · {entry.voidCalls} void
+              </small>
+              <strong>{entry.score}</strong>
+              {entry.provisional ? <em>PROVISIONAL</em> : <em>FINAL</em>}
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="msr-empty-copy">
+          The table appears after players save their Calls.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function Reactions({
+  api,
+  room,
+  onRoom,
+}: {
+  readonly api: CallThreeRoomApi;
+  readonly room: CallThreeRoomView;
+  readonly onRoom: (room: CallThreeRoomView) => void;
+}) {
+  const [fault, setFault] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const moment =
+    room.currentMoment?.varState === "CLEAR" ? room.currentMoment : null;
+  const recipients = room.members.filter(
+    (member) => member.id !== room.viewerParticipantId,
+  );
+
+  const react = async (
+    member: RoomMember,
+    kind: "ROAR" | "COLD" | "CALLED_IT",
+  ) => {
+    if (!moment) return;
+    setBusy(true);
+    setFault(null);
+    try {
+      const result = await api.react(room.id, {
+        kind,
+        momentId: moment.momentId,
+        recipientParticipantId: member.id,
+        revision: moment.revision,
+      });
+      onRoom(result.room);
+    } catch (error) {
+      setFault(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="msr-reactions" aria-labelledby="room-reactions-title">
+      <header className="msr-section-heading">
+        <div>
+          <span>CONFIRMED MOMENT REACTIONS</span>
+          <h2 id="room-reactions-title">The group feels it together.</h2>
+        </div>
+        <p>
+          Only confirmed Moments can carry a reaction. Corrections stay visible.
+        </p>
+      </header>
+      {moment && recipients.length ? (
+        <div className="msr-reaction-grid">
+          {recipients.map((member) => (
+            <article key={member.id}>
+              <b>{member.nickname}</b>
+              <span>Moment {moment.revision} confirmed</span>
+              <div>
+                {REACTION_LABELS.map(([kind, label]) => (
+                  <button
+                    disabled={busy}
+                    key={kind}
+                    onClick={() => void react(member, kind)}
+                    type="button"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="msr-empty-copy">
+          Reactions unlock after a confirmed Match Moment.
+        </p>
+      )}
+      {room.reactions.length ? (
+        <ul className="msr-reaction-history">
+          {room.reactions.map((reaction) => (
+            <li
+              className={
+                reaction.status === "OVERTURNED" ? "is-overturned" : ""
+              }
+              key={reaction.id}
             >
-              {opponents.map((team) => (
-                <option key={team.code} value={team.code}>
-                  {team.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-        {!inviteHost ? (
+              <b>{reaction.senderNickname}</b>
+              <span>
+                {reaction.kind.replaceAll("_", " ")} to{" "}
+                {reaction.recipientNickname}
+              </span>
+              <small>
+                {reaction.status === "OVERTURNED" ? "OVERTURNED" : "CONFIRMED"}
+              </small>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {fault ? (
+        <p className="msr-inline-error" role="alert">
+          {fault}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function RoomScreen({
+  api,
+  onExit,
+  room,
+  teams,
+  updateRoom,
+}: {
+  readonly api: CallThreeRoomApi;
+  readonly onExit: (() => void) | undefined;
+  readonly room: CallThreeRoomView;
+  readonly teams: readonly ProductTeam[];
+  readonly updateRoom: (room: CallThreeRoomView) => void;
+}) {
+  return (
+    <main className="msr-stage" id="main-content">
+      <Header label={roomStatusLabel(room.status)} onExit={onExit} />
+      <section className="msr-room-intro">
+        <p>PRIVATE MATCH NIGHT</p>
+        <h1>{room.name}</h1>
+        <span>
+          {room.members.length} fans following verified match facts together.
+        </span>
+      </section>
+      <FixtureStrip fixture={room.fixture} teams={teams} />
+      <PointsBand room={room} />
+      <CallThreeComposer api={api} onRoom={updateRoom} room={room} />
+      <Leaderboard room={room} />
+      {room.status !== "PRE_KICKOFF" ? (
+        <Reactions api={api} onRoom={updateRoom} room={room} />
+      ) : null}
+    </main>
+  );
+}
+
+function CreateRoom({
+  api,
+  defaultNickname,
+  favoriteTeam,
+  fixture,
+  onExit,
+  onOpenRoom,
+  teams,
+}: {
+  readonly api: CallThreeRoomApi;
+  readonly defaultNickname: string;
+  readonly favoriteTeam: string | null;
+  readonly fixture: RoomCreationFixture;
+  readonly onExit: (() => void) | undefined;
+  readonly onOpenRoom: ((roomId: string) => void) | undefined;
+  readonly teams: readonly ProductTeam[];
+}) {
+  const [name, setName] = useState("Match night");
+  const [nickname, setNickname] = useState(defaultNickname);
+  const [busy, setBusy] = useState(false);
+  const [fault, setFault] = useState<string | null>(null);
+  const eligible = isEligibleFixture(fixture);
+  const displayFixture = {
+    awayTeam: fixture.awayTeam,
+    homeTeam: fixture.homeTeam,
+    kickoffAt: fixture.kickoffAt ?? "",
+  };
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setFault(null);
+    try {
+      const created = await api.create({
+        fixtureId: fixture.fixtureId,
+        name,
+        nickname,
+        teamCode: favoriteTeam,
+      });
+      onOpenRoom?.(created.room.id);
+    } catch (error) {
+      setFault(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main className="msr-stage" id="main-content">
+      <Header label="CALL THREE" onExit={onExit} />
+      <section className="msr-room-intro">
+        <p>PRIVATE PRE-MATCH RITUAL</p>
+        <h1>
+          {eligible
+            ? "Make the match a shared call."
+            : "Call Three unavailable"}
+        </h1>
+        <span>
+          {eligible
+            ? "Choose exactly three Calls before the official kickoff locks the Room."
+            : "Rooms can open only for a scheduled live TxLINE match before kickoff."}
+        </span>
+      </section>
+      <FixtureStrip fixture={displayFixture} teams={teams} />
+      {eligible ? (
+        <form
+          className="msr-room-form"
+          onSubmit={(event) => void submit(event)}
+        >
           <label>
             <span>Room name</span>
             <input
@@ -246,700 +742,337 @@ function DoorForm({
               value={name}
             />
           </label>
-        ) : null}
-        <label>
-          <span>Your match-night name</span>
-          <input
-            maxLength={30}
-            onChange={(event) => setNickname(event.target.value)}
-            placeholder="Abhinav"
-            required
-            value={nickname}
-          />
-        </label>
-        {error ? (
-          <p className="msr-form-error" role="alert">
-            {error}
+          <label>
+            <span>Your match-night name</span>
+            <input
+              maxLength={30}
+              onChange={(event) => setNickname(event.target.value)}
+              required
+              value={nickname}
+            />
+          </label>
+          <p>
+            Calls stay editable until you lock them or the official kickoff
+            arrives.
           </p>
-        ) : null}
-        <button
-          className="msr-primary-action"
-          disabled={busy || !nickname.trim() || !name.trim()}
-          type="submit"
-        >
-          <span>
-            {busy
-              ? "Opening the room…"
-              : inviteHost
-                ? "Join & get 100 Sense"
-                : experience
-                  ? "Create & invite friends"
-                  : "Create private room"}
-          </span>
-          <i aria-hidden="true">→</i>
-        </button>
-      </form>
-    </div>
-  );
-}
-
-function MarketCard({
-  market,
-  draft,
-  onMove,
-  onSelect,
-}: {
-  market: SenseMarket;
-  draft: SenseDraft;
-  onMove(direction: 1 | -1): void;
-  onSelect(selection: SenseMarket["selections"][number]["id"]): void;
-}) {
-  const entry = draft[market.id];
-  return (
-    <article className="msr-market-card">
-      <header>
-        <div>
-          <span>{market.id.replaceAll("_", " · ")}</span>
-          <h3>{market.label}</h3>
-        </div>
-        <small>{market.sourceLabel}</small>
-      </header>
-      <div className="msr-market-options">
-        {market.selections.map((option) => (
+          {fault ? (
+            <p className="msr-inline-error" role="alert">
+              {fault}
+            </p>
+          ) : null}
           <button
-            className={entry.selection === option.id ? "is-selected" : ""}
-            key={option.id}
-            onClick={() => onSelect(option.id)}
-            type="button"
+            className="msr-primary-action"
+            disabled={busy || !name.trim() || !nickname.trim()}
+            type="submit"
           >
-            <span>{option.label}</span>
-            <b>{option.price.toFixed(2)}×</b>
+            {busy ? "Creating Room" : "Create Call Three Room"}
           </button>
-        ))}
-      </div>
-      <footer>
-        <span>Conviction</span>
-        <div className="msr-sense-stepper">
-          <button
-            aria-label={`Remove 5 Sense from ${market.label}`}
-            disabled={entry.allocation <= 5}
-            onClick={() => onMove(-1)}
-            type="button"
-          >
-            −
-          </button>
-          <strong>
-            {entry.allocation}
-            <small> Sense</small>
-          </strong>
-          <button
-            aria-label={`Add 5 Sense to ${market.label}`}
-            onClick={() => onMove(1)}
-            type="button"
-          >
-            +
-          </button>
-        </div>
-      </footer>
-    </article>
-  );
-}
-
-export function SenseAllocator({
-  room,
-  busy,
-  error,
-  onLock,
-}: {
-  room: RoomView;
-  busy: boolean;
-  error: string | null;
-  onLock(picks: ReturnType<typeof toSensePicks>): void;
-}) {
-  const [draft, setDraft] = useState(() =>
-    room.sense.mySlate
-      ? createSenseDraftFromSlate(room.sense.mySlate)
-      : createInitialSenseDraft(),
-  );
-  const complete = isSenseDraftComplete(draft);
-  return (
-    <section className="msr-sense-board" data-room-stage="picks">
-      <header className="msr-sense-board-head">
-        <div>
-          <p className="msr-kicker">Your private slate</p>
-          <h2>Read the match before it happens.</h2>
-        </div>
-        <div className="msr-sense-wallet">
-          <span>Allocated</span>
-          <strong>{senseAllocated(draft)} / 100</strong>
-        </div>
-      </header>
-      <p className="msr-secret-note">
-        Your exact picks are hidden from everyone else until kickoff.
-      </p>
-      <div className="msr-market-grid">
-        {room.sense.markets.map((market) => (
-          <MarketCard
-            key={market.id}
-            market={market}
-            draft={draft}
-            onMove={(direction) =>
-              setDraft((current) => moveSense(current, market.id, direction))
-            }
-            onSelect={(selection) =>
-              setDraft((current) =>
-                selectSenseOption(current, market.id, selection),
-              )
-            }
-          />
-        ))}
-      </div>
-      {error ? (
-        <p className="msr-form-error" role="alert">
-          {error}
-        </p>
+        </form>
       ) : null}
-      <button
-        className="msr-primary-action msr-lock-slate"
-        disabled={busy || !complete}
-        onClick={() => onLock(toSensePicks(draft))}
-        type="button"
-      >
-        <span>
-          {busy
-            ? "Locking your calls…"
-            : complete
-              ? "Lock my 100 Sense"
-              : "Choose all five outcomes"}
-        </span>
-        <i aria-hidden="true">🔒</i>
-      </button>
-    </section>
+    </main>
   );
 }
 
-function Members({ room }: { room: RoomView }) {
-  return (
-    <section className="msr-member-board">
-      <header>
-        <h2>In this room</h2>
-        <span>{room.members.length} / 20 fans</span>
-      </header>
-      <ul>
-        {room.members.map((member) => (
-          <li className="msr-member" key={member.id}>
-            <span className="msr-member-mark">{initials(member.nickname)}</span>
-            <span className="msr-member-copy">
-              <b>
-                {member.nickname}
-                {member.id === room.viewerMemberId ? " · you" : ""}
-              </b>
-              <small>
-                {member.teamCode ?? "Neutral"} · {member.role}
-              </small>
-            </span>
-            <span className="msr-member-status">
-              {member.hasPicks
-                ? "Picks locked"
-                : room.sense.phase === "DRAFT"
-                  ? "In lobby"
-                  : "Choosing"}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-function RevealedSlates({ room }: { room: RoomView }) {
-  if (room.sense.revealedSlates.length === 0) return null;
-  return (
-    <section className="msr-revealed">
-      <header>
-        <p className="msr-kicker">Kickoff reveal</p>
-        <h2>Everyone showed their hand.</h2>
-      </header>
-      <div>
-        {room.sense.revealedSlates.map((slate) => {
-          const member = room.members.find(
-            ({ id }) => id === slate.participantId,
-          );
-          return (
-            <article key={slate.participantId}>
-              <h3>{member?.nickname ?? "Fan"}</h3>
-              <ul>
-                {slate.picks.map((pick) => (
-                  <li key={pick.marketId}>
-                    <span>{pick.marketId.replaceAll("_", " ")}</span>
-                    <b>
-                      {pick.selection} · {pick.allocation}S
-                    </b>
-                  </li>
-                ))}
-              </ul>
-            </article>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-
-function Reactions({
-  room,
-  busy,
-  onReact,
+function InviteRoom({
+  api,
+  defaultNickname,
+  favoriteTeam,
+  inviteCode,
+  onExit,
+  onOpenRoom,
+  teams,
 }: {
-  room: RoomView;
-  busy: boolean;
-  onReact(type: ReactionType, recipient: RoomMember): void;
+  readonly api: CallThreeRoomApi;
+  readonly defaultNickname: string;
+  readonly favoriteTeam: string | null;
+  readonly inviteCode: string;
+  readonly onExit: (() => void) | undefined;
+  readonly onOpenRoom: ((roomId: string) => void) | undefined;
+  readonly teams: readonly ProductTeam[];
 }) {
-  const recipients = room.members.filter(
-    ({ id }) => id !== room.viewerMemberId,
-  );
-  if (!room.currentMoment || recipients.length === 0) return null;
+  const [preview, setPreview] = useState<RoomInvitePreview | null>(null);
+  const [fault, setFault] = useState<string | null>(null);
+  const [nickname, setNickname] = useState(defaultNickname);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void api.preview(inviteCode).then(
+      (next) => {
+        if (active) setPreview(next);
+      },
+      (error: unknown) => {
+        if (active) setFault(errorMessage(error));
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [api, inviteCode]);
+
+  const join = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setFault(null);
+    try {
+      const room = await api.join({
+        inviteCode,
+        nickname,
+        teamCode: favoriteTeam,
+      });
+      onOpenRoom?.(room.id);
+    } catch (error) {
+      setFault(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
-    <section className="msr-rival-panel">
-      <header>
-        <span>Poke a rival</span>
-        <small>Tied to {room.currentMoment.label}</small>
-      </header>
-      <div className="msr-rival-row">
-        {recipients.map((recipient) => (
-          <div key={recipient.id}>
-            <b>{recipient.nickname}</b>
-            {REACTIONS.map((reaction) => (
+    <main className="msr-stage" id="main-content">
+      <Header label="ROOM INVITE" onExit={onExit} />
+      {preview ? (
+        <>
+          <section className="msr-room-intro">
+            <p>{preview.hostNickname} INVITED YOU</p>
+            <h1>{preview.name}</h1>
+            <span>
+              {preview.memberCount} fans are gathering before kickoff.
+            </span>
+          </section>
+          <FixtureStrip fixture={preview.fixture} teams={teams} />
+          <form
+            className="msr-room-form"
+            onSubmit={(event) => void join(event)}
+          >
+            <label>
+              <span>Your match-night name</span>
+              <input
+                maxLength={30}
+                onChange={(event) => setNickname(event.target.value)}
+                required
+                value={nickname}
+              />
+            </label>
+            <p>
+              {preview.callsLocked
+                ? "Kickoff has passed. You can join as a viewer."
+                : "Join, make your three Calls, then lock them before kickoff."}
+            </p>
+            {fault ? (
+              <p className="msr-inline-error" role="alert">
+                {fault}
+              </p>
+            ) : null}
+            <button
+              className="msr-primary-action"
+              disabled={busy || !nickname.trim()}
+              type="submit"
+            >
+              {busy ? "Joining Room" : "Join Room"}
+            </button>
+          </form>
+        </>
+      ) : (
+        <section className="msr-state-panel" role={fault ? "alert" : "status"}>
+          <b>{fault ? "Room unavailable" : "Opening invite"}</b>
+          <span>{fault ?? "Fetching the Room’s live match eligibility."}</span>
+        </section>
+      )}
+    </main>
+  );
+}
+
+function RoomsList({
+  api,
+  onExit,
+  onOpenRoom,
+  initialRooms,
+  teams,
+}: {
+  readonly api: CallThreeRoomApi;
+  readonly onExit: (() => void) | undefined;
+  readonly onOpenRoom: ((roomId: string) => void) | undefined;
+  readonly initialRooms: readonly CallThreeRoomView[] | undefined;
+  readonly teams: readonly ProductTeam[];
+}) {
+  const [rooms, setRooms] = useState<readonly CallThreeRoomView[] | null>(
+    initialRooms ?? null,
+  );
+  const [fault, setFault] = useState<string | null>(null);
+  useEffect(() => {
+    if (initialRooms !== undefined) return;
+    let active = true;
+    void api.list().then(
+      (next) => {
+        if (active) setRooms(next);
+      },
+      (error: unknown) => {
+        if (active) setFault(errorMessage(error));
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [api, initialRooms]);
+  return (
+    <main className="msr-stage" id="main-content">
+      <Header label="YOUR ROOMS" onExit={onExit} />
+      <section className="msr-room-intro">
+        <p>PRIVATE MATCH NIGHTS</p>
+        <h1>Pick a Room. Feel every swing together.</h1>
+        <span>
+          Only scheduled live fixtures can open a new Call Three Room.
+        </span>
+      </section>
+      {rooms ? (
+        rooms.length ? (
+          <div className="msr-room-list">
+            {rooms.map((room) => (
               <button
-                disabled={busy}
-                key={reaction.type}
-                onClick={() => onReact(reaction.type, recipient)}
+                key={room.id}
+                onClick={() => onOpenRoom?.(room.id)}
                 type="button"
               >
-                {reaction.label}
+                <FixtureStrip fixture={room.fixture} teams={teams} />
+                <span>{room.name}</span>
+                <b>{roomStatusLabel(room.status)}</b>
               </button>
             ))}
           </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function FinalLeaderboard({ room }: { room: RoomView }) {
-  return (
-    <section className="msr-sense-leaderboard" data-room-stage="final">
-      <header>
-        <p className="msr-kicker">Full-time table</p>
-        <h2>Instinct, settled.</h2>
-      </header>
-      {room.sense.leaderboard.length ? (
-        <ol>
-          {room.sense.leaderboard.map((row) => (
-            <li key={row.memberId}>
-              <strong>#{row.rank}</strong>
-              <span>
-                <b>{row.nickname}</b>
-                <small>{row.correctCount} of 5 calls</small>
-              </span>
-              <em>{row.returnedSense.toFixed(1)} Sense</em>
-            </li>
-          ))}
-        </ol>
+        ) : (
+          <section className="msr-state-panel" role="status">
+            <b>No Rooms yet</b>
+            <span>
+              Open a scheduled match to create a private Call Three Room.
+            </span>
+          </section>
+        )
       ) : (
-        <p>Final stats are being reconciled from TxLINE.</p>
+        <section className="msr-state-panel" role="status">
+          <b>Opening Rooms</b>
+          <span>Loading your match nights.</span>
+        </section>
       )}
-    </section>
-  );
-}
-
-function RoomScreen({
-  room,
-  busy,
-  error,
-  notice,
-  onExit,
-  onOpenMatch,
-  onOpenPicks,
-  onStartExperience,
-  onSavePicks,
-  onShare,
-  onReact,
-}: {
-  room: RoomView;
-  busy: boolean;
-  error: string | null;
-  notice: string | null;
-  onExit: (() => void) | undefined;
-  onOpenMatch: (() => void) | undefined;
-  onOpenPicks(): void;
-  onStartExperience(): void;
-  onSavePicks(picks: ReturnType<typeof toSensePicks>): void;
-  onShare(): void;
-  onReact(type: ReactionType, recipient: RoomMember): void;
-}) {
-  const viewer = room.members.find(({ id }) => id === room.viewerMemberId);
-  const canPick =
-    viewer?.role !== "spectator" &&
-    room.sense.phase === "OPEN" &&
-    !room.sense.mySlate;
-  return (
-    <div
-      className={`msr-stage msr-stage--sense is-${room.sense.phase.toLowerCase()}`}
-      data-room-stage={room.sense.phase.toLowerCase()}
-    >
-      <Header label={room.sense.phase} onExit={onExit} />
-      <div className="msr-title-block">
-        <p className="msr-kicker">{room.name}</p>
-        <h1>
-          {room.sense.phase === "FINAL"
-            ? "The room has spoken."
-            : room.sense.phase === "LIVE"
-              ? "Every call is alive."
-              : "Your match. Your people. Your read."}
-        </h1>
-      </div>
-      <FixtureBanner fixture={room.fixture} />
-      <PointsNotice />
-      {room.currentMoment ? (
-        <section className={`msr-room-moment is-${room.currentMoment.state}`}>
-          <span>{room.currentMoment.minute}</span>
-          <div>
-            <p>
-              {room.currentMoment.state === "review"
-                ? "UNDER REVIEW"
-                : room.currentMoment.label}
-            </p>
-            <strong>
-              {room.currentMoment.score.home}—{room.currentMoment.score.away}
-            </strong>
-          </div>
-        </section>
-      ) : null}
-      {error ? (
-        <p className="msr-form-error" role="alert">
-          {error}
+      {fault ? (
+        <p className="msr-inline-error" role="alert">
+          {fault}
         </p>
       ) : null}
-      {notice ? (
-        <p className="msr-room-notice" role="status">
-          {notice}
-        </p>
-      ) : null}
-      {room.sense.phase === "DRAFT" ? (
-        <section className="msr-host-gate">
-          <h2>
-            {room.isHost
-              ? "Bring everyone in, then open the board."
-              : "The host is gathering the room."}
-          </h2>
-          <p>Picks open for everyone at once. Exact allocations stay secret.</p>
-          <div>
-            {room.inviteUrl ? (
-              <button onClick={onShare} type="button">
-                Share private invite
-              </button>
-            ) : null}
-            {room.isHost ? (
-              <button
-                className="is-primary"
-                disabled={busy}
-                onClick={onOpenPicks}
-                type="button"
-              >
-                Open 100-Sense picks
-              </button>
-            ) : null}
-          </div>
-        </section>
-      ) : null}
-      {canPick ? (
-        <SenseAllocator
-          busy={busy}
-          error={error}
-          onLock={onSavePicks}
-          room={room}
-        />
-      ) : null}
-      {room.sense.phase === "OPEN" && room.sense.mySlate ? (
-        <section className="msr-locked-note">
-          <span>100 / 100 allocated</span>
-          <h2>Your slate is sealed.</h2>
-          <p>
-            Friends can see that you locked in, but not what you chose. Picks
-            reveal automatically at kickoff.
-          </p>
-        </section>
-      ) : null}
-      {room.fixture.isReplay && room.isHost && room.sense.phase === "OPEN" ? (
-        <section className="msr-host-gate msr-experience-gate">
-          <h2>Everyone ready? Start the Experience.</h2>
-          <p>
-            This locks the room and reveals every submitted slate. The match
-            itself continues in the main Live Companion.
-          </p>
-          <div>
-            <button
-              className="is-primary"
-              disabled={busy}
-              onClick={onStartExperience}
-              type="button"
-            >
-              Start Experience
-            </button>
-          </div>
-        </section>
-      ) : null}
-      {room.sense.phase === "LOCKED" ? (
-        <section className="msr-kickoff-hold">
-          <span>🔒 KICKOFF</span>
-          <h2>No edits. No hiding.</h2>
-          <p>
-            Every slate is now visible. Live scoring starts with the first
-            TxLINE update.
-          </p>
-        </section>
-      ) : null}
-      <RevealedSlates room={room} />
-      {room.sense.phase === "FINAL" ? <FinalLeaderboard room={room} /> : null}
-      <Reactions busy={busy} onReact={onReact} room={room} />
-      <Members room={room} />
-      {onOpenMatch ? (
-        <button
-          className="msr-secondary-action"
-          onClick={onOpenMatch}
-          type="button"
-        >
-          Open Live Companion
-        </button>
-      ) : null}
-    </div>
+    </main>
   );
 }
 
 export function RoomExperience({
   api,
-  onClose,
+  defaultNickname,
+  favoriteTeam,
   onExit,
-  onOpenMatch,
   onOpenRoom,
   route,
+  teams,
 }: RoomExperienceProps) {
-  const exit = onExit ?? onClose;
-  const [room, setRoom] = useState<RoomView | null>(() =>
+  const [room, setRoom] = useState<CallThreeRoomView | null>(
     route.mode === "room" ? (route.initialRoom ?? null) : null,
   );
-  const [preview, setPreview] = useState(() =>
-    route.mode === "invite" ? (route.preview ?? null) : null,
-  );
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [loading, setLoading] = useState(
-    route.mode === "room" && !route.initialRoom,
-  );
+  const [fault, setFault] = useState<string | null>(null);
+  const roomId = route.mode === "room" ? route.roomId : null;
+  const initialRoom = route.mode === "room" ? route.initialRoom : undefined;
+  const hasRoom = room !== null;
 
   useEffect(() => {
+    if (!roomId) return;
+    if (initialRoom) {
+      setRoom(initialRoom);
+      setFault(null);
+      return;
+    }
     let active = true;
-    if (route.mode === "room" && !route.initialRoom) {
-      setLoading(true);
-      api
-        .getRoom(route.roomId)
-        .then((next) => {
-          if (active) {
-            setRoom(next);
-            setLoading(false);
-          }
-        })
-        .catch((cause) => {
-          if (active) {
-            setError(errorText(cause));
-            setLoading(false);
-          }
-        });
-    }
-    if (route.mode === "invite" && !route.preview) {
-      api
-        .previewInvite(route.inviteCode)
-        .then((next) => {
-          if (active) setPreview(next);
-        })
-        .catch((cause) => {
-          if (active) setError(errorText(cause));
-        });
-    }
+    setRoom(null);
+    setFault(null);
+    void api.get(roomId).then(
+      (next) => {
+        if (active) setRoom(next);
+      },
+      (error: unknown) => {
+        if (active) setFault(errorMessage(error));
+      },
+    );
     return () => {
       active = false;
     };
-  }, [api, route]);
+  }, [api, initialRoom, roomId]);
 
   useEffect(() => {
-    if (!room) return;
-    return api.subscribeRoom(room.id, room.viewerMemberId, setRoom, (cause) =>
-      setNotice(cause.message),
+    if (!roomId || !hasRoom || room?.id !== roomId) return;
+    return api.subscribe(
+      roomId,
+      (incoming) => {
+        setRoom((current) =>
+          !current || incoming.revision >= current.revision
+            ? incoming
+            : current,
+        );
+      },
+      (error) => setFault(errorMessage(error)),
     );
-  }, [api, room?.id, room?.viewerMemberId]);
+  }, [api, hasRoom, roomId]);
 
-  const act = async (work: () => Promise<RoomView>, success?: string) => {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const next = await work();
-      setRoom(next);
-      if (success) setNotice(success);
-      return next;
-    } catch (cause) {
-      setError(errorText(cause));
-      return null;
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const create = async (name: string, nickname: string, awayTeam?: string) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const created =
-        route.mode === "experience-create"
-          ? await api.createExperienceRoom({
-              awayTeam: awayTeam ?? route.fixture.awayTeam.code,
-              homeTeam: route.fixture.homeTeam.code,
-              name,
-              nickname,
-            })
-          : await api.createRoom({
-              fixtureId: route.mode === "create" ? route.fixture.id : "",
-              name,
-              nickname,
-            });
-      setRoom(created.room);
-      onOpenRoom?.(created.room.id);
-    } catch (cause) {
-      setError(errorText(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const join = async (_name: string, nickname: string) => {
-    if (route.mode !== "invite") return;
-    setBusy(true);
-    setError(null);
-    try {
-      const joined = await api.joinRoom({
-        inviteCode: route.inviteCode,
-        nickname,
-        teamCode: route.teamCode ?? null,
-      });
-      setRoom(joined.room);
-      onOpenRoom?.(joined.room.id);
-    } catch (cause) {
-      setError(errorText(cause));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const share = async () => {
-    if (!room?.inviteUrl) return;
-    try {
-      if (navigator.share)
-        await navigator.share({
-          title: room.name,
-          text: `Join my ${room.fixture.homeTeam.name} vs ${room.fixture.awayTeam.name} MatchSense room`,
-          url: room.inviteUrl,
-        });
-      else await navigator.clipboard.writeText(room.inviteUrl);
-      setNotice("Private invite ready to send.");
-    } catch {
-      setNotice("Invite sharing was cancelled.");
-    }
-  };
-
-  if ((route.mode === "create" || route.mode === "experience-create") && !room)
+  if (route.mode === "list") {
     return (
-      <DoorForm
-        busy={busy}
-        error={error}
-        experience={route.mode === "experience-create"}
-        fixture={route.fixture}
-        initialName={route.defaultRoomName ?? "Match Night"}
-        initialNickname={route.defaultNickname ?? ""}
-        {...(route.mode === "experience-create"
-          ? { opponents: route.opponents }
-          : {})}
-        onExit={exit}
-        onSubmit={create}
-      />
-    );
-  if (route.mode === "invite" && !room) {
-    if (!preview)
-      return (
-        <div className="msr-stage msr-stage--loading" data-room-stage="loading">
-          <Header label="Opening invite" onExit={exit} />
-          <h1>{error ?? "Getting the room ready…"}</h1>
-        </div>
-      );
-    return (
-      <DoorForm
-        busy={busy}
-        error={error}
-        fixture={preview.fixture}
-        initialName={preview.roomName}
-        initialNickname={route.defaultNickname ?? ""}
-        inviteHost={preview.hostNickname}
-        onExit={exit}
-        onSubmit={join}
+      <RoomsList
+        api={api}
+        initialRooms={route.initialRooms}
+        onExit={onExit}
+        onOpenRoom={onOpenRoom}
+        teams={teams}
       />
     );
   }
-  if (loading || !room)
+  if (route.mode === "create") {
     return (
-      <div className="msr-stage msr-stage--loading" data-room-stage="loading">
-        <Header label="Private room" onExit={exit} />
-        <h1>{error ?? "Opening match night…"}</h1>
-      </div>
+      <CreateRoom
+        api={api}
+        defaultNickname={defaultNickname}
+        favoriteTeam={favoriteTeam}
+        fixture={route.fixture}
+        onExit={onExit}
+        onOpenRoom={onOpenRoom}
+        teams={teams}
+      />
     );
-
+  }
+  if (route.mode === "invite") {
+    return (
+      <InviteRoom
+        api={api}
+        defaultNickname={defaultNickname}
+        favoriteTeam={favoriteTeam}
+        inviteCode={route.inviteCode}
+        onExit={onExit}
+        onOpenRoom={onOpenRoom}
+        teams={teams}
+      />
+    );
+  }
+  if (!room) {
+    return (
+      <main className="msr-stage" id="main-content">
+        <Header label="ROOM" onExit={onExit} />
+        <section className="msr-state-panel" role={fault ? "alert" : "status"}>
+          <b>{fault ? "Room unavailable" : "Opening Room"}</b>
+          <span>{fault ?? "Loading the Room’s durable match state."}</span>
+        </section>
+      </main>
+    );
+  }
   return (
     <RoomScreen
-      busy={busy}
-      error={error}
-      notice={notice}
-      onExit={exit}
-      onOpenMatch={onOpenMatch ? () => onOpenMatch(room.fixture.id) : undefined}
-      onOpenPicks={() =>
-        void act(() => api.openPicks(room.id), "Picks are open for everyone.")
-      }
-      onStartExperience={() =>
-        void act(
-          () => api.startExperience(room.id),
-          "Experience started. Every submitted slate is now visible.",
-        )
-      }
-      onReact={(type, recipient) => {
-        if (!room.currentMoment) return;
-        void act(
-          async () =>
-            (
-              await api.sendReaction(room.id, {
-                momentId: room.currentMoment!.momentId,
-                momentRevision: room.currentMoment!.revision,
-                recipientMemberId: recipient.id,
-                type,
-              })
-            ).room,
-          `${type.replace("_", " ").toUpperCase()} sent to ${recipient.nickname}.`,
-        );
-      }}
-      onSavePicks={(picks) =>
-        void act(
-          () => api.savePicks(room.id, picks),
-          "Your 100 Sense are locked.",
-        )
-      }
-      onShare={() => void share()}
+      api={api}
+      onExit={onExit}
       room={room}
+      teams={teams}
+      updateRoom={setRoom}
     />
   );
 }

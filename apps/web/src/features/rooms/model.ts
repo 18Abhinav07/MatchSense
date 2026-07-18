@@ -1,109 +1,119 @@
-import type {
-  SenseMarketId,
-  SensePick,
-  SenseSelection,
-  SenseSlate,
-} from "./types.js";
+export const CALL_THREE_TARGETS = ["result", "goals", "cards"] as const;
 
-export const SENSE_MARKET_IDS = [
-  "winner",
-  "goals_2_5",
-  "cards_4_5",
-  "corners_9_5",
-  "btts",
-] as const;
+export type CallThreeTarget = (typeof CALL_THREE_TARGETS)[number];
+export type CallThreeConfidence = 1 | 2 | 3;
+export type ResultAnswer = "HOME" | "DRAW" | "AWAY";
+export type ThresholdAnswer = "YES" | "NO";
+export type CallThreeAnswer = ResultAnswer | ThresholdAnswer;
 
-export interface SenseDraftEntry {
-  readonly allocation: number;
-  readonly selection: SenseSelection | null;
+export interface CallThreeDraftEntry {
+  readonly answer: CallThreeAnswer | null;
+  readonly confidence: CallThreeConfidence;
 }
 
-export type SenseDraft = Readonly<Record<SenseMarketId, SenseDraftEntry>>;
+export type CallThreeDraft = Readonly<
+  Record<CallThreeTarget, CallThreeDraftEntry>
+>;
 
-export function createInitialSenseDraft(): SenseDraft {
+export type CallThreeSubmission =
+  | {
+      readonly target: "result";
+      readonly answer: ResultAnswer;
+      readonly confidence: CallThreeConfidence;
+    }
+  | {
+      readonly target: "goals";
+      readonly answer: ThresholdAnswer;
+      readonly confidence: CallThreeConfidence;
+    }
+  | {
+      readonly target: "cards";
+      readonly answer: ThresholdAnswer;
+      readonly confidence: CallThreeConfidence;
+    };
+
+export function createInitialCallThreeDraft(): CallThreeDraft {
   return {
-    btts: { allocation: 20, selection: null },
-    cards_4_5: { allocation: 20, selection: null },
-    corners_9_5: { allocation: 20, selection: null },
-    goals_2_5: { allocation: 20, selection: null },
-    winner: { allocation: 20, selection: null },
+    cards: { answer: null, confidence: 1 },
+    goals: { answer: null, confidence: 2 },
+    result: { answer: null, confidence: 3 },
   };
 }
 
-export function createSenseDraftFromSlate(slate: SenseSlate): SenseDraft {
-  return slate.picks.reduce<SenseDraft>(
-    (draft, pick) => ({
-      ...draft,
-      [pick.marketId]: {
-        allocation: pick.allocation,
-        selection: pick.selection,
-      },
-    }),
-    createInitialSenseDraft(),
-  );
-}
-
-export function selectSenseOption(
-  draft: SenseDraft,
-  marketId: SenseMarketId,
-  selection: SenseSelection,
-): SenseDraft {
-  return { ...draft, [marketId]: { ...draft[marketId], selection } };
-}
-
-export function moveSense(
-  draft: SenseDraft,
-  marketId: SenseMarketId,
-  direction: 1 | -1,
-): SenseDraft {
-  const current = draft[marketId];
-  if (direction === -1 && current.allocation <= 5) return draft;
-  const others = SENSE_MARKET_IDS.filter((id) => id !== marketId);
-  const counterpart =
-    direction === 1
-      ? [...others].sort(
-          (left, right) => draft[right].allocation - draft[left].allocation,
-        )[0]
-      : others[0];
-  if (!counterpart || (direction === 1 && draft[counterpart].allocation <= 5)) {
-    return draft;
+function isAnswerForTarget(
+  target: CallThreeTarget,
+  answer: CallThreeAnswer,
+): boolean {
+  if (target === "result") {
+    return answer === "HOME" || answer === "DRAW" || answer === "AWAY";
   }
+  return answer === "YES" || answer === "NO";
+}
+
+export function selectCallThreeAnswer(
+  draft: CallThreeDraft,
+  target: CallThreeTarget,
+  answer: CallThreeAnswer,
+): CallThreeDraft {
+  if (!isAnswerForTarget(target, answer)) return draft;
+  return { ...draft, [target]: { ...draft[target], answer } };
+}
+
+/**
+ * Confidence is a permutation rather than an allocation. Selecting a number
+ * swaps it with the target that already holds it, preserving 3/2/1 exactly.
+ */
+export function assignCallThreeConfidence(
+  draft: CallThreeDraft,
+  target: CallThreeTarget,
+  confidence: CallThreeConfidence,
+): CallThreeDraft {
+  const current = draft[target].confidence;
+  if (current === confidence) return draft;
+  const counterpart = CALL_THREE_TARGETS.find(
+    (candidate) => draft[candidate].confidence === confidence,
+  );
+  if (!counterpart) return draft;
   return {
     ...draft,
-    [counterpart]: {
-      ...draft[counterpart],
-      allocation: draft[counterpart].allocation - direction * 5,
-    },
-    [marketId]: { ...current, allocation: current.allocation + direction * 5 },
+    [counterpart]: { ...draft[counterpart], confidence: current },
+    [target]: { ...draft[target], confidence },
   };
 }
 
-export function senseAllocated(draft: SenseDraft): number {
-  return SENSE_MARKET_IDS.reduce(
-    (total, marketId) => total + draft[marketId].allocation,
-    0,
-  );
-}
-
-export function isSenseDraftComplete(draft: SenseDraft): boolean {
+export function isCallThreeDraftComplete(draft: CallThreeDraft): boolean {
+  const confidences = CALL_THREE_TARGETS.map(
+    (target) => draft[target].confidence,
+  ).sort();
   return (
-    senseAllocated(draft) === 100 &&
-    SENSE_MARKET_IDS.every(
-      (marketId) =>
-        draft[marketId].selection !== null &&
-        draft[marketId].allocation >= 5 &&
-        draft[marketId].allocation % 5 === 0,
-    )
+    CALL_THREE_TARGETS.every((target) => {
+      const answer = draft[target].answer;
+      return answer !== null && isAnswerForTarget(target, answer);
+    }) && confidences.join(",") === "1,2,3"
   );
 }
 
-export function toSensePicks(draft: SenseDraft): readonly SensePick[] {
-  if (!isSenseDraftComplete(draft)) {
-    throw new Error("Choose one side in all five markets before locking picks");
+export function toCallThreeSubmission(
+  draft: CallThreeDraft,
+): readonly CallThreeSubmission[] {
+  if (!isCallThreeDraftComplete(draft)) {
+    throw new Error(
+      "Choose all three calls and assign confidence 3, 2, and 1 once each.",
+    );
   }
-  return SENSE_MARKET_IDS.map((marketId) => ({
-    allocation: draft[marketId].allocation,
-    marketId,
-    selection: draft[marketId].selection as SenseSelection,
-  }));
+  return CALL_THREE_TARGETS.map((target) => {
+    const entry = draft[target];
+    if (target === "result") {
+      return {
+        answer: entry.answer as ResultAnswer,
+        confidence: entry.confidence,
+        target,
+      };
+    }
+    return {
+      answer: entry.answer as ThresholdAnswer,
+      confidence: entry.confidence,
+      target,
+    };
+  });
 }

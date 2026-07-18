@@ -1,19 +1,22 @@
+export { RoomExperience, type RoomExperienceProps } from "./RoomExperience.js";
 export {
-  FixtureBanner,
-  PointsNotice,
-  RoomExperience,
-  SenseAllocator,
-  type RoomExperienceProps,
-} from "./RoomExperience.js";
-export {
-  createInitialSenseDraft,
-  createSenseDraftFromSlate,
-  isSenseDraftComplete,
-  moveSense,
-  selectSenseOption,
-  senseAllocated,
-  toSensePicks,
-  type SenseDraft,
-  type SenseDraftEntry,
+  assignCallThreeConfidence,
+  createInitialCallThreeDraft,
+  isCallThreeDraftComplete,
+  selectCallThreeAnswer,
+  toCallThreeSubmission,
+  type CallThreeAnswer,
+  type CallThreeConfidence,
+  type CallThreeDraft,
+  type CallThreeDraftEntry,
+  type CallThreeSubmission,
+  type CallThreeTarget,
+  type ResultAnswer,
+  type ThresholdAnswer,
 } from "./model.js";
+export {
+  CallThreeRoomApiError,
+  createCallThreeRoomApi,
+  parseCallThreeRoom,
+} from "./room-api.js";
 export type * from "./types.js";

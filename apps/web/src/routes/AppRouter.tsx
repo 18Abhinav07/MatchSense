@@ -16,6 +16,12 @@ import {
   type OnboardingProfileApi,
 } from "../features/onboarding/OnboardingFlow.js";
 import { MatchHub } from "../features/fixture/MatchHub.js";
+import {
+  RoomExperience,
+  createCallThreeRoomApi,
+  type CallThreeRoomApi,
+  type CallThreeRoomView,
+} from "../features/rooms/index.js";
 import { RecordedReplayLibrary } from "../features/replay/RecordedReplayLibrary.js";
 import { RecordedReplayScreen } from "../features/replay/RecordedReplayScreen.js";
 import { TodayHub, type TodayHubState } from "../features/today/TodayHub.js";
@@ -56,11 +62,14 @@ export interface AppRouterProps {
   initialPath?: string | undefined;
   initialReplayHistory?: readonly LiveSnapshot[] | undefined;
   initialReplayTimeline?: RecordedReplayTimeline | undefined;
+  initialRoom?: CallThreeRoomView | undefined;
+  initialRooms?: readonly CallThreeRoomView[] | undefined;
   memoryApi?: MemoryApi | undefined;
   momentApi?: MomentResolutionApi | undefined;
   productApi?: ProductApi | undefined;
   profileApi?: FanProfileApi | undefined;
   replayApi?: RecordedReplayApi | undefined;
+  roomApi?: CallThreeRoomApi | undefined;
 }
 
 function currentPath() {
@@ -109,6 +118,25 @@ function momentRouteFrom(path: string) {
 function replaySessionIdFrom(path: string) {
   const matched = /^\/replays\/([^/]+)$/u.exec(path);
   return matched ? decodeRouteSegment(matched[1]) : null;
+}
+
+function roomCreateFixtureIdFrom(path: string) {
+  const matched = /^\/rooms\/new\/([^/]+)$/u.exec(path);
+  return matched ? decodeRouteSegment(matched[1]) : null;
+}
+
+function roomInviteCodeFrom(path: string) {
+  const matched = /^\/rooms\/join\/([^/]+)$/u.exec(path);
+  const inviteCode = decodeRouteSegment(matched?.[1]);
+  return inviteCode && /^[A-Za-z0-9_-]{22}$/u.test(inviteCode)
+    ? inviteCode
+    : null;
+}
+
+function roomIdFrom(path: string) {
+  const matched = /^\/rooms\/([^/]+)$/u.exec(path);
+  const roomId = decodeRouteSegment(matched?.[1]);
+  return roomId && /^[A-Za-z0-9_:.@-]+$/u.test(roomId) ? roomId : null;
 }
 
 function teamFor(
@@ -231,11 +259,14 @@ export function AppRouter({
   initialProfile,
   initialReplayHistory,
   initialReplayTimeline,
+  initialRoom,
+  initialRooms,
   memoryApi,
   momentApi,
   productApi,
   profileApi,
   replayApi,
+  roomApi,
 }: AppRouterProps) {
   const product = useMemo(() => productApi ?? createProductApi(), [productApi]);
   const memoryClient = useMemo(
@@ -254,6 +285,7 @@ export function AppRouter({
     () => replayApi ?? createRecordedReplayApi(),
     [replayApi],
   );
+  const rooms = useMemo(() => roomApi ?? createCallThreeRoomApi(), [roomApi]);
   const [path, setPath] = useState(() =>
     publicPath(initialPath ?? currentPath()),
   );
@@ -305,6 +337,9 @@ export function AppRouter({
   const momentFixtureId = momentRoute?.fixtureId ?? null;
   const momentIdentity = momentRoute?.identity ?? null;
   const replaySessionId = replaySessionIdFrom(path);
+  const roomCreateFixtureId = roomCreateFixtureIdFrom(path);
+  const roomInviteCode = roomInviteCodeFrom(path);
+  const roomId = roomIdFrom(path);
   const scheduledFixture =
     fixtures.find((fixture) => fixture.fixtureId === selectedFixtureId) ?? null;
   const [exactFixture, setExactFixture] = useState<LiveSnapshot | null>(null);
@@ -380,9 +415,15 @@ export function AppRouter({
     return () => controller.abort();
   }, [initialFixtures, product, reload]);
 
+  const requestedFixtureId = selectedFixtureId ?? roomCreateFixtureId;
+  const requestedKnownFixture =
+    fixtures.find((fixture) => fixture.fixtureId === requestedFixtureId) ??
+    null;
+  const roomCreationFixture = requestedKnownFixture ?? exactFixture;
+
   useEffect(() => {
-    if (!selectedFixtureId || scheduledFixture) {
-      setExactFixture(scheduledFixture);
+    if (!requestedFixtureId || requestedKnownFixture) {
+      setExactFixture(requestedKnownFixture);
       setExactFixtureState("ready");
       return;
     }
@@ -390,7 +431,7 @@ export function AppRouter({
     setExactFixture(null);
     setExactFixtureState("loading");
     void product
-      .fetchFixture(selectedFixtureId, controller.signal)
+      .fetchFixture(requestedFixtureId, controller.signal)
       .then((next) => {
         setExactFixture(next);
         setExactFixtureState("ready");
@@ -401,7 +442,7 @@ export function AppRouter({
         }
       });
     return () => controller.abort();
-  }, [product, scheduledFixture, selectedFixtureId]);
+  }, [product, requestedFixtureId, requestedKnownFixture]);
 
   useEffect(() => {
     if (!memoryFixtureId) return;
@@ -657,6 +698,94 @@ export function AppRouter({
         catalog={catalog}
         onBack={() => navigate("/replays")}
         replay={replayTimeline}
+      />
+    );
+  }
+
+  if (path === "/rooms") {
+    return (
+      <RoomExperience
+        api={rooms}
+        defaultNickname={profile.handle ?? "supporter"}
+        favoriteTeam={profile.favoriteTeam}
+        onExit={() => navigate("/")}
+        onOpenRoom={(id) => navigate(`/rooms/${encodeURIComponent(id)}`)}
+        route={{
+          ...(initialRooms ? { initialRooms } : {}),
+          mode: "list",
+        }}
+        teams={catalog.teams}
+      />
+    );
+  }
+
+  if (roomCreateFixtureId) {
+    if (exactFixtureState === "loading") {
+      return (
+        <main className="ms-router-unavailable" id="main-content" role="status">
+          <p>Opening Call Three</p>
+          <span>Checking the scheduled match against live TxLINE data.</span>
+        </main>
+      );
+    }
+    if (exactFixtureState === "unavailable" || !roomCreationFixture) {
+      return (
+        <main className="ms-router-unavailable" id="main-content" role="status">
+          <p>Call Three unavailable</p>
+          <span>
+            This fixture could not be verified as an upcoming live match.
+          </span>
+          <button onClick={() => navigate("/")} type="button">
+            Back to match day
+          </button>
+        </main>
+      );
+    }
+    return (
+      <RoomExperience
+        api={rooms}
+        defaultNickname={profile.handle ?? "supporter"}
+        favoriteTeam={profile.favoriteTeam}
+        onExit={() =>
+          navigate(
+            `/matches/${encodeURIComponent(roomCreationFixture.fixtureId)}`,
+          )
+        }
+        onOpenRoom={(id) => navigate(`/rooms/${encodeURIComponent(id)}`)}
+        route={{ fixture: roomCreationFixture, mode: "create" }}
+        teams={catalog.teams}
+      />
+    );
+  }
+
+  if (roomInviteCode) {
+    return (
+      <RoomExperience
+        api={rooms}
+        defaultNickname={profile.handle ?? "supporter"}
+        favoriteTeam={profile.favoriteTeam}
+        onExit={() => navigate("/")}
+        onOpenRoom={(id) => navigate(`/rooms/${encodeURIComponent(id)}`)}
+        route={{ inviteCode: roomInviteCode, mode: "invite" }}
+        teams={catalog.teams}
+      />
+    );
+  }
+
+  if (roomId) {
+    return (
+      <RoomExperience
+        api={rooms}
+        defaultNickname={profile.handle ?? "supporter"}
+        favoriteTeam={profile.favoriteTeam}
+        onExit={() => navigate("/rooms")}
+        onOpenRoom={(id) => navigate(`/rooms/${encodeURIComponent(id)}`)}
+        route={{
+          ...(initialRoom?.id === roomId ? { initialRoom } : {}),
+          mode: "room",
+          roomId,
+        }}
+        teams={catalog.teams}
       />
     );
   }

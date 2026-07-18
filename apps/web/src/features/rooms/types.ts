@@ -1,196 +1,227 @@
-export type RoomMemberRole = "host" | "member" | "spectator";
-export type ReactionType = "roar" | "cold" | "called_it";
-export type SenseRoomPhase = "DRAFT" | "OPEN" | "LOCKED" | "LIVE" | "FINAL";
-export type SenseMarketId =
-  "winner" | "goals_2_5" | "cards_4_5" | "corners_9_5" | "btts";
-export type SenseSelection =
-  "HOME" | "DRAW" | "AWAY" | "OVER" | "UNDER" | "YES" | "NO";
+import type {
+  CallThreeSubmission,
+  CallThreeTarget,
+  ResultAnswer,
+  ThresholdAnswer,
+} from "./model.js";
 
-export interface RoomTeam {
-  readonly code: string;
-  readonly flagUrl?: string;
-  readonly foreground?: string;
-  readonly name: string;
-  readonly primary: string;
-  readonly secondary: string;
-}
+export type RoomStatus = "PRE_KICKOFF" | "LIVE" | "FINAL";
+export type RoomMemberRole = "PLAYER" | "SPECTATOR";
+export type ReactionKind = "ROAR" | "COLD" | "CALLED_IT";
 
 export interface RoomFixture {
-  readonly awayTeam: RoomTeam;
-  readonly homeTeam: RoomTeam;
-  readonly id: string;
-  readonly isReplay: boolean;
+  readonly awayTeam: string;
+  readonly fixtureId: string;
+  readonly homeTeam: string;
   readonly kickoffAt: string;
+  readonly minute: string;
+  readonly phase: string;
+  readonly provenance: "live_txline";
+  readonly revision: number;
+  readonly score: { readonly away: number; readonly home: number };
+  readonly sourceLabel: string;
+  readonly updatedAt: string;
 }
 
 export interface RoomMember {
-  readonly hasPicks: boolean;
+  readonly hasCalls: boolean;
   readonly id: string;
+  readonly isHost: boolean;
+  readonly joinedAt: number;
+  readonly lockedAt: number | null;
   readonly nickname: string;
   readonly role: RoomMemberRole;
   readonly teamCode: string | null;
 }
 
-export interface SenseMarket {
-  readonly id: SenseMarketId;
-  readonly label: string;
-  readonly selections: readonly {
-    readonly id: SenseSelection;
-    readonly label: string;
-    readonly price: number;
-  }[];
-  readonly sourceLabel: "MatchSense pricing";
-}
-
-export interface SensePick {
-  readonly allocation: number;
-  readonly marketId: SenseMarketId;
-  readonly selection: SenseSelection;
-}
-
-export interface SenseSlate {
-  readonly lockedAt: string;
+export interface CallThreeSlate {
+  readonly changedAt: number;
+  readonly lockedAt: number | null;
   readonly participantId: string;
-  readonly picks: readonly SensePick[];
+  readonly calls: Readonly<{
+    readonly result: Extract<
+      CallThreeSubmission,
+      { readonly target: "result" }
+    >;
+    readonly goals: Extract<CallThreeSubmission, { readonly target: "goals" }>;
+    readonly cards: Extract<CallThreeSubmission, { readonly target: "cards" }>;
+  }>;
 }
 
-export interface SenseLeaderboardRow {
-  readonly correctCount: number;
-  readonly memberId: string;
+export type CallThreeTargetResolution =
+  | {
+      readonly answer: ResultAnswer | ThresholdAnswer;
+      readonly observedAt: number;
+      readonly reason: null;
+      readonly state: "RESOLVED";
+      readonly version: number;
+    }
+  | {
+      readonly answer: null;
+      readonly observedAt: number;
+      readonly reason: string;
+      readonly state: "VOID";
+      readonly version: number;
+    };
+
+export interface CallThreeLeaderboardEntry {
+  readonly correctCalls: number;
+  readonly lockedAt: number;
   readonly nickname: string;
+  readonly participantId: string;
+  readonly provisional: boolean;
   readonly rank: number;
-  readonly returnedSense: number;
-}
-
-export interface RoomReactionReceipt {
-  readonly createdAt: string;
-  readonly id: string;
-  readonly momentId: string;
-  readonly momentRevision: number;
-  readonly recipient: Pick<RoomMember, "id" | "nickname">;
-  readonly sender: Pick<RoomMember, "id" | "nickname">;
-  readonly state: "held" | "delivered" | "overturned";
-  readonly type: ReactionType;
+  readonly score: number;
+  readonly voidCalls: number;
 }
 
 export interface RoomMoment {
-  readonly label: string;
-  readonly minute: string;
   readonly momentId: string;
   readonly revision: number;
-  readonly score: { readonly away: number; readonly home: number };
-  readonly state: "confirmed" | "review" | "overturned";
+  readonly varState: "CLEAR" | "HOLD" | "CONFIRMED" | "OVERTURNED";
 }
 
-export interface RoomView {
-  readonly currentMoment: RoomMoment | null;
-  readonly fixture: RoomFixture;
+export interface RoomReaction {
   readonly id: string;
-  readonly inviteUrl: string | null;
-  readonly isHost: boolean;
+  readonly kind: ReactionKind;
+  readonly momentId: string;
+  readonly reactedAt: number;
+  readonly recipientNickname: string;
+  readonly recipientParticipantId: string;
+  readonly recipientTeamCode: string | null;
+  readonly revision: number;
+  readonly senderNickname: string;
+  readonly senderParticipantId: string;
+  readonly senderTeamCode: string | null;
+  readonly status: "VISIBLE" | "OVERTURNED";
+}
+
+export interface CallThreeRoomView {
+  readonly createdAt: number;
+  readonly currentMoment: RoomMoment | null;
+  readonly finalisedAt: number | null;
+  readonly fixture: RoomFixture;
+  readonly hostParticipantId: string;
+  readonly id: string;
+  readonly kickoffAt: number;
+  readonly leaderboard: readonly CallThreeLeaderboardEntry[];
   readonly members: readonly RoomMember[];
+  readonly moments: readonly RoomMoment[];
+  readonly myCalls: CallThreeSlate | null;
   readonly name: string;
-  readonly reactions: readonly RoomReactionReceipt[];
-  readonly sense: {
-    readonly currencyLabel: "FRIEND SENSE · NO MONEY · NO PRIZES";
-    readonly leaderboard: readonly SenseLeaderboardRow[];
-    readonly markets: readonly SenseMarket[];
-    readonly mySlate: SenseSlate | null;
-    readonly phase: SenseRoomPhase;
-    readonly revealedSlates: readonly SenseSlate[];
-    readonly total: 100;
+  readonly points: {
+    readonly label: "MATCHSENSE POINTS · NON-TRANSFERABLE";
+    readonly lifetimeTotal: number;
+    readonly roomPoints: number;
   };
-  readonly viewerMemberId: string;
+  readonly reactions: readonly RoomReaction[];
+  readonly revision: number;
+  readonly status: RoomStatus;
+  readonly targets: Readonly<
+    Record<CallThreeTarget, CallThreeTargetResolution | null>
+  >;
+  readonly viewerParticipantId: string;
 }
 
 export interface RoomInvitePreview {
   readonly callsLocked: boolean;
-  readonly expiresAt: string;
+  readonly expiresAt: number;
   readonly fixture: RoomFixture;
   readonly hostNickname: string;
+  readonly kickoffAt: number;
+  readonly memberCount: number;
   readonly memberNicknames: readonly string[];
-  readonly roomName: string;
+  readonly name: string;
+  readonly roomId: string;
+  readonly status: RoomStatus;
 }
 
-export interface CreateRoomInput {
+export interface CreateCallThreeRoomInput {
   readonly fixtureId: string;
   readonly name: string;
   readonly nickname: string;
+  readonly teamCode?: string | null;
 }
 
-export interface CreateExperienceRoomInput {
-  readonly awayTeam: string;
-  readonly homeTeam: string;
-  readonly name: string;
-  readonly nickname: string;
-}
-
-export interface JoinRoomInput {
+export interface JoinCallThreeRoomInput {
   readonly inviteCode: string;
   readonly nickname: string;
-  readonly teamCode: string | null;
+  readonly teamCode?: string | null;
 }
 
-export interface SendReactionInput {
+export interface SendRoomReactionInput {
+  readonly kind: ReactionKind;
   readonly momentId: string;
-  readonly momentRevision: number;
-  readonly recipientMemberId: string;
-  readonly type: ReactionType;
+  readonly recipientParticipantId: string;
+  readonly revision: number;
 }
 
-export interface RoomApi {
-  createExperienceRoom(input: CreateExperienceRoomInput): Promise<{
-    readonly fixtureId: string;
-    readonly inviteUrl: string;
-    readonly room: RoomView;
-    readonly runId: string;
+export interface RoomEventSource {
+  onerror: ((event: Event) => void) | null;
+  addEventListener(type: string, listener: (event: MessageEvent) => void): void;
+  removeEventListener?(
+    type: string,
+    listener: (event: MessageEvent) => void,
+  ): void;
+  close(): void;
+}
+
+export interface CallThreeRoomApi {
+  create(input: CreateCallThreeRoomInput): Promise<{
+    readonly inviteCode: string;
+    readonly invitePath: string;
+    readonly room: CallThreeRoomView;
   }>;
-  createRoom(
-    input: CreateRoomInput,
-  ): Promise<{ readonly inviteUrl: string; readonly room: RoomView }>;
-  getRoom(roomId: string): Promise<RoomView>;
-  joinRoom(
-    input: JoinRoomInput,
-  ): Promise<{ readonly lateJoin: boolean; readonly room: RoomView }>;
-  openPicks(roomId: string): Promise<RoomView>;
-  previewInvite(inviteCode: string): Promise<RoomInvitePreview>;
-  savePicks(roomId: string, picks: readonly SensePick[]): Promise<RoomView>;
-  sendReaction(
+  get(roomId: string): Promise<CallThreeRoomView>;
+  join(input: JoinCallThreeRoomInput): Promise<CallThreeRoomView>;
+  list(): Promise<readonly CallThreeRoomView[]>;
+  lockCalls(roomId: string): Promise<CallThreeRoomView>;
+  preview(inviteCode: string): Promise<RoomInvitePreview>;
+  react(
     roomId: string,
-    input: SendReactionInput,
-  ): Promise<{ readonly receiptId: string; readonly room: RoomView }>;
-  startExperience(roomId: string): Promise<RoomView>;
-  subscribeRoom(
+    input: SendRoomReactionInput,
+  ): Promise<{
+    readonly reaction: RoomReaction;
+    readonly room: CallThreeRoomView;
+  }>;
+  setCalls(
     roomId: string,
-    viewerMemberId: string,
-    onRoom: (room: RoomView) => void,
+    calls: readonly CallThreeSubmission[],
+  ): Promise<CallThreeRoomView>;
+  subscribe(
+    roomId: string,
+    onRoom: (room: CallThreeRoomView) => void,
     onError: (error: Error) => void,
   ): () => void;
 }
 
+export interface CreateCallThreeRoomApiOptions {
+  readonly cookieSource?: (() => string) | undefined;
+  readonly eventSourceFactory?: (url: string) => RoomEventSource;
+  readonly fetchImpl?: typeof fetch;
+  readonly origin?: string;
+}
+
+export interface RoomCreationFixture {
+  readonly awayTeam: string;
+  readonly fixtureId: string;
+  readonly homeTeam: string;
+  readonly kickoffAt?: string | undefined;
+  readonly lifecycle?: string | undefined;
+  readonly mode?: string | undefined;
+  readonly phase?: string | undefined;
+  readonly provenance?: string | undefined;
+}
+
 export type RoomExperienceRoute =
   | {
-      readonly defaultNickname?: string;
-      readonly defaultRoomName?: string;
-      readonly fixture: RoomFixture;
-      readonly mode: "create";
+      readonly initialRooms?: readonly CallThreeRoomView[];
+      readonly mode: "list";
     }
+  | { readonly fixture: RoomCreationFixture; readonly mode: "create" }
+  | { readonly inviteCode: string; readonly mode: "invite" }
   | {
-      readonly defaultNickname?: string;
-      readonly defaultRoomName?: string;
-      readonly fixture: RoomFixture;
-      readonly mode: "experience-create";
-      readonly opponents: readonly RoomTeam[];
-    }
-  | {
-      readonly defaultNickname?: string;
-      readonly inviteCode: string;
-      readonly mode: "invite";
-      readonly preview?: RoomInvitePreview;
-      readonly teamCode?: string | null;
-    }
-  | {
-      readonly initialRoom?: RoomView;
+      readonly initialRoom?: CallThreeRoomView;
       readonly mode: "room";
       readonly roomId: string;
     };

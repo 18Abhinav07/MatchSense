@@ -7,6 +7,7 @@ import type { MomentResolution, ProductCatalog } from "../live-api.js";
 import type { VerifiedFixtureMemory } from "../memory-api.js";
 import type { LiveSnapshot } from "../product-state.js";
 import type { RecordedReplayTimeline } from "../replay-api.js";
+import type { CallThreeRoomView } from "../features/rooms/types.js";
 
 import { AppRouter, type AppRouterProps } from "./AppRouter.js";
 
@@ -49,6 +50,18 @@ const fixture: LiveSnapshot = {
   minute: "23'",
   provenance: "live_txline",
   score: { away: 0, home: 1 },
+};
+
+const upcomingRoomFixture: LiveSnapshot = {
+  awayTeam: "FRA",
+  fixtureId: "room-fixture",
+  kickoffAt: "2099-07-19T19:00:00.000Z",
+  homeTeam: "ARG",
+  lifecycle: "SCHEDULED",
+  minute: "—",
+  mode: "live",
+  provenance: "live_txline",
+  score: null,
 };
 
 const recordedFixture: LiveSnapshot = {
@@ -97,6 +110,83 @@ const replay: RecordedReplayTimeline = {
   mode: "recorded",
   replaySeq: 0,
   snapshot: recordedFixture as RecordedReplayTimeline["snapshot"],
+};
+
+const roomFixture = {
+  awayTeam: "FRA",
+  fixtureId: "room-fixture",
+  homeTeam: "ARG",
+  kickoffAt: "2026-07-19T19:00:00.000Z",
+  minute: "—",
+  phase: "scheduled",
+  provenance: "live_txline" as const,
+  revision: 1,
+  score: { away: 0, home: 0 },
+  sourceLabel: "TXLINE MATCH DATA",
+  updatedAt: "2026-07-18T19:00:00.000Z",
+};
+
+const room: CallThreeRoomView = {
+  createdAt: 1,
+  currentMoment: null,
+  finalisedAt: null,
+  fixture: roomFixture,
+  hostParticipantId: "fan-42",
+  id: "room-one",
+  kickoffAt: Date.parse(roomFixture.kickoffAt),
+  leaderboard: [],
+  members: [
+    {
+      hasCalls: false,
+      id: "fan-42",
+      isHost: true,
+      joinedAt: 1,
+      lockedAt: null,
+      nickname: "matchfan",
+      role: "PLAYER",
+      teamCode: "ARG",
+    },
+  ],
+  moments: [],
+  myCalls: null,
+  name: "Final night",
+  points: {
+    label: "MATCHSENSE POINTS · NON-TRANSFERABLE",
+    lifetimeTotal: 0,
+    roomPoints: 0,
+  },
+  reactions: [],
+  revision: 1,
+  status: "PRE_KICKOFF",
+  targets: { cards: null, goals: null, result: null },
+  viewerParticipantId: "fan-42",
+};
+
+const roomApi = {
+  create: async () => ({
+    inviteCode: "abcdefghijklmnopqrstuv",
+    invitePath: "/rooms/join/abcdefghijklmnopqrstuv",
+    room,
+  }),
+  get: async () => room,
+  join: async () => room,
+  list: async () => [room],
+  lockCalls: async () => room,
+  preview: async () => ({
+    callsLocked: false,
+    expiresAt: room.kickoffAt,
+    fixture: roomFixture,
+    hostNickname: "matchfan",
+    kickoffAt: room.kickoffAt,
+    memberCount: 1,
+    memberNicknames: ["matchfan"],
+    name: "Final night",
+    roomId: room.id,
+    status: "PRE_KICKOFF" as const,
+  }),
+  react: async () => ({ reaction: {} as never, room }),
+  setCalls: async () => room,
+  subscribe: () => () => undefined,
 };
 
 function render(props: Partial<AppRouterProps>) {
@@ -158,5 +248,30 @@ describe("truthful application router", () => {
     expect(momentMarkup).toContain("GOAL CONFIRMED");
     expect(replayLibraryMarkup).toContain("RECORDED REPLAYS");
     expect(replayMarkup).toContain("RECORDED · TXLINE DATA");
+  });
+
+  it("routes a durable Call Three Room without exposing retired Experience language", () => {
+    const markup = render({
+      initialPath: "/rooms/room-one",
+      ...({
+        initialRoom: room,
+        roomApi,
+      } as Partial<AppRouterProps>),
+    });
+
+    expect(markup).toContain("Final night");
+    expect(markup).toContain("Call Three");
+    expect(markup).not.toContain("Start Experience");
+  });
+
+  it("opens the Call Three creation form from a durable scheduled fixture", () => {
+    const markup = render({
+      initialFixtures: [upcomingRoomFixture],
+      initialPath: "/rooms/new/room-fixture",
+      ...({ roomApi } as Partial<AppRouterProps>),
+    });
+
+    expect(markup).toContain("Create Call Three Room");
+    expect(markup).not.toContain("Call Three unavailable");
   });
 });
