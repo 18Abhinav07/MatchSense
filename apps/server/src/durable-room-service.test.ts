@@ -1,10 +1,8 @@
 import type {
   RoomAggregateRecord,
   RoomAggregateRepository,
-  RoomStatus,
 } from "@matchsense/db";
-import type { FixtureSnapshot } from "@matchsense/contracts";
-import { registerMoment, RoomsDomainError } from "@matchsense/rooms";
+import type { CanonicalMoment, FixtureSnapshot } from "@matchsense/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -12,28 +10,53 @@ import {
   type DurableRoomAggregate,
 } from "./durable-room-service.js";
 
-const fixture: FixtureSnapshot = {
-  awayTeam: "FRA",
-  fixtureId: "experience:run-7",
-  homeTeam: "ARG",
-  kickoffAt: "2026-07-17T12:00:00.000Z",
+const kickoffAt = Date.parse("2026-07-18T18:00:00.000Z");
+
+const scheduledLiveFixture: FixtureSnapshot = {
+  awayTeam: "ESP",
+  fixtureId: "live-fixture-call-three",
+  homeTeam: "FRA",
+  kickoffAt: new Date(kickoffAt).toISOString(),
   lastEvent: null,
-  minute: "0'",
+  minute: "—",
   phase: "scheduled",
-  provenance: "synthetic_txline_shaped",
+  provenance: "live_txline",
   revision: 0,
   score: { away: 0, home: 0 },
-  sourceLabel: "SIMULATION · TXLINE-SHAPED DATA",
-  updatedAt: "2026-07-17T11:00:00.000Z",
+  scores: {
+    extraTime: { away: 0, home: 0 },
+    regulation: { away: 0, home: 0 },
+    shootout: { away: 0, home: 0 },
+  },
+  sourceLabel: "TXLINE · DEVNET SOURCE",
+  updatedAt: "2026-07-18T17:00:00.000Z",
 };
 
-const picks = [
-  { allocation: 20, marketId: "winner", selection: "HOME" },
-  { allocation: 20, marketId: "goals_2_5", selection: "OVER" },
-  { allocation: 20, marketId: "cards_4_5", selection: "UNDER" },
-  { allocation: 20, marketId: "corners_9_5", selection: "OVER" },
-  { allocation: 20, marketId: "btts", selection: "YES" },
-] as const;
+function canonicalMoment(input: {
+  kind: CanonicalMoment["kind"];
+  revision: number;
+  status: CanonicalMoment["status"];
+  score?: { away: number; home: number };
+}): CanonicalMoment {
+  return {
+    celebratesGoal: input.kind === "goal" && input.status === "confirmed",
+    eventTeam: input.kind === "goal" ? "FRA" : null,
+    familyId: `family:${input.kind}`,
+    fixtureId: scheduledLiveFixture.fixtureId,
+    id: `family:${input.kind}`,
+    identity: `family:${input.kind}:${input.revision}`,
+    kind: input.kind,
+    minute: input.kind === "phase.full_time" ? "FT" : "23'",
+    occurredAt: "2026-07-18T18:23:00.000Z",
+    player: null,
+    provenance: "live_txline",
+    revision: input.revision,
+    score: input.score ?? { away: 0, home: 1 },
+    sourceEnvelopeId: `source:${input.revision}`,
+    sourceEventId: `event:${input.revision}`,
+    status: input.status,
+  };
+}
 
 function inMemoryRepository(): RoomAggregateRepository<DurableRoomAggregate> & {
   records: Map<string, RoomAggregateRecord<DurableRoomAggregate>>;
@@ -111,665 +134,234 @@ function inMemoryRepository(): RoomAggregateRepository<DurableRoomAggregate> & {
   };
 }
 
-describe("durable Room happy path", () => {
-  it("joins, saves picks, starts the prepared Experience, and projects its first beat", async () => {
+const calls = [
+  {
+    answer: "HOME" as const,
+    confidence: 3 as const,
+    target: "result" as const,
+  },
+  { answer: "YES" as const, confidence: 2 as const, target: "goals" as const },
+  { answer: "NO" as const, confidence: 1 as const, target: "cards" as const },
+];
+
+describe("durable data-qualified Call Three Rooms", () => {
+  it("rejects synthetic, recorded, and already-live fixtures before persistence", async () => {
     const repository = inMemoryRepository();
-    let now = Date.parse("2026-07-17T12:00:00.000Z");
-    const preparedFixture = {
-      ...fixture,
-      kickoffAt: "2026-07-17T12:30:00.000Z",
-      updatedAt: "2026-07-17T12:00:00.000Z",
-    };
-    const startedFixture = {
-      ...preparedFixture,
-      kickoffAt: "2026-07-17T12:00:10.000Z",
-      updatedAt: "2026-07-17T12:00:00.000Z",
-    };
-    const follows: unknown[] = [];
-    const starts: string[] = [];
-    const service = createDurableRoomService({
-      fixture: async (fixtureId) =>
-        fixtureId === preparedFixture.fixtureId ? preparedFixture : null,
-      followFixture: async (input) => {
-        follows.push(input);
+    const now = () => kickoffAt - 60_000;
+    for (const fixture of [
+      {
+        ...scheduledLiveFixture,
+        provenance: "synthetic_txline_shaped" as const,
       },
+      {
+        ...scheduledLiveFixture,
+        provenance: "recorded_txline_authorised" as const,
+      },
+      { ...scheduledLiveFixture, phase: "first_half" as const },
+    ]) {
+      const service = createDurableRoomService({
+        fixture: async () => fixture,
+        now,
+        repository,
+      });
+      await expect(
+        service.create({
+          fixtureId: fixture.fixtureId,
+          host: { fanId: "fan-host", nickname: "Host" },
+          name: "Call Three",
+        }),
+      ).rejects.toMatchObject({ code: "ROOM_NOT_ELIGIBLE" });
+    }
+    expect(repository.records).toHaveLength(0);
+  });
+
+  it("locks exact calls at official kickoff and keeps late joiners as spectators", async () => {
+    const repository = inMemoryRepository();
+    let now = kickoffAt - 60_000;
+    const service = createDurableRoomService({
+      fixture: async () => scheduledLiveFixture,
       now: () => now,
       repository,
-      roomId: () => "room-orchestrated",
-      startFixture: async ({ fixture: candidate, ownerFanId }) => {
-        starts.push(candidate.fixtureId);
-        expect(ownerFanId).toBe("fan-host");
-        expect(repository.records.get("room-orchestrated")?.status).toBe(
-          "locked",
-        );
-        return startedFixture;
-      },
+      roomId: () => "room-lock",
     });
-
     const created = await service.create({
-      fixtureId: preparedFixture.fixtureId,
-      host: { fanId: "fan-host", nickname: "Abhinav", teamCode: "ARG" },
-      name: "Experience night",
+      fixtureId: scheduledLiveFixture.fixtureId,
+      host: { fanId: "fan-host", nickname: "Host" },
+      name: "Call Three",
     });
-    await service.join({
-      fanId: "fan-friend",
-      inviteCode: created.inviteCode,
-      nickname: "Pratik",
-      teamCode: "FRA",
-    });
-    expect(follows).toEqual([
-      {
-        eventPreferences: {
-          fullTime: true,
-          goals: true,
-          halfTime: true,
-          penalties: true,
-          redCards: true,
-          var: true,
-          yellowCards: true,
-        },
-        fanId: "fan-host",
-        fixtureId: preparedFixture.fixtureId,
-        mode: "demo",
-      },
-      {
-        eventPreferences: {
-          fullTime: true,
-          goals: true,
-          halfTime: true,
-          penalties: true,
-          redCards: true,
-          var: true,
-          yellowCards: true,
-        },
-        fanId: "fan-friend",
-        fixtureId: preparedFixture.fixtureId,
-        mode: "demo",
-      },
-    ]);
-    await service.openPicks(created.room.id, "fan-host");
-    await service.saveSensePicks({
-      fanId: "fan-friend",
-      picks,
+    await service.setCalls({
+      calls,
+      fanId: "fan-host",
       roomId: created.room.id,
     });
-
-    const live = await service.startExperience(created.room.id, "fan-host");
-    expect(live).toMatchObject({
-      fixture: { kickoffAt: startedFixture.kickoffAt },
-      kickoffAt: Date.parse(startedFixture.kickoffAt),
-      status: "LIVE",
-    });
-    expect(starts).toEqual([preparedFixture.fixtureId]);
-
-    const duplicate = await service.startExperience(
-      created.room.id,
-      "fan-host",
-    );
-    expect(duplicate.status).toBe("LIVE");
-    expect(starts).toEqual([preparedFixture.fixtureId]);
-
-    now = Date.parse(startedFixture.kickoffAt);
+    now = kickoffAt + 1_000;
     await service.projectFixture({
-      ...startedFixture,
-      minute: "0'",
-      phase: "first_half",
-      revision: 1,
-      updatedAt: startedFixture.kickoffAt,
-    });
-    await expect(
-      service.get(created.room.id, "fan-friend"),
-    ).resolves.toMatchObject({
-      fixture: { phase: "first_half", revision: 1 },
-      sense: { phase: "LIVE" },
-      status: "LIVE",
-    });
-  });
-
-  it("persists members, 100-Sense predictions, lifecycle, and final ledger", async () => {
-    const repository = inMemoryRepository();
-    let now = Date.parse("2026-07-17T13:00:00.000Z");
-    const service = createDurableRoomService({
-      fixture: async (fixtureId) =>
-        fixtureId === fixture.fixtureId ? fixture : null,
-      inviteBytes: () => Buffer.alloc(16, 7),
-      now: () => now,
-      repository,
-      roomId: () => "room-7",
-    });
-
-    const created = await service.create({
-      fixtureId: fixture.fixtureId,
-      host: { fanId: "fan-host", nickname: "Abhinav", teamCode: "ARG" },
-      name: "Final night",
-    });
-    const streamEvents: string[] = [];
-    const unsubscribe = await service.subscribe(
-      created.room.id,
-      "fan-host",
-      (event) => streamEvents.push(event.event),
-    );
-    expect(created.room).toMatchObject({
-      hostParticipantId: "fan-host",
-      sense: {
-        balance: { available: 100, committed: 0, starting: 100 },
-        phase: "DRAFT",
-        total: 100,
-      },
-      status: "PRE_KICKOFF",
-    });
-    expect(created.room.kickoffAt).toBe(now + 5 * 60_000);
-
-    const joined = await service.join({
-      fanId: "fan-friend",
-      inviteCode: created.inviteCode,
-      nickname: "Pratik",
-      teamCode: "FRA",
-    });
-    expect(joined.members).toHaveLength(2);
-    expect(joined.sense.balance).toEqual({
-      available: 100,
-      committed: 0,
-      returned: null,
-      starting: 100,
-    });
-
-    await service.openPicks("room-7", "fan-host");
-    expect(streamEvents).toEqual([
-      "room.snapshot",
-      "room.updated",
-      "room.updated",
-    ]);
-    const saved = await service.saveSensePicks({
-      fanId: "fan-friend",
-      picks,
-      roomId: "room-7",
-    });
-    expect(saved.sense.balance).toEqual({
-      available: 0,
-      committed: 100,
-      returned: null,
-      starting: 100,
-    });
-    expect(saved.sense.revealedSlates).toEqual([]);
-
-    now += 60_000;
-    const live = await service.startExperience("room-7", "fan-host");
-    expect(live.status).toBe("LIVE");
-    expect(live.sense.phase).toBe("LIVE");
-    expect(live.sense.revealedSlates).toHaveLength(1);
-
-    const final = await service.finalise({
-      finalisedAt: now + 4 * 60_000,
-      fixture: {
-        ...fixture,
-        phase: "full_time",
-        score: { away: 1, home: 2 },
-      },
-      outcomes: {
-        btts: "YES",
-        cards_4_5: "UNDER",
-        corners_9_5: "OVER",
-        goals_2_5: "OVER",
-        winner: "HOME",
-      },
-      roomId: "room-7",
-    });
-    expect(final.status).toBe("FINAL");
-    const friendFinal = await service.get("room-7", "fan-friend");
-    expect(friendFinal.sense.balance.returned).toBeGreaterThan(100);
-    expect(friendFinal.sense.ledger["fan-friend"]).toMatchObject({
-      committed: 100,
-      starting: 100,
-    });
-
-    const restarted = createDurableRoomService({
-      fixture: async () => fixture,
-      now: () => now,
-      repository,
-    });
-    await expect(restarted.get("room-7", "fan-friend")).resolves.toMatchObject({
-      id: "room-7",
-      status: "FINAL",
-      viewerParticipantId: "fan-friend",
-    });
-    expect(repository.records.get("room-7")).toMatchObject({
-      aggregate: {
-        lifecycle: [
-          { status: "LOBBY" },
-          { status: "LOCKED" },
-          { status: "LIVE" },
-          { status: "FINAL" },
-        ],
-      },
-      status: "final" satisfies RoomStatus,
-    });
-    unsubscribe();
-  });
-
-  it("rejects an invalid or overdrawn prediction slate without changing the ledger", async () => {
-    const repository = inMemoryRepository();
-    const service = createDurableRoomService({
-      fixture: async () => fixture,
-      now: () => Date.parse("2026-07-17T11:00:00.000Z"),
-      repository,
-      roomId: () => "room-8",
-    });
-    const created = await service.create({
-      fixtureId: fixture.fixtureId,
-      host: { fanId: "fan-host", nickname: "Abhinav" },
-      name: "Predictions",
-    });
-    await service.openPicks(created.room.id, "fan-host");
-
-    await expect(
-      service.saveSensePicks({
-        fanId: "fan-host",
-        picks: picks.map((pick, index) => ({
-          ...pick,
-          allocation: index === 0 ? 25 : 20,
-        })),
-        roomId: created.room.id,
+      ...scheduledLiveFixture,
+      lastEvent: canonicalMoment({
+        kind: "phase.kickoff",
+        revision: 1,
+        status: "confirmed",
       }),
-    ).rejects.toBeInstanceOf(RoomsDomainError);
-    await expect(
-      service.get(created.room.id, "fan-host"),
-    ).resolves.toMatchObject({
-      sense: {
-        balance: { available: 100, committed: 0, starting: 100 },
-      },
-    });
-  });
-
-  it("projects a real fixture from lobby through live to final automatically", async () => {
-    const repository = inMemoryRepository();
-    const realFixture: FixtureSnapshot = {
-      ...fixture,
-      fixtureId: "live-fixture-1",
-      kickoffAt: "2026-07-17T12:00:00.000Z",
-      provenance: "live_txline",
-      sourceLabel: "TXLINE · DEVNET SOURCE",
-    };
-    const service = createDurableRoomService({
-      fixture: async () => realFixture,
-      now: () => Date.parse("2026-07-17T11:00:00.000Z"),
-      repository,
-      roomId: () => "room-live",
-    });
-    const created = await service.create({
-      fixtureId: realFixture.fixtureId,
-      host: { fanId: "fan-host", nickname: "Abhinav" },
-      name: "Live final",
-    });
-    await service.join({
-      fanId: "fan-friend",
-      inviteCode: created.inviteCode,
-      nickname: "Pratik",
-    });
-
-    const reviewedGoal = {
-      celebratesGoal: false,
-      eventTeam: "ARG",
-      familyId: "txline:live-fixture-1:goal:1",
-      fixtureId: realFixture.fixtureId,
-      id: "txline:live-fixture-1:goal:1",
-      identity: "txline:live-fixture-1:goal:1:7",
-      kind: "goal",
-      minute: "12'",
-      occurredAt: "2026-07-17T12:12:00.000Z",
-      provenance: "live_txline",
-      revision: 7,
-      score: { away: 0, home: 1 },
-      sourceEnvelopeId: "txline:live-fixture-1:7:goal-hash",
-      status: "under_review",
-    } as const;
-
-    const reviewedSnapshot = {
-      ...realFixture,
-      lastEvent: reviewedGoal,
-      minute: "12'",
       phase: "first_half",
-      revision: 2,
-      score: reviewedGoal.score,
-      updatedAt: "2026-07-17T12:12:00.000Z",
-    } as const;
-    await service.projectFixture(reviewedSnapshot);
+      revision: 1,
+      updatedAt: new Date(now).toISOString(),
+    });
+    const joined = await service.join({
+      fanId: "fan-late",
+      inviteCode: created.inviteCode,
+      nickname: "Late fan",
+    });
+
+    expect(joined.members).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "fan-late", role: "SPECTATOR" }),
+      ]),
+    );
+    await expect(
+      service.setCalls({ calls, fanId: "fan-host", roomId: created.room.id }),
+    ).rejects.toMatchObject({ code: "KICKOFF_LOCKED" });
     await expect(
       service.get(created.room.id, "fan-host"),
     ).resolves.toMatchObject({
-      currentMoment: {
-        momentId: reviewedGoal.id,
-        revision: reviewedGoal.revision,
-        varState: "HOLD",
-      },
-      fixture: { revision: 2, score: { away: 0, home: 1 } },
-      sense: { phase: "LIVE" },
+      myCalls: { lockedAt: kickoffAt },
       status: "LIVE",
     });
-    const held = await service.react({
-      fanId: "fan-host",
-      kind: "ROAR",
-      momentId: reviewedGoal.id,
-      recipientParticipantId: "fan-friend",
-      revision: reviewedGoal.revision,
-      roomId: created.room.id,
-    });
-    expect(held.reaction.status).toBe("HELD");
-
-    const confirmedSnapshot = {
-      ...reviewedSnapshot,
-      lastEvent: {
-        ...reviewedGoal,
-        celebratesGoal: true,
-        identity: "txline:live-fixture-1:goal:1:8",
-        revision: 8,
-        status: "confirmed" as const,
-      },
-      revision: 3,
-      updatedAt: "2026-07-17T12:12:05.000Z",
-    };
-    await service.projectFixture(confirmedSnapshot);
-    const confirmed = await service.get(created.room.id, "fan-host");
-    expect(confirmed.currentMoment).toMatchObject({
-      momentId: reviewedGoal.id,
-      revision: 8,
-      varState: "CLEAR",
-    });
-    expect(confirmed.moments).toEqual(
-      expect.arrayContaining([
-        {
-          momentId: reviewedGoal.id,
-          revision: reviewedGoal.revision,
-          varState: "CONFIRMED",
-        },
-      ]),
-    );
-    expect(confirmed.reactions).toMatchObject([{ status: "VISIBLE" }]);
-    const versionAfterConfirmation = repository.records.get(
-      created.room.id,
-    )!.version;
-    await service.projectFixture(confirmedSnapshot);
-    expect(repository.records.get(created.room.id)!.version).toBe(
-      versionAfterConfirmation,
-    );
-
-    await service.projectFixture({
-      ...realFixture,
-      minute: "FT",
-      phase: "full_time",
-      revision: 9,
-      score: { away: 1, home: 2 },
-      updatedAt: "2026-07-17T14:00:00.000Z",
-    });
-    await expect(
-      service.get(created.room.id, "fan-host"),
-    ).resolves.toMatchObject({
-      fixture: { revision: 9, score: { away: 1, home: 2 } },
-      sense: { phase: "FINAL" },
-      status: "FINAL",
-    });
   });
 
-  it("voids cards and corners when the final fixture has no reliable stats", async () => {
+  it("accepts a teaser only after the referenced canonical Moment is confirmed and overturns it honestly", async () => {
     const repository = inMemoryRepository();
+    let now = kickoffAt - 60_000;
     const service = createDurableRoomService({
-      fixture: async () => fixture,
-      now: () => Date.parse("2026-07-17T11:00:00.000Z"),
-      repository,
-      roomId: () => "room-missing-stats",
-    });
-    const created = await service.create({
-      fixtureId: fixture.fixtureId,
-      host: { fanId: "fan-host", nickname: "Abhinav" },
-      name: "Truthful stats",
-    });
-    await service.openPicks(created.room.id, "fan-host");
-    await service.saveSensePicks({
-      fanId: "fan-host",
-      picks,
-      roomId: created.room.id,
-    });
-
-    await service.projectFixture({
-      ...fixture,
-      minute: "FT",
-      phase: "full_time",
-      revision: 1,
-      score: { away: 1, home: 2 },
-      updatedAt: "2026-07-17T14:00:00.000Z",
-    });
-
-    const final = await service.get(created.room.id, "fan-host");
-    expect(final.sense.balance.returned).toBe(170);
-    expect(final.sense.leaderboard).toMatchObject([
-      { correctCount: 3, participantId: "fan-host", returnedSense: 170 },
-    ]);
-    expect(
-      repository.records.get(created.room.id)?.aggregate.senseOutcomes,
-    ).toEqual({
-      btts: "YES",
-      cards_4_5: "VOID",
-      corners_9_5: "VOID",
-      goals_2_5: "OVER",
-      winner: "HOME",
-    });
-  });
-
-  it("resolves held reactions when a newer revision overturns the same canonical moment", async () => {
-    const repository = inMemoryRepository();
-    let now = Date.parse("2026-07-17T11:00:00.000Z");
-    const realFixture: FixtureSnapshot = {
-      ...fixture,
-      fixtureId: "live-fixture-overturn",
-      kickoffAt: "2026-07-17T12:00:00.000Z",
-      provenance: "live_txline",
-      sourceLabel: "TXLINE · DEVNET SOURCE",
-    };
-    const service = createDurableRoomService({
-      fixture: async () => realFixture,
-      now: () => now,
-      repository,
-      roomId: () => "room-overturn",
-    });
-    const created = await service.create({
-      fixtureId: realFixture.fixtureId,
-      host: { fanId: "fan-host", nickname: "Abhinav" },
-      name: "VAR night",
-    });
-    await service.join({
-      fanId: "fan-friend",
-      inviteCode: created.inviteCode,
-      nickname: "Pratik",
-    });
-    now = Date.parse("2026-07-17T12:15:00.000Z");
-    const familyId = "txline:live-fixture-overturn:goal:1";
-    const reviewedGoal = {
-      celebratesGoal: false,
-      eventTeam: "ARG",
-      familyId,
-      fixtureId: realFixture.fixtureId,
-      id: familyId,
-      identity: `${familyId}:7`,
-      kind: "goal",
-      minute: "12'",
-      occurredAt: "2026-07-17T12:12:00.000Z",
-      provenance: "live_txline",
-      revision: 7,
-      score: { away: 0, home: 1 },
-      sourceEnvelopeId: "txline:live-fixture-overturn:7:goal-hash",
-      status: "under_review",
-    } as const;
-    await service.projectFixture({
-      ...realFixture,
-      lastEvent: reviewedGoal,
-      minute: "12'",
-      phase: "first_half",
-      revision: 2,
-      score: reviewedGoal.score,
-      updatedAt: "2026-07-17T12:12:00.000Z",
-    });
-    const held = await service.react({
-      fanId: "fan-host",
-      kind: "ROAR",
-      momentId: familyId,
-      recipientParticipantId: "fan-friend",
-      revision: 7,
-      roomId: created.room.id,
-    });
-    expect(held.reaction.status).toBe("HELD");
-
-    await service.projectFixture({
-      ...realFixture,
-      lastEvent: {
-        ...reviewedGoal,
-        identity: `${familyId}:8`,
-        revision: 8,
-        score: { away: 0, home: 0 },
-        status: "overturned",
-      },
-      minute: "13'",
-      phase: "first_half",
-      revision: 3,
-      score: { away: 0, home: 0 },
-      updatedAt: "2026-07-17T12:13:00.000Z",
-    });
-
-    const overturned = await service.get(created.room.id, "fan-host");
-    expect(overturned.currentMoment).toMatchObject({
-      momentId: familyId,
-      revision: 8,
-      varState: "OVERTURNED",
-    });
-    expect(overturned.moments).toEqual(
-      expect.arrayContaining([
-        { momentId: familyId, revision: 7, varState: "OVERTURNED" },
-        { momentId: familyId, revision: 8, varState: "OVERTURNED" },
-      ]),
-    );
-    expect(overturned.reactions).toMatchObject([{ status: "OVERTURNED" }]);
-  });
-
-  it("persists recipient-scoped reactions and preserves the domain rate limit", async () => {
-    const repository = inMemoryRepository();
-    const now = Date.parse("2026-07-17T13:00:00.000Z");
-    const service = createDurableRoomService({
-      fixture: async () => fixture,
+      fixture: async () => scheduledLiveFixture,
       now: () => now,
       repository,
       roomId: () => "room-reactions",
     });
     const created = await service.create({
-      fixtureId: fixture.fixtureId,
-      host: { fanId: "fan-host", nickname: "Abhinav", teamCode: "ARG" },
-      name: "Rival night",
+      fixtureId: scheduledLiveFixture.fixtureId,
+      host: { fanId: "fan-host", nickname: "Host" },
+      name: "Call Three",
     });
     await service.join({
       fanId: "fan-friend",
       inviteCode: created.inviteCode,
-      nickname: "Pratik",
-      teamCode: "FRA",
+      nickname: "Friend",
     });
-    await service.startExperience(created.room.id, "fan-host");
-
-    const record = repository.records.get(created.room.id)!;
-    record.aggregate.room = registerMoment(record.aggregate.room, {
-      momentId: "goal-1",
-      revision: 1,
-      varState: "CLEAR",
+    now = kickoffAt + 60_000;
+    const underReview = canonicalMoment({
+      kind: "goal",
+      revision: 2,
+      status: "under_review",
     });
-    record.aggregate.room = registerMoment(record.aggregate.room, {
-      momentId: "goal-2",
-      revision: 1,
-      varState: "CLEAR",
+    await service.projectFixture({
+      ...scheduledLiveFixture,
+      lastEvent: underReview,
+      phase: "first_half",
+      revision: 2,
+      score: underReview.score,
+      updatedAt: new Date(now).toISOString(),
     });
-    record.aggregate.room = {
-      ...record.aggregate.room,
-      reactionPolicy: { limit: 1, windowMs: 10_000 },
-    };
-
-    const result = await service.react({
-      fanId: "fan-host",
-      kind: "ROAR",
-      momentId: "goal-1",
-      recipientParticipantId: "fan-friend",
-      revision: 1,
-      roomId: created.room.id,
-    });
-    expect(result.reaction).toMatchObject({
-      kind: "ROAR",
-      recipientParticipantId: "fan-friend",
-      senderParticipantId: "fan-host",
-      status: "VISIBLE",
-    });
-    expect(result.room.reactions).toHaveLength(1);
-
     await expect(
       service.react({
         fanId: "fan-host",
-        kind: "COLD",
-        momentId: "goal-2",
+        kind: "ROAR",
+        momentId: underReview.id,
         recipientParticipantId: "fan-friend",
-        revision: 1,
+        revision: underReview.revision,
         roomId: created.room.id,
       }),
-    ).rejects.toMatchObject({ code: "REACTION_RATE_LIMITED" });
-  });
+    ).rejects.toMatchObject({ code: "MOMENT_NOT_CONFIRMED" });
 
-  it("cannot regress a room when an older fixture projection loses a CAS race", async () => {
-    const repository = inMemoryRepository();
-    const compareAndSwap = repository.compareAndSwap;
-    let releaseOlder!: () => void;
-    let olderReachedCas!: () => void;
-    const olderBlocked = new Promise<void>((resolve) => {
-      olderReachedCas = resolve;
-    });
-    const olderRelease = new Promise<void>((resolve) => {
-      releaseOlder = resolve;
-    });
-    repository.compareAndSwap = async (input) => {
-      if (input.aggregate.fixture.revision === 2) {
-        olderReachedCas();
-        await olderRelease;
-      }
-      return compareAndSwap(input);
+    const confirmed = {
+      ...underReview,
+      revision: 3,
+      status: "confirmed" as const,
     };
-    const realFixture: FixtureSnapshot = {
-      ...fixture,
-      fixtureId: "live-race",
-      provenance: "live_txline",
-      sourceLabel: "TXLINE · DEVNET SOURCE",
-    };
-    const service = createDurableRoomService({
-      fixture: async () => realFixture,
-      now: () => Date.parse("2026-07-17T11:00:00.000Z"),
-      repository,
-      roomId: () => "room-race",
-    });
-    const created = await service.create({
-      fixtureId: realFixture.fixtureId,
-      host: { fanId: "fan-host", nickname: "Abhinav" },
-      name: "Projection race",
-    });
-    const older = service.projectFixture({
-      ...realFixture,
-      phase: "first_half",
-      revision: 2,
-      score: { away: 0, home: 1 },
-    });
-    await olderBlocked;
     await service.projectFixture({
-      ...realFixture,
+      ...scheduledLiveFixture,
+      lastEvent: confirmed,
       phase: "first_half",
       revision: 3,
-      score: { away: 0, home: 2 },
+      score: confirmed.score,
+      updatedAt: new Date(now + 1_000).toISOString(),
     });
-    releaseOlder();
-    await older;
+    await expect(
+      service.react({
+        fanId: "fan-host",
+        kind: "ROAR",
+        momentId: confirmed.id,
+        recipientParticipantId: "fan-friend",
+        revision: confirmed.revision,
+        roomId: created.room.id,
+      }),
+    ).resolves.toMatchObject({ reaction: { status: "VISIBLE" } });
+
+    await service.projectFixture({
+      ...scheduledLiveFixture,
+      lastEvent: { ...confirmed, revision: 4, status: "overturned" as const },
+      phase: "first_half",
+      revision: 4,
+      score: { away: 0, home: 0 },
+      updatedAt: new Date(now + 2_000).toISOString(),
+    });
+    await expect(
+      service.get(created.room.id, "fan-host"),
+    ).resolves.toMatchObject({
+      reactions: [expect.objectContaining({ status: "OVERTURNED" })],
+    });
+  });
+
+  it("finalizes verified facts into MatchSense Points and voids missing cards for everyone", async () => {
+    const repository = inMemoryRepository();
+    let now = kickoffAt - 60_000;
+    const service = createDurableRoomService({
+      fixture: async () => scheduledLiveFixture,
+      now: () => now,
+      repository,
+      roomId: () => "room-final",
+    });
+    const created = await service.create({
+      fixtureId: scheduledLiveFixture.fixtureId,
+      host: { fanId: "fan-host", nickname: "Host" },
+      name: "Call Three",
+    });
+    await service.setCalls({
+      calls,
+      fanId: "fan-host",
+      roomId: created.room.id,
+    });
+    now = kickoffAt + 7_200_000;
+    const finalMoment = canonicalMoment({
+      kind: "phase.full_time",
+      revision: 8,
+      status: "confirmed",
+      score: { away: 1, home: 2 },
+    });
+    await service.projectFixture({
+      ...scheduledLiveFixture,
+      lastEvent: finalMoment,
+      minute: "FT",
+      phase: "full_time",
+      revision: 8,
+      score: finalMoment.score,
+      scores: {
+        extraTime: { away: 0, home: 0 },
+        regulation: finalMoment.score,
+        shootout: { away: 0, home: 0 },
+      },
+      updatedAt: new Date(now).toISOString(),
+    });
 
     await expect(
       service.get(created.room.id, "fan-host"),
     ).resolves.toMatchObject({
-      fixture: { revision: 3, score: { away: 0, home: 2 } },
+      points: { lifetimeTotal: 500, roomPoints: 500 },
+      status: "FINAL",
+      targets: {
+        cards: { state: "VOID" },
+        goals: { answer: "YES", state: "RESOLVED" },
+        result: { answer: "HOME", state: "RESOLVED" },
+      },
     });
   });
 });

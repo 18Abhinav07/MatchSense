@@ -3,16 +3,25 @@ import { test } from "vitest";
 
 import {
   RoomsDomainError,
+  addCallThreeReaction,
   addReaction,
   applyStatRevision,
+  createCallThreeRoom,
   createRoom,
+  finaliseCallThreeRoom,
   finaliseRoom,
+  getCallThreeLeaderboard,
   getLeaderboard,
   joinRoom,
+  registerConfirmedCallThreeMoment,
+  supersedeCallThreeMoment,
   lockCalls,
+  lockCallThreeCalls,
   registerMoment,
   resolveMoment,
+  resolveCallThree,
   scoreSenseSlates,
+  setCallThreeCalls,
   setCalls,
   validateSensePicks,
   voidStat,
@@ -32,6 +41,206 @@ function hasCode(code: string) {
   return (error: unknown) =>
     error instanceof RoomsDomainError && error.code === code;
 }
+
+const liveCallThreeFixture = {
+  fixtureId: "fixture-call-three",
+  kickoffAt: 1_000,
+  provenance: "live_txline" as const,
+};
+
+const callThreeCalls = [
+  {
+    answer: "HOME" as const,
+    confidence: 3 as const,
+    target: "result" as const,
+  },
+  { answer: "YES" as const, confidence: 2 as const, target: "goals" as const },
+  { answer: "NO" as const, confidence: 1 as const, target: "cards" as const },
+];
+
+test("Call Three requires the exact three targets and one confidence of each value", () => {
+  let room = createCallThreeRoom({
+    createdAt: 100,
+    fixture: liveCallThreeFixture,
+    host: { id: "alice", nickname: "Alice" },
+    id: "call-three-1",
+  });
+  room = setCallThreeCalls(room, {
+    calls: callThreeCalls,
+    changedAt: 200,
+    participantId: "alice",
+  });
+  room = lockCallThreeCalls(room, { lockedAt: 300, participantId: "alice" });
+
+  assert.equal(room.callSlates.alice?.calls.result.answer, "HOME");
+  assert.equal(room.callSlates.alice?.lockedAt, 300);
+  assert.throws(
+    () =>
+      setCallThreeCalls(room, {
+        calls: [
+          { answer: "HOME", confidence: 3, target: "result" },
+          { answer: "YES", confidence: 3, target: "goals" },
+          { answer: "NO", confidence: 1, target: "cards" },
+        ],
+        changedAt: 400,
+        participantId: "alice",
+      }),
+    hasCode("CALLS_LOCKED"),
+  );
+});
+
+test("Call Three voids only targets missing from a verified final and awards no points for them", () => {
+  let room = createCallThreeRoom({
+    createdAt: 100,
+    fixture: liveCallThreeFixture,
+    host: { id: "alice", nickname: "Alice" },
+    id: "call-three-final",
+  });
+  room = setCallThreeCalls(room, {
+    calls: callThreeCalls,
+    changedAt: 200,
+    participantId: "alice",
+  });
+  room = finaliseCallThreeRoom(room, {
+    facts: {
+      finalisedAt: 1_500,
+      regulationResult: "HOME",
+      totalCards: null,
+      totalGoals: 3,
+      verified: true,
+      version: 1,
+    },
+  });
+
+  assert.deepEqual(
+    resolveCallThree({
+      finalisedAt: 1_500,
+      regulationResult: "HOME",
+      totalCards: null,
+      totalGoals: 3,
+      verified: true,
+      version: 1,
+    }).cards,
+    {
+      answer: null,
+      observedAt: 1_500,
+      reason: "verified final cards total is unavailable",
+      state: "VOID",
+      version: 1,
+    },
+  );
+  assert.deepEqual(
+    getCallThreeLeaderboard(room).map(({ participantId, score }) => ({
+      participantId,
+      score,
+    })),
+    [{ participantId: "alice", score: 500 }],
+  );
+});
+
+test("Call Three voids every target without a verified final canonical fact", () => {
+  const targets = resolveCallThree({
+    finalisedAt: 1_500,
+    regulationResult: "HOME",
+    totalCards: 6,
+    totalGoals: 3,
+    verified: false,
+    version: 1,
+  });
+
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(targets).map(([target, outcome]) => [
+        target,
+        outcome.state,
+      ]),
+    ),
+    { cards: "VOID", goals: "VOID", result: "VOID" },
+  );
+});
+
+test("Call Three rejects recorded and synthetic fixtures before a room is created", () => {
+  for (const provenance of [
+    "recorded_txline_authorised",
+    "synthetic_txline_shaped",
+  ] as const) {
+    assert.throws(
+      () =>
+        createCallThreeRoom({
+          createdAt: 100,
+          fixture: { ...liveCallThreeFixture, provenance },
+          host: { id: "alice", nickname: "Alice" },
+          id: `ineligible-${provenance}`,
+        }),
+      hasCode("ROOM_NOT_ELIGIBLE"),
+    );
+  }
+});
+
+test("Call Three reactions are accepted only for a confirmed canonical revision", () => {
+  let room = createCallThreeRoom({
+    createdAt: 100,
+    fixture: liveCallThreeFixture,
+    host: { id: "alice", nickname: "Alice" },
+    id: "call-three-reaction",
+  });
+  assert.throws(
+    () =>
+      addCallThreeReaction(room, {
+        kind: "ROAR",
+        momentId: "goal-1",
+        participantId: "alice",
+        reactedAt: 1_100,
+        revision: 1,
+      }),
+    hasCode("MOMENT_NOT_CONFIRMED"),
+  );
+  room = registerConfirmedCallThreeMoment(room, {
+    momentId: "goal-1",
+    revision: 1,
+  });
+  const reacted = addCallThreeReaction(room, {
+    kind: "ROAR",
+    momentId: "goal-1",
+    participantId: "alice",
+    reactedAt: 1_100,
+    revision: 1,
+  });
+  assert.equal(reacted.reaction?.status, "VISIBLE");
+});
+
+test("Call Three marks prior reactions overturned when a newer canonical correction supersedes them", () => {
+  let room = createCallThreeRoom({
+    createdAt: 100,
+    fixture: liveCallThreeFixture,
+    host: { id: "alice", nickname: "Alice" },
+    id: "call-three-correction",
+  });
+  room = registerConfirmedCallThreeMoment(room, {
+    momentId: "card-1",
+    revision: 1,
+  });
+  room = addCallThreeReaction(room, {
+    kind: "COLD",
+    momentId: "card-1",
+    participantId: "alice",
+    reactedAt: 1_100,
+    revision: 1,
+  }).room;
+
+  room = supersedeCallThreeMoment(room, {
+    momentId: "card-1",
+    revision: 2,
+  });
+  room = registerConfirmedCallThreeMoment(room, {
+    momentId: "card-1",
+    revision: 2,
+  });
+
+  assert.equal(room.moments['["card-1",1]']?.varState, "OVERTURNED");
+  assert.equal(room.moments['["card-1",2]']?.varState, "CLEAR");
+  assert.equal(room.reactions[0]?.status, "OVERTURNED");
+});
 
 test("creates a room, preserves nicknames, and makes kickoff joiners spectators", () => {
   let room = createRoom({

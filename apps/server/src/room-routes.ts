@@ -182,6 +182,10 @@ const safeDomainErrors: Record<
     message: "Calls locked at kickoff",
   },
   MEMBER_NOT_FOUND: { statusCode: 404, message: "Room member not found" },
+  MOMENT_NOT_CONFIRMED: {
+    statusCode: 409,
+    message: "Moment is not confirmed",
+  },
   MOMENT_NOT_FOUND: { statusCode: 404, message: "Moment not found" },
   MOMENT_RESOLUTION_CONFLICT: {
     statusCode: 409,
@@ -202,6 +206,10 @@ const safeDomainErrors: Record<
   REVISION_CONFLICT: {
     statusCode: 409,
     message: "Revision conflicts with current truth",
+  },
+  ROOM_NOT_ELIGIBLE: {
+    statusCode: 409,
+    message: "Fixture is not eligible for Call Three",
   },
   ROOM_FINAL: { statusCode: 409, message: "Room is already final" },
 };

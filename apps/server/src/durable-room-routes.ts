@@ -1,13 +1,15 @@
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
 import { RoomsDomainError } from "@matchsense/rooms";
 
 import type { FanSessionService } from "./fan-session.js";
 import { requireFanMutationSession, requireFanSession } from "./fan-routes.js";
+import type {
+  DurableRoomService,
+  DurableRoomStreamEvent,
+} from "./durable-room-service.js";
 import { RoomServiceError, type RoomServiceErrorCode } from "./room-service.js";
-import type { DurableRoomService } from "./durable-room-service.js";
-import type { RoomStreamEvent } from "./room-service.js";
 
 const nickname = z.string().trim().min(1).max(30);
 const teamCode = z
@@ -22,15 +24,6 @@ const createBody = z
     name: z.string().trim().min(1).max(60),
   })
   .strict();
-const createExperienceRoomBody = z
-  .object({
-    awayTeam: teamCode,
-    homeTeam: teamCode,
-    name: z.string().trim().min(1).max(60),
-    nickname,
-  })
-  .strict()
-  .refine((value) => value.awayTeam !== value.homeTeam);
 const joinBody = z
   .object({
     inviteCode: z.string().regex(/^[A-Za-z0-9_-]{22}$/u),
@@ -38,33 +31,35 @@ const joinBody = z
     teamCode: teamCode.optional(),
   })
   .strict();
-const sensePicksBody = z
+const callsBody = z
   .object({
-    picks: z
+    calls: z
       .array(
-        z
-          .object({
-            allocation: z.number().int().min(5).max(80).multipleOf(5),
-            marketId: z.enum([
-              "winner",
-              "goals_2_5",
-              "cards_4_5",
-              "corners_9_5",
-              "btts",
-            ]),
-            selection: z.enum([
-              "HOME",
-              "DRAW",
-              "AWAY",
-              "OVER",
-              "UNDER",
-              "YES",
-              "NO",
-            ]),
-          })
-          .strict(),
+        z.discriminatedUnion("target", [
+          z
+            .object({
+              answer: z.enum(["HOME", "DRAW", "AWAY"]),
+              confidence: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+              target: z.literal("result"),
+            })
+            .strict(),
+          z
+            .object({
+              answer: z.enum(["YES", "NO"]),
+              confidence: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+              target: z.literal("goals"),
+            })
+            .strict(),
+          z
+            .object({
+              answer: z.enum(["YES", "NO"]),
+              confidence: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+              target: z.literal("cards"),
+            })
+            .strict(),
+        ]),
       )
-      .length(5),
+      .length(3),
   })
   .strict();
 const reactionBody = z
@@ -82,18 +77,15 @@ interface DurableRoomRouteService {
   get(...input: Parameters<DurableRoomService["get"]>): Promise<unknown>;
   join(input: Parameters<DurableRoomService["join"]>[0]): Promise<unknown>;
   list(...input: Parameters<DurableRoomService["list"]>): Promise<unknown>;
-  openPicks(
-    ...input: Parameters<DurableRoomService["openPicks"]>
+  lockCalls(
+    input: Parameters<DurableRoomService["lockCalls"]>[0],
   ): Promise<unknown>;
   preview(
     ...input: Parameters<DurableRoomService["preview"]>
   ): Promise<unknown>;
   react(input: Parameters<DurableRoomService["react"]>[0]): Promise<unknown>;
-  saveSensePicks(
-    input: Parameters<DurableRoomService["saveSensePicks"]>[0],
-  ): Promise<unknown>;
-  startExperience(
-    ...input: Parameters<DurableRoomService["startExperience"]>
+  setCalls(
+    input: Parameters<DurableRoomService["setCalls"]>[0],
   ): Promise<unknown>;
   subscribe(
     ...input: Parameters<DurableRoomService["subscribe"]>
@@ -101,6 +93,10 @@ interface DurableRoomRouteService {
 }
 
 export interface DurableRoomRouteDependencies {
+  /**
+   * Compatibility-only until main process wiring is simplified. Durable route
+   * registration intentionally never exposes this retired Experience hook.
+   */
   prepareExperienceRoom?: (input: {
     awayTeam: string;
     fanId: string;
@@ -132,7 +128,7 @@ function sendError(reply: FastifyReply, error: unknown) {
           ? 400
           : 409;
     return reply.code(status).send({
-      error: { code: error.code, message: "Room prediction is invalid" },
+      error: { code: error.code, message: "Room action is invalid" },
     });
   }
   return reply.code(500).send({
@@ -143,7 +139,7 @@ function sendError(reply: FastifyReply, error: unknown) {
   });
 }
 
-function formatSse(event: RoomStreamEvent) {
+function formatSse(event: DurableRoomStreamEvent) {
   return `id: ${event.id}\nevent: ${event.event}\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
@@ -151,29 +147,6 @@ export function registerDurableRoomRoutes(
   app: FastifyInstance,
   dependencies: DurableRoomRouteDependencies,
 ) {
-  if (dependencies.prepareExperienceRoom) {
-    app.post("/api/v1/experience/rooms", async (request, reply) => {
-      const session = await requireFanMutationSession(
-        request,
-        reply,
-        dependencies.sessions,
-      );
-      if (!session) return;
-      const parsed = createExperienceRoomBody.safeParse(request.body);
-      if (!parsed.success) return invalidRequest(reply);
-      try {
-        return reply.code(201).send(
-          await dependencies.prepareExperienceRoom!({
-            ...parsed.data,
-            fanId: session.fan.id,
-          }),
-        );
-      } catch (error) {
-        return sendError(reply, error);
-      }
-    });
-  }
-
   app.post("/api/v1/rooms", async (request, reply) => {
     const session = await requireFanMutationSession(
       request,
@@ -320,8 +293,34 @@ export function registerDurableRoomRoutes(
     },
   );
 
+  app.put<{ Params: { roomId: string } }>(
+    "/api/v1/rooms/:roomId/calls",
+    async (request, reply) => {
+      const session = await requireFanMutationSession(
+        request,
+        reply,
+        dependencies.sessions,
+      );
+      if (!session) return;
+      const params = roomIdParams.safeParse(request.params);
+      const body = callsBody.safeParse(request.body);
+      if (!params.success || !body.success) return invalidRequest(reply);
+      try {
+        return reply.send(
+          await dependencies.service.setCalls({
+            calls: body.data.calls,
+            fanId: session.fan.id,
+            roomId: params.data.roomId,
+          }),
+        );
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
   app.post<{ Params: { roomId: string } }>(
-    "/api/v1/rooms/:roomId/picks/open",
+    "/api/v1/rooms/:roomId/calls/lock",
     async (request, reply) => {
       const session = await requireFanMutationSession(
         request,
@@ -334,34 +333,8 @@ export function registerDurableRoomRoutes(
       if (!params.success || !body.success) return invalidRequest(reply);
       try {
         return reply.send(
-          await dependencies.service.openPicks(
-            params.data.roomId,
-            session.fan.id,
-          ),
-        );
-      } catch (error) {
-        return sendError(reply, error);
-      }
-    },
-  );
-
-  app.put<{ Params: { roomId: string } }>(
-    "/api/v1/rooms/:roomId/picks",
-    async (request, reply) => {
-      const session = await requireFanMutationSession(
-        request,
-        reply,
-        dependencies.sessions,
-      );
-      if (!session) return;
-      const params = roomIdParams.safeParse(request.params);
-      const body = sensePicksBody.safeParse(request.body);
-      if (!params.success || !body.success) return invalidRequest(reply);
-      try {
-        return reply.send(
-          await dependencies.service.saveSensePicks({
+          await dependencies.service.lockCalls({
             fanId: session.fan.id,
-            picks: body.data.picks,
             roomId: params.data.roomId,
           }),
         );
@@ -395,39 +368,5 @@ export function registerDurableRoomRoutes(
         return sendError(reply, error);
       }
     },
-  );
-
-  const startExperience = async (
-    request: FastifyRequest<{ Params: { roomId: string } }>,
-    reply: FastifyReply,
-  ) => {
-    const session = await requireFanMutationSession(
-      request,
-      reply,
-      dependencies.sessions,
-    );
-    if (!session) return;
-    const params = roomIdParams.safeParse(request.params);
-    const body = emptyBody.safeParse(request.body ?? {});
-    if (!params.success || !body.success) return invalidRequest(reply);
-    try {
-      return reply.send(
-        await dependencies.service.startExperience(
-          params.data.roomId,
-          session.fan.id,
-        ),
-      );
-    } catch (error) {
-      return sendError(reply, error);
-    }
-  };
-
-  app.post<{ Params: { roomId: string } }>(
-    "/api/v1/rooms/:roomId/start",
-    startExperience,
-  );
-  app.post<{ Params: { roomId: string } }>(
-    "/api/v1/rooms/:roomId/demo/start",
-    startExperience,
   );
 }

@@ -31,6 +31,8 @@ export type RoomsErrorCode =
   | "INVALID_REACTION_POLICY"
   | "INVALID_REACTION"
   | "MOMENT_NOT_FOUND"
+  | "MOMENT_NOT_CONFIRMED"
+  | "ROOM_NOT_ELIGIBLE"
   | "MOMENT_RESOLUTION_CONFLICT";
 
 export class RoomsDomainError extends Error {
@@ -744,8 +746,669 @@ export function resolveMoment(
   };
 }
 
-// 100-Sense is the fan-facing room game. The original Call Three exports above
-// remain available for replay compatibility while the product migrates.
+/**
+ * The durable product room protocol. It is deliberately separate from the
+ * legacy demo/100-Sense exports below so a deployed durable Room cannot inherit
+ * their allocation, price, or synthetic-fixture semantics while those old
+ * surfaces are retired separately.
+ */
+export const CALL_THREE_TARGETS = ["result", "goals", "cards"] as const;
+
+export type CallThreeTarget = (typeof CALL_THREE_TARGETS)[number];
+export type RegulationResult = "HOME" | "DRAW" | "AWAY";
+export type ThresholdAnswer = "YES" | "NO";
+export type CallThreeAnswer = RegulationResult | ThresholdAnswer;
+
+export type CallThreeInput =
+  | {
+      readonly target: "result";
+      readonly answer: RegulationResult;
+      readonly confidence: Confidence;
+    }
+  | {
+      readonly target: "goals" | "cards";
+      readonly answer: ThresholdAnswer;
+      readonly confidence: Confidence;
+    };
+
+export type CallThreeCall = CallThreeInput;
+
+export interface CallThreeSlate {
+  readonly participantId: string;
+  readonly calls: Readonly<{
+    result: Extract<CallThreeCall, { target: "result" }>;
+    goals: Extract<CallThreeCall, { target: "goals" }>;
+    cards: Extract<CallThreeCall, { target: "cards" }>;
+  }>;
+  readonly changedAt: number;
+  readonly lockedAt: number | null;
+}
+
+export interface CallThreeResolvedTarget {
+  readonly state: "RESOLVED";
+  readonly answer: CallThreeAnswer;
+  readonly reason: null;
+  readonly observedAt: number;
+  readonly version: number;
+}
+
+export interface CallThreeVoidTarget {
+  readonly state: "VOID";
+  readonly answer: null;
+  readonly reason: string;
+  readonly observedAt: number;
+  readonly version: number;
+}
+
+export type CallThreeTargetResolution =
+  CallThreeResolvedTarget | CallThreeVoidTarget;
+
+export interface CallThreeFinalFacts {
+  readonly finalisedAt: number;
+  readonly regulationResult: RegulationResult | null;
+  readonly totalCards: number | null;
+  readonly totalGoals: number | null;
+  /** Only the confirmed canonical game_finalised fact may set this true. */
+  readonly verified: boolean;
+  readonly version: number;
+}
+
+export interface CallThreeFixture {
+  readonly fixtureId: string;
+  readonly kickoffAt: number;
+  readonly provenance:
+    "live_txline" | "recorded_txline_authorised" | "synthetic_txline_shaped";
+}
+
+export interface CallThreeRoomState {
+  readonly id: string;
+  readonly matchId: string;
+  readonly kickoffAt: number;
+  readonly createdAt: number;
+  readonly status: RoomStatus;
+  readonly finalisedAt: number | null;
+  readonly finalisedVersion: number | null;
+  readonly members: readonly RoomMember[];
+  readonly callSlates: Readonly<Record<string, CallThreeSlate>>;
+  readonly targets: Readonly<
+    Record<CallThreeTarget, CallThreeTargetResolution | null>
+  >;
+  readonly moments: Readonly<Record<string, MomentRevision>>;
+  readonly reactions: readonly RoomReaction[];
+  readonly reactionPolicy: ReactionPolicy;
+}
+
+export interface CallThreeLeaderboardEntry {
+  readonly correctCalls: number;
+  readonly lockedAt: number;
+  readonly nickname: string;
+  readonly participantId: string;
+  readonly provisional: boolean;
+  readonly rank: number;
+  /** Non-transferable MatchSense Points awarded by this Room. */
+  readonly score: number;
+  readonly voidCalls: number;
+}
+
+export interface CallThreeReactionResult {
+  readonly room: CallThreeRoomState;
+  readonly accepted: boolean;
+  readonly reason: ReactionRejectionReason | null;
+  readonly reaction: RoomReaction | null;
+}
+
+const callThreeTargetSet = new Set<string>(CALL_THREE_TARGETS);
+
+function assertCallThreeRoomOpen(room: CallThreeRoomState) {
+  if (room.status === "FINAL") {
+    fail("ROOM_FINAL", "room is final and cannot be changed");
+  }
+}
+
+function assertCallThreeBeforeKickoff(room: CallThreeRoomState, at: number) {
+  assertTimestamp(at, "change timestamp");
+  if (room.status !== "PRE_KICKOFF" || at >= room.kickoffAt) {
+    fail("KICKOFF_LOCKED", "calls are hard-locked at kickoff");
+  }
+}
+
+function isRegulationResult(value: string): value is RegulationResult {
+  return value === "HOME" || value === "DRAW" || value === "AWAY";
+}
+
+function isThresholdAnswer(value: string): value is ThresholdAnswer {
+  return value === "YES" || value === "NO";
+}
+
+function validateCallThreeCalls(
+  calls: readonly CallThreeInput[],
+): CallThreeSlate["calls"] {
+  if (calls.length !== CALL_THREE_TARGETS.length) {
+    fail("INVALID_CALLS", "Call Three requires exactly three calls");
+  }
+  const byTarget = new Map<CallThreeTarget, CallThreeCall>();
+  const confidences = new Set<number>();
+  for (const call of calls) {
+    if (
+      !callThreeTargetSet.has(call.target) ||
+      ![1, 2, 3].includes(call.confidence) ||
+      (call.target === "result" && !isRegulationResult(call.answer)) ||
+      (call.target !== "result" && !isThresholdAnswer(call.answer))
+    ) {
+      fail(
+        "INVALID_CALLS",
+        "Call Three target, answer, or confidence is invalid",
+      );
+    }
+    if (byTarget.has(call.target)) {
+      fail("INVALID_CALLS", `duplicate Call Three target: ${call.target}`);
+    }
+    if (confidences.has(call.confidence)) {
+      fail("INVALID_CALLS", "confidence values 1, 2, and 3 must be used once");
+    }
+    byTarget.set(call.target, { ...call });
+    confidences.add(call.confidence);
+  }
+  const result = byTarget.get("result");
+  const goals = byTarget.get("goals");
+  const cards = byTarget.get("cards");
+  if (!result || !goals || !cards || confidences.size !== 3) {
+    fail(
+      "INVALID_CALLS",
+      "result, goals, cards, and confidence 3/2/1 are required",
+    );
+  }
+  return {
+    result: result as Extract<CallThreeCall, { target: "result" }>,
+    goals: goals as Extract<CallThreeCall, { target: "goals" }>,
+    cards: cards as Extract<CallThreeCall, { target: "cards" }>,
+  };
+}
+
+function hardLockCallThreeAtKickoff(
+  room: CallThreeRoomState,
+): CallThreeRoomState {
+  if (room.status === "FINAL") return room;
+  const callSlates = Object.fromEntries(
+    Object.entries(room.callSlates).map(([participantId, slate]) => [
+      participantId,
+      slate.lockedAt === null ? { ...slate, lockedAt: room.kickoffAt } : slate,
+    ]),
+  ) as Record<string, CallThreeSlate>;
+  return {
+    ...room,
+    callSlates,
+    status: "LIVE",
+  };
+}
+
+/**
+ * Advances a real-fixture Call Three Room from its scheduled state without
+ * trusting a caller-supplied lifecycle label. The authoritative fixture
+ * projection supplies `observedAt`; once it reaches official kickoff every
+ * existing slate is frozen at that same kickoff timestamp.
+ */
+export function startCallThreeRoom(
+  room: CallThreeRoomState,
+  input: { readonly observedAt: number },
+): CallThreeRoomState {
+  assertCallThreeRoomOpen(room);
+  assertTimestamp(input.observedAt, "observedAt");
+  return input.observedAt >= room.kickoffAt
+    ? hardLockCallThreeAtKickoff(room)
+    : room;
+}
+
+function voidCallThreeTarget(
+  reason: string,
+  facts: CallThreeFinalFacts,
+): CallThreeVoidTarget {
+  return {
+    answer: null,
+    observedAt: facts.finalisedAt,
+    reason,
+    state: "VOID",
+    version: facts.version,
+  };
+}
+
+function resolvedCallThreeTarget(
+  answer: CallThreeAnswer,
+  facts: CallThreeFinalFacts,
+): CallThreeResolvedTarget {
+  return {
+    answer,
+    observedAt: facts.finalisedAt,
+    reason: null,
+    state: "RESOLVED",
+    version: facts.version,
+  };
+}
+
+function assertedFinalTotal(value: number | null, label: string) {
+  if (value !== null && (!Number.isSafeInteger(value) || value < 0)) {
+    fail("INVALID_FINAL_EVENT", `${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+/**
+ * Converts the verified final facts into the three exact Call Three outcomes.
+ * A missing canonical fact deliberately voids only its target; it never invents
+ * an outcome from a partial snapshot.
+ */
+export function resolveCallThree(
+  facts: CallThreeFinalFacts,
+): Readonly<Record<CallThreeTarget, CallThreeTargetResolution>> {
+  assertTimestamp(facts.finalisedAt, "finalisedAt");
+  assertRevision(facts.version);
+  const goals = assertedFinalTotal(facts.totalGoals, "final goals total");
+  const cards = assertedFinalTotal(facts.totalCards, "final cards total");
+  if (!facts.verified) {
+    const unavailable = voidCallThreeTarget(
+      "verified final fact is unavailable",
+      facts,
+    );
+    return { cards: unavailable, goals: unavailable, result: unavailable };
+  }
+  return {
+    result: facts.regulationResult
+      ? resolvedCallThreeTarget(facts.regulationResult, facts)
+      : voidCallThreeTarget("verified regulation result is unavailable", facts),
+    goals:
+      goals === null
+        ? voidCallThreeTarget(
+            "verified final goals total is unavailable",
+            facts,
+          )
+        : resolvedCallThreeTarget(goals >= 3 ? "YES" : "NO", facts),
+    cards:
+      cards === null
+        ? voidCallThreeTarget(
+            "verified final cards total is unavailable",
+            facts,
+          )
+        : resolvedCallThreeTarget(cards >= 5 ? "YES" : "NO", facts),
+  };
+}
+
+export function createCallThreeRoom(input: {
+  readonly id: string;
+  readonly createdAt: number;
+  readonly fixture: CallThreeFixture;
+  readonly host: ParticipantIdentity;
+  readonly reactionPolicy?: ReactionPolicy;
+}): CallThreeRoomState {
+  if (input.fixture.provenance !== "live_txline") {
+    fail(
+      "ROOM_NOT_ELIGIBLE",
+      "Call Three is available only for live TxLINE fixtures",
+    );
+  }
+  const id = cleanRequiredText(input.id, "INVALID_ROOM", "room id");
+  const matchId = cleanRequiredText(
+    input.fixture.fixtureId,
+    "INVALID_ROOM",
+    "fixture id",
+  );
+  assertTimestamp(input.createdAt, "createdAt");
+  assertTimestamp(input.fixture.kickoffAt, "kickoffAt");
+  if (input.createdAt >= input.fixture.kickoffAt) {
+    fail(
+      "ROOM_NOT_ELIGIBLE",
+      "Call Three rooms must be created before kickoff",
+    );
+  }
+  return {
+    callSlates: {},
+    createdAt: input.createdAt,
+    finalisedAt: null,
+    finalisedVersion: null,
+    id,
+    kickoffAt: input.fixture.kickoffAt,
+    matchId,
+    members: [makeMember(input.host, "PLAYER", input.createdAt)],
+    moments: {},
+    reactionPolicy: validateReactionPolicy(
+      input.reactionPolicy ?? DEFAULT_REACTION_POLICY,
+    ),
+    reactions: [],
+    status: "PRE_KICKOFF",
+    targets: { cards: null, goals: null, result: null },
+  };
+}
+
+export function joinCallThreeRoom(
+  room: CallThreeRoomState,
+  input: {
+    readonly participant: ParticipantIdentity;
+    readonly joinedAt: number;
+  },
+): CallThreeRoomState {
+  assertCallThreeRoomOpen(room);
+  const member = makeMember(
+    input.participant,
+    input.joinedAt >= room.kickoffAt ? "SPECTATOR" : "PLAYER",
+    input.joinedAt,
+  );
+  if (room.members.some(({ id }) => id === member.id)) {
+    fail("PARTICIPANT_EXISTS", `participant already exists: ${member.id}`);
+  }
+  if (room.members.some(({ nicknameKey: key }) => key === member.nicknameKey)) {
+    fail("NICKNAME_TAKEN", `nickname is already in use: ${member.nickname}`);
+  }
+  const live =
+    input.joinedAt >= room.kickoffAt ? hardLockCallThreeAtKickoff(room) : room;
+  return { ...live, members: [...live.members, member] };
+}
+
+export function setCallThreeCalls(
+  room: CallThreeRoomState,
+  input: {
+    readonly calls: readonly CallThreeInput[];
+    readonly changedAt: number;
+    readonly participantId: string;
+  },
+): CallThreeRoomState {
+  assertCallThreeRoomOpen(room);
+  assertCallThreeBeforeKickoff(room, input.changedAt);
+  const member = room.members.find(({ id }) => id === input.participantId);
+  if (!member) fail("MEMBER_NOT_FOUND", "participant is not in this Room");
+  if (member.role !== "PLAYER")
+    fail("NOT_PLAYER", "spectators cannot make calls");
+  const existing = room.callSlates[member.id];
+  if (existing?.lockedAt !== null && existing?.lockedAt !== undefined) {
+    fail("CALLS_LOCKED", "this Call Three slate is already locked");
+  }
+  return {
+    ...room,
+    callSlates: {
+      ...room.callSlates,
+      [member.id]: {
+        calls: validateCallThreeCalls(input.calls),
+        changedAt: input.changedAt,
+        lockedAt: null,
+        participantId: member.id,
+      },
+    },
+  };
+}
+
+export function lockCallThreeCalls(
+  room: CallThreeRoomState,
+  input: { readonly lockedAt: number; readonly participantId: string },
+): CallThreeRoomState {
+  assertCallThreeRoomOpen(room);
+  assertCallThreeBeforeKickoff(room, input.lockedAt);
+  const member = room.members.find(({ id }) => id === input.participantId);
+  if (!member) fail("MEMBER_NOT_FOUND", "participant is not in this Room");
+  if (member.role !== "PLAYER")
+    fail("NOT_PLAYER", "spectators cannot lock calls");
+  const slate = room.callSlates[member.id];
+  if (!slate) fail("CALLS_REQUIRED", "a complete Call Three slate is required");
+  if (slate.lockedAt !== null) return room;
+  return {
+    ...room,
+    callSlates: {
+      ...room.callSlates,
+      [member.id]: { ...slate, lockedAt: input.lockedAt },
+    },
+  };
+}
+
+function sameCallThreeTargets(
+  left: CallThreeRoomState["targets"],
+  right: CallThreeRoomState["targets"],
+) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function finaliseCallThreeRoom(
+  room: CallThreeRoomState,
+  input: { readonly facts: CallThreeFinalFacts },
+): CallThreeRoomState {
+  if (input.facts.finalisedAt < room.kickoffAt) {
+    fail("BEFORE_KICKOFF", "a Room cannot finalise before kickoff");
+  }
+  const targets = resolveCallThree(input.facts);
+  if (
+    room.finalisedVersion !== null &&
+    input.facts.version < room.finalisedVersion
+  ) {
+    return room;
+  }
+  if (room.finalisedVersion === input.facts.version) {
+    if (sameCallThreeTargets(room.targets, targets)) return room;
+    fail(
+      "REVISION_CONFLICT",
+      "final facts conflict with the existing revision",
+    );
+  }
+  const locked = hardLockCallThreeAtKickoff(room);
+  return {
+    ...locked,
+    finalisedAt: input.facts.finalisedAt,
+    finalisedVersion: input.facts.version,
+    status: "FINAL",
+    targets,
+  };
+}
+
+export function getCallThreeLeaderboard(
+  room: CallThreeRoomState,
+): readonly CallThreeLeaderboardEntry[] {
+  const rows: Omit<CallThreeLeaderboardEntry, "rank">[] = [];
+  for (const member of room.members) {
+    if (member.role !== "PLAYER") continue;
+    const slate = room.callSlates[member.id];
+    if (!slate) continue;
+    let correctCalls = 0;
+    let score = 0;
+    let voidCalls = 0;
+    for (const target of CALL_THREE_TARGETS) {
+      const outcome = room.targets[target];
+      const call = slate.calls[target];
+      if (outcome?.state === "VOID") {
+        voidCalls += 1;
+      } else if (
+        outcome?.state === "RESOLVED" &&
+        outcome.answer === call.answer
+      ) {
+        correctCalls += 1;
+        score += call.confidence * POINTS_PER_CONFIDENCE;
+      }
+    }
+    rows.push({
+      correctCalls,
+      lockedAt: slate.lockedAt ?? room.kickoffAt,
+      nickname: member.nickname,
+      participantId: member.id,
+      provisional: room.status !== "FINAL",
+      score,
+      voidCalls,
+    });
+  }
+  rows.sort(
+    (left, right) =>
+      right.score - left.score ||
+      left.lockedAt - right.lockedAt ||
+      compareParticipantIds(left.participantId, right.participantId),
+  );
+  return rows.map((row, index) => ({ ...row, rank: index + 1 }));
+}
+
+export function registerConfirmedCallThreeMoment(
+  room: CallThreeRoomState,
+  input: { readonly momentId: string; readonly revision: number },
+): CallThreeRoomState {
+  assertCallThreeRoomOpen(room);
+  const momentId = cleanRequiredText(
+    input.momentId,
+    "MOMENT_NOT_FOUND",
+    "moment id",
+  );
+  assertRevision(input.revision);
+  const key = momentKey(momentId, input.revision);
+  const existing = room.moments[key];
+  if (existing) {
+    if (existing.varState === "CLEAR") return room;
+    fail(
+      "MOMENT_RESOLUTION_CONFLICT",
+      "canonical Moment revision is not confirmed",
+    );
+  }
+  return {
+    ...room,
+    moments: {
+      ...room.moments,
+      [key]: { momentId, revision: input.revision, varState: "CLEAR" },
+    },
+  };
+}
+
+/**
+ * A canonical correction replaces the meaning of an older revision in the
+ * same Moment family. Keep the old revision visible, but make any response to
+ * it visibly overturned before the replacement is registered as confirmed.
+ */
+export function supersedeCallThreeMoment(
+  room: CallThreeRoomState,
+  input: { readonly momentId: string; readonly revision: number },
+): CallThreeRoomState {
+  assertCallThreeRoomOpen(room);
+  const momentId = cleanRequiredText(
+    input.momentId,
+    "MOMENT_NOT_FOUND",
+    "moment id",
+  );
+  assertRevision(input.revision);
+  let changed = false;
+  const moments = Object.fromEntries(
+    Object.entries(room.moments).map(([key, moment]) => {
+      if (moment.momentId !== momentId || moment.revision >= input.revision) {
+        return [key, moment];
+      }
+      changed ||= moment.varState !== "OVERTURNED";
+      return [key, { ...moment, varState: "OVERTURNED" as const }];
+    }),
+  ) as Record<string, MomentRevision>;
+  if (!changed) return room;
+  return {
+    ...room,
+    moments,
+    reactions: room.reactions.map((reaction) =>
+      reaction.momentId === momentId && reaction.revision < input.revision
+        ? { ...reaction, status: "OVERTURNED" }
+        : reaction,
+    ),
+  };
+}
+
+export function overturnCallThreeMoment(
+  room: CallThreeRoomState,
+  input: { readonly momentId: string; readonly revision: number },
+): CallThreeRoomState {
+  const momentId = cleanRequiredText(
+    input.momentId,
+    "MOMENT_NOT_FOUND",
+    "moment id",
+  );
+  assertRevision(input.revision);
+  const moments: Record<string, MomentRevision> = { ...room.moments };
+  let matched = false;
+  for (const [key, moment] of Object.entries(moments)) {
+    if (moment.momentId === momentId && moment.revision <= input.revision) {
+      moments[key] = { ...moment, varState: "OVERTURNED" };
+      matched = true;
+    }
+  }
+  const currentKey = momentKey(momentId, input.revision);
+  if (!moments[currentKey]) {
+    moments[currentKey] = {
+      momentId,
+      revision: input.revision,
+      varState: "OVERTURNED",
+    };
+  }
+  if (!matched && room.moments[currentKey]?.varState === "OVERTURNED") {
+    return room;
+  }
+  return {
+    ...room,
+    moments,
+    reactions: room.reactions.map((reaction) =>
+      reaction.momentId === momentId && reaction.revision <= input.revision
+        ? { ...reaction, status: "OVERTURNED" }
+        : reaction,
+    ),
+  };
+}
+
+export function addCallThreeReaction(
+  room: CallThreeRoomState,
+  input: {
+    readonly kind: ReactionKind;
+    readonly momentId: string;
+    readonly participantId: string;
+    readonly reactedAt: number;
+    readonly revision: number;
+  },
+): CallThreeReactionResult {
+  assertCallThreeRoomOpen(room);
+  const member = room.members.find(({ id }) => id === input.participantId);
+  if (!member) fail("MEMBER_NOT_FOUND", "participant is not in this Room");
+  const momentId = cleanRequiredText(
+    input.momentId,
+    "MOMENT_NOT_FOUND",
+    "moment id",
+  );
+  assertRevision(input.revision);
+  assertTimestamp(input.reactedAt, "reactedAt");
+  if (input.reactedAt < room.kickoffAt) {
+    fail("BEFORE_KICKOFF", "reactions cannot be added before kickoff");
+  }
+  if (!reactionKindSet.has(input.kind)) {
+    fail("INVALID_REACTION", `unsupported reaction: ${input.kind}`);
+  }
+  const moment = room.moments[momentKey(momentId, input.revision)];
+  if (!moment || moment.varState !== "CLEAR") {
+    fail(
+      "MOMENT_NOT_CONFIRMED",
+      "reactions require a confirmed canonical Moment",
+    );
+  }
+  const id = reactionId(member.id, momentId, input.revision);
+  const existing = room.reactions.find((reaction) => reaction.id === id);
+  if (existing)
+    return { accepted: false, reaction: existing, reason: "DUPLICATE", room };
+  const windowStart = input.reactedAt - room.reactionPolicy.windowMs;
+  const recentCount = room.reactions.filter(
+    (reaction) =>
+      reaction.participantId === member.id &&
+      reaction.reactedAt > windowStart &&
+      reaction.reactedAt <= input.reactedAt,
+  ).length;
+  if (recentCount >= room.reactionPolicy.limit) {
+    return { accepted: false, reaction: null, reason: "RATE_LIMITED", room };
+  }
+  const live =
+    input.reactedAt >= room.kickoffAt ? hardLockCallThreeAtKickoff(room) : room;
+  const reaction: RoomReaction = {
+    id,
+    kind: input.kind,
+    momentId,
+    participantId: member.id,
+    reactedAt: input.reactedAt,
+    revision: input.revision,
+    status: "VISIBLE",
+  };
+  const nextRoom = { ...live, reactions: [...live.reactions, reaction] };
+  return { accepted: true, reaction, reason: null, room: nextRoom };
+}
+
+// Legacy compatibility only. The durable Call Three service never imports this
+// allocation-based surface; it remains here temporarily for the isolated
+// legacy in-memory Room service until that service is retired separately.
 export const SENSE_TOTAL = 100;
 export const SENSE_INCREMENT = 5;
 export const SENSE_MINIMUM_PER_MARKET = 5;

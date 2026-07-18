@@ -2,41 +2,33 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import type {
   FanRepository,
-  PersistenceMode,
   RoomAggregateRecord,
   RoomAggregateRepository,
   RoomStatus,
 } from "@matchsense/db";
 import type { FixtureSnapshot } from "@matchsense/contracts";
 import {
-  CALL_CATEGORIES,
-  SENSE_MARKETS,
-  addReaction,
-  createRoom,
-  finaliseRoom,
-  getLeaderboard,
-  joinRoom,
-  registerMoment,
-  resolveMoment,
-  scoreSenseSlates,
-  validateSensePicks,
+  RoomsDomainError,
+  addCallThreeReaction,
+  createCallThreeRoom,
+  finaliseCallThreeRoom,
+  getCallThreeLeaderboard,
+  joinCallThreeRoom,
+  lockCallThreeCalls,
+  overturnCallThreeMoment,
+  registerConfirmedCallThreeMoment,
+  setCallThreeCalls,
+  startCallThreeRoom,
+  supersedeCallThreeMoment,
+  type CallThreeInput,
+  type CallThreeRoomState,
+  type MomentRevision,
   type ReactionKind,
-  type RoomState,
-  type SenseOutcomes,
-  type SensePickInput,
-  type SenseRoomPhase,
-  type SenseSlate,
+  type RoomReaction,
 } from "@matchsense/rooms";
 
-import {
-  RoomServiceError,
-  type RoomPreview,
-  type RoomReactionView,
-  type RoomStreamEvent,
-  type RoomView,
-} from "./room-service.js";
+import { RoomServiceError } from "./room-service.js";
 
-const STARTING_SENSE = 100 as const;
 const MAX_CAS_ATTEMPTS = 4;
 const ROOM_FOLLOW_EVENT_PREFERENCES = {
   fullTime: true,
@@ -48,38 +40,92 @@ const ROOM_FOLLOW_EVENT_PREFERENCES = {
   yellowCards: true,
 } as const;
 
-export interface DurableSenseLedgerEntry {
-  available: number;
-  committed: number;
-  returned: number | null;
-  starting: typeof STARTING_SENSE;
-}
-
+/**
+ * A room aggregate is intentionally versioned separately from the legacy Room
+ * shape. Durable Call Three never reads the legacy allocation/slate fields.
+ */
 export interface DurableRoomAggregate {
-  fixture: FixtureSnapshot;
-  hostFanId: string;
-  ledger: Record<string, DurableSenseLedgerEntry>;
-  lifecycle: readonly {
-    at: number;
-    status: "LOBBY" | "LOCKED" | "LIVE" | "FINAL";
+  readonly fixture: FixtureSnapshot;
+  readonly hostFanId: string;
+  readonly lifecycle: readonly {
+    readonly at: number;
+    readonly status: "LOBBY" | "LIVE" | "FINAL";
   }[];
-  memberTeamCodes: Record<string, string | null>;
-  name: string;
-  reactionRecipients: Record<string, string>;
-  room: RoomState;
-  schemaVersion: 1;
-  senseOutcomes: SenseOutcomes | null;
-  sensePhase: SenseRoomPhase;
-  senseSlates: Record<string, SenseSlate>;
-  startedAt: number | null;
-  statTotals: Record<(typeof CALL_CATEGORIES)[number], number | null>;
+  readonly memberTeamCodes: Readonly<Record<string, string | null>>;
+  readonly name: string;
+  readonly reactionRecipients: Readonly<Record<string, string>>;
+  readonly room: CallThreeRoomState;
+  readonly schemaVersion: 2;
 }
 
-export interface DurableRoomView extends Omit<RoomView, "sense"> {
-  readonly sense: RoomView["sense"] & {
-    readonly balance: DurableSenseLedgerEntry;
-    readonly ledger: Readonly<Record<string, DurableSenseLedgerEntry>>;
+export interface DurableRoomReactionView {
+  readonly id: string;
+  readonly kind: ReactionKind;
+  readonly momentId: string;
+  readonly reactedAt: number;
+  readonly recipientNickname: string;
+  readonly recipientParticipantId: string;
+  readonly recipientTeamCode: string | null;
+  readonly revision: number;
+  readonly senderNickname: string;
+  readonly senderParticipantId: string;
+  readonly senderTeamCode: string | null;
+  readonly status: "VISIBLE" | "OVERTURNED";
+}
+
+export interface DurableRoomView {
+  readonly id: string;
+  readonly name: string;
+  readonly fixture: FixtureSnapshot;
+  readonly kickoffAt: number;
+  readonly createdAt: number;
+  readonly finalisedAt: number | null;
+  readonly revision: number;
+  readonly status: "PRE_KICKOFF" | "LIVE" | "FINAL";
+  readonly viewerParticipantId: string;
+  readonly friendPointsLabel: "MATCHSENSE POINTS · NO PRIZES";
+  readonly points: {
+    readonly label: "MATCHSENSE POINTS · NON-TRANSFERABLE";
+    readonly lifetimeTotal: number;
+    readonly roomPoints: number;
   };
+  readonly hostParticipantId: string;
+  readonly members: readonly {
+    readonly id: string;
+    readonly nickname: string;
+    readonly role: "PLAYER" | "SPECTATOR";
+    readonly joinedAt: number;
+    readonly hasCalls: boolean;
+    readonly isHost: boolean;
+    readonly lockedAt: number | null;
+    readonly teamCode: string | null;
+  }[];
+  readonly myCalls: CallThreeRoomState["callSlates"][string] | null;
+  readonly leaderboard: ReturnType<typeof getCallThreeLeaderboard>;
+  readonly targets: CallThreeRoomState["targets"];
+  readonly currentMoment: MomentRevision | null;
+  readonly moments: readonly MomentRevision[];
+  readonly reactions: readonly DurableRoomReactionView[];
+}
+
+export interface DurableRoomPreview {
+  readonly callsLocked: boolean;
+  readonly expiresAt: number;
+  readonly fixture: FixtureSnapshot;
+  readonly hostNickname: string;
+  readonly kickoffAt: number;
+  readonly memberCount: number;
+  readonly memberNicknames: readonly string[];
+  readonly name: string;
+  readonly roomId: string;
+  readonly status: DurableRoomView["status"];
+}
+
+export interface DurableRoomStreamEvent {
+  readonly event: "room.snapshot" | "room.updated";
+  readonly id: string;
+  readonly revision: number;
+  readonly room: DurableRoomView;
 }
 
 export interface DurableRoomServiceOptions {
@@ -91,6 +137,10 @@ export interface DurableRoomServiceOptions {
   now?: (() => number) | undefined;
   repository: RoomAggregateRepository<DurableRoomAggregate>;
   roomId?: (() => string) | undefined;
+  /**
+   * Kept only so existing process wiring remains type-compatible while public
+   * synthetic Experience controls are removed. It is deliberately unused.
+   */
   startFixture?:
     | ((input: {
         fixture: FixtureSnapshot;
@@ -101,123 +151,6 @@ export interface DurableRoomServiceOptions {
 
 function hashInvite(inviteCode: string) {
   return createHash("sha256").update(inviteCode, "utf8").digest("hex");
-}
-
-function modeFor(fixture: FixtureSnapshot): PersistenceMode {
-  return fixture.provenance === "live_txline" ? "live" : "demo";
-}
-
-function roomStatus(status: RoomStatus): RoomView["status"] {
-  if (status === "final") return "FINAL";
-  if (status === "live") return "LIVE";
-  return "PRE_KICKOFF";
-}
-
-function senseBalance(): DurableSenseLedgerEntry {
-  return {
-    available: STARTING_SENSE,
-    committed: 0,
-    returned: null,
-    starting: STARTING_SENSE,
-  };
-}
-
-function outcomesForFixture(fixture: FixtureSnapshot): SenseOutcomes {
-  const cards = fixture.stats
-    ? fixture.stats.home.yellowCards +
-      fixture.stats.home.redCards +
-      fixture.stats.away.yellowCards +
-      fixture.stats.away.redCards
-    : null;
-  const corners = fixture.stats
-    ? fixture.stats.home.corners + fixture.stats.away.corners
-    : null;
-  const goals = fixture.score.home + fixture.score.away;
-  return {
-    btts: fixture.score.home > 0 && fixture.score.away > 0 ? "YES" : "NO",
-    cards_4_5: cards === null ? "VOID" : cards > 4.5 ? "OVER" : "UNDER",
-    corners_9_5: corners === null ? "VOID" : corners > 9.5 ? "OVER" : "UNDER",
-    goals_2_5: goals > 2.5 ? "OVER" : "UNDER",
-    winner:
-      fixture.score.home > fixture.score.away
-        ? "HOME"
-        : fixture.score.away > fixture.score.home
-          ? "AWAY"
-          : "DRAW",
-  };
-}
-
-function projectCanonicalMoment(
-  room: RoomState,
-  moment: NonNullable<FixtureSnapshot["lastEvent"]>,
-) {
-  const existing = Object.values(room.moments).find(
-    (candidate) =>
-      candidate.momentId === moment.id &&
-      candidate.revision === moment.revision,
-  );
-  const isReview =
-    moment.status === "provisional" || moment.status === "under_review";
-  if (isReview) {
-    return existing
-      ? room
-      : registerMoment(room, {
-          momentId: moment.id,
-          revision: moment.revision,
-          varState: "HOLD",
-        });
-  }
-
-  const resolution =
-    moment.status === "overturned"
-      ? ("OVERTURNED" as const)
-      : moment.status === "confirmed" || moment.status === "corrected"
-        ? ("CONFIRMED" as const)
-        : null;
-  let projected = room;
-  if (resolution) {
-    for (const prior of Object.values(projected.moments)) {
-      if (
-        prior.momentId === moment.id &&
-        prior.revision <= moment.revision &&
-        prior.varState === "HOLD"
-      ) {
-        projected = resolveMoment(projected, {
-          momentId: prior.momentId,
-          resolution,
-          revision: prior.revision,
-        });
-      }
-    }
-  }
-
-  const current = Object.values(projected.moments).find(
-    (candidate) =>
-      candidate.momentId === moment.id &&
-      candidate.revision === moment.revision,
-  );
-  if (!current) {
-    projected = registerMoment(projected, {
-      momentId: moment.id,
-      revision: moment.revision,
-      varState: moment.status === "overturned" ? "HOLD" : "CLEAR",
-    });
-  }
-  if (moment.status === "overturned") {
-    const registered = Object.values(projected.moments).find(
-      (candidate) =>
-        candidate.momentId === moment.id &&
-        candidate.revision === moment.revision,
-    );
-    return registered?.varState === "OVERTURNED"
-      ? projected
-      : resolveMoment(projected, {
-          momentId: moment.id,
-          resolution: "OVERTURNED",
-          revision: moment.revision,
-        });
-  }
-  return projected;
 }
 
 function normalizedRoomName(value: string) {
@@ -232,17 +165,95 @@ function normalizedRoomName(value: string) {
   return name;
 }
 
-function finalizedAt(record: RoomAggregateRecord<DurableRoomAggregate>) {
-  return record.aggregate.room.finalisedAt === null
+function finiteTimestamp(value: string, fallback: number) {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function durableStatus(status: RoomStatus): DurableRoomView["status"] {
+  if (status === "final") return "FINAL";
+  if (status === "live") return "LIVE";
+  return "PRE_KICKOFF";
+}
+
+function isCallThreeAggregate(value: unknown): value is DurableRoomAggregate {
+  if (!value || typeof value !== "object") return false;
+  const aggregate = value as Partial<DurableRoomAggregate>;
+  return (
+    aggregate.schemaVersion === 2 &&
+    !!aggregate.room &&
+    typeof aggregate.room === "object" &&
+    !!aggregate.fixture &&
+    typeof aggregate.fixture === "object"
+  );
+}
+
+function requireCallThreeAggregate(
+  record: RoomAggregateRecord<DurableRoomAggregate>,
+) {
+  if (!isCallThreeAggregate(record.aggregate)) {
+    throw new RoomServiceError("ROOM_NOT_FOUND", 404, "Room not found");
+  }
+  return record.aggregate;
+}
+
+function finalisedAt(record: RoomAggregateRecord<DurableRoomAggregate>) {
+  const aggregate = requireCallThreeAggregate(record);
+  return aggregate.room.finalisedAt === null
     ? null
-    : new Date(record.aggregate.room.finalisedAt).toISOString();
+    : new Date(aggregate.room.finalisedAt).toISOString();
+}
+
+function roomPointsForFan(
+  record: RoomAggregateRecord<DurableRoomAggregate>,
+  fanId: string,
+) {
+  if (record.status !== "final" || !isCallThreeAggregate(record.aggregate)) {
+    return 0;
+  }
+  return (
+    getCallThreeLeaderboard(record.aggregate.room).find(
+      (entry) => entry.participantId === fanId,
+    )?.score ?? 0
+  );
+}
+
+function reactionView(
+  aggregate: DurableRoomAggregate,
+  reaction: RoomReaction,
+): DurableRoomReactionView | null {
+  const recipientParticipantId =
+    aggregate.reactionRecipients[reaction.id] ?? null;
+  const sender = aggregate.room.members.find(
+    ({ id }) => id === reaction.participantId,
+  );
+  const recipient = aggregate.room.members.find(
+    ({ id }) => id === recipientParticipantId,
+  );
+  if (!sender || !recipient || !recipientParticipantId) return null;
+  return {
+    id: reaction.id,
+    kind: reaction.kind,
+    momentId: reaction.momentId,
+    reactedAt: reaction.reactedAt,
+    recipientNickname: recipient.nickname,
+    recipientParticipantId,
+    recipientTeamCode:
+      aggregate.memberTeamCodes[recipientParticipantId] ?? null,
+    revision: reaction.revision,
+    senderNickname: sender.nickname,
+    senderParticipantId: reaction.participantId,
+    senderTeamCode: aggregate.memberTeamCodes[reaction.participantId] ?? null,
+    status: reaction.status === "OVERTURNED" ? "OVERTURNED" : "VISIBLE",
+  };
 }
 
 function buildView(
   record: RoomAggregateRecord<DurableRoomAggregate>,
   fanId: string,
+  lifetimeTotal: number,
 ): DurableRoomView {
-  const aggregate = record.aggregate;
+  const aggregate = requireCallThreeAggregate(record);
   const member = aggregate.room.members.find(({ id }) => id === fanId);
   if (!member) {
     throw new RoomServiceError(
@@ -251,84 +262,26 @@ function buildView(
       "This fan is not a Room member",
     );
   }
-  const phase =
-    record.status === "final"
-      ? "FINAL"
-      : record.status === "live"
-        ? "LIVE"
-        : record.status === "locked"
-          ? "LOCKED"
-          : aggregate.sensePhase;
-  const moments = Object.values(aggregate.room.moments);
+  const moments = Object.values(aggregate.room.moments).sort(
+    (left, right) => left.revision - right.revision,
+  );
   const reactions = aggregate.room.reactions.flatMap((reaction) => {
-    const recipientParticipantId =
-      aggregate.reactionRecipients[reaction.id] ?? null;
-    const sender = aggregate.room.members.find(
-      ({ id }) => id === reaction.participantId,
-    );
-    const recipient = aggregate.room.members.find(
-      ({ id }) => id === recipientParticipantId,
-    );
-    if (!sender || !recipient || !recipientParticipantId) return [];
-    return [
-      {
-        id: reaction.id,
-        kind: reaction.kind,
-        momentId: reaction.momentId,
-        reactedAt: reaction.reactedAt,
-        recipientNickname: recipient.nickname,
-        recipientParticipantId,
-        recipientTeamCode:
-          aggregate.memberTeamCodes[recipientParticipantId] ?? null,
-        revision: reaction.revision,
-        senderNickname: sender.nickname,
-        senderParticipantId: reaction.participantId,
-        senderTeamCode:
-          aggregate.memberTeamCodes[reaction.participantId] ?? null,
-        status: reaction.status,
-      } satisfies RoomReactionView,
-    ];
+    const view = reactionView(aggregate, reaction);
+    return view ? [view] : [];
   });
-  const senseLeaderboard = aggregate.senseOutcomes
-    ? scoreSenseSlates({
-        members: aggregate.room.members,
-        outcomes: aggregate.senseOutcomes,
-        slates: aggregate.senseSlates,
-      })
-    : [];
-  const legacyLeaderboard = getLeaderboard(aggregate.room).map((entry) => {
-    const slate = aggregate.room.callSlates[entry.participantId];
-    const correctCalls = slate
-      ? CALL_CATEGORIES.filter((category) => {
-          const stat = aggregate.room.stats[category];
-          return (
-            stat?.state === "RELIABLE" &&
-            stat.answer === slate.calls[category].answer
-          );
-        }).length
-      : 0;
-    return { ...entry, correctCalls };
-  });
-  const balance = aggregate.ledger[fanId] ?? {
-    available: 0,
-    committed: 0,
-    returned: null,
-    starting: STARTING_SENSE,
-  };
-
+  const roomPoints = roomPointsForFan(record, fanId);
   return {
     createdAt: aggregate.room.createdAt,
     currentMoment: moments.at(-1) ?? null,
     finalisedAt: aggregate.room.finalisedAt,
     fixture: aggregate.fixture,
-    friendPointsLabel: "FRIEND POINTS · NO PRIZES",
+    friendPointsLabel: "MATCHSENSE POINTS · NO PRIZES",
     hostParticipantId: aggregate.hostFanId,
     id: record.id,
     kickoffAt: aggregate.room.kickoffAt,
-    leaderboard: legacyLeaderboard,
+    leaderboard: getCallThreeLeaderboard(aggregate.room),
     members: aggregate.room.members.map((roomMember) => ({
       hasCalls: aggregate.room.callSlates[roomMember.id] !== undefined,
-      hasPicks: aggregate.senseSlates[roomMember.id] !== undefined,
       id: roomMember.id,
       isHost: roomMember.id === aggregate.hostFanId,
       joinedAt: roomMember.joinedAt,
@@ -340,34 +293,114 @@ function buildView(
     moments,
     myCalls: aggregate.room.callSlates[fanId] ?? null,
     name: aggregate.name,
+    points: {
+      label: "MATCHSENSE POINTS · NON-TRANSFERABLE",
+      lifetimeTotal,
+      roomPoints,
+    },
     reactions,
     revision: record.version + 1,
-    sense: {
-      balance,
-      currencyLabel: "FRIEND SENSE · NO MONEY · NO PRIZES",
-      leaderboard: senseLeaderboard,
-      ledger: aggregate.ledger,
-      markets: SENSE_MARKETS,
-      mySlate: aggregate.senseSlates[fanId] ?? null,
-      phase,
-      revealedSlates:
-        phase === "LOCKED" || phase === "LIVE" || phase === "FINAL"
-          ? Object.values(aggregate.senseSlates)
-          : [],
-      total: STARTING_SENSE,
-    },
-    stats: Object.fromEntries(
-      CALL_CATEGORIES.map((category) => {
-        const stat = aggregate.room.stats[category];
-        return [
-          category,
-          stat ? { ...stat, total: aggregate.statTotals[category] } : null,
-        ];
-      }),
-    ) as RoomView["stats"],
-    status: roomStatus(record.status),
+    status: durableStatus(record.status),
+    targets: aggregate.room.targets,
     viewerParticipantId: fanId,
   };
+}
+
+function regulationResult(
+  fixture: FixtureSnapshot,
+): "HOME" | "DRAW" | "AWAY" | null {
+  const score = fixture.scores?.regulation;
+  if (!score) return null;
+  if (score.home > score.away) return "HOME";
+  if (score.away > score.home) return "AWAY";
+  return "DRAW";
+}
+
+function cardTotal(fixture: FixtureSnapshot) {
+  if (!fixture.stats) return null;
+  return (
+    fixture.stats.home.yellowCards +
+    fixture.stats.home.redCards +
+    fixture.stats.away.yellowCards +
+    fixture.stats.away.redCards
+  );
+}
+
+function isVerifiedFinal(fixture: FixtureSnapshot) {
+  const moment = fixture.lastEvent;
+  return (
+    fixture.provenance === "live_txline" &&
+    fixture.phase === "full_time" &&
+    moment?.kind === "phase.full_time" &&
+    moment.status === "confirmed"
+  );
+}
+
+function projectCanonicalMoment(
+  room: CallThreeRoomState,
+  moment: NonNullable<FixtureSnapshot["lastEvent"]>,
+) {
+  if (moment.status === "overturned") {
+    return overturnCallThreeMoment(room, {
+      momentId: moment.id,
+      revision: moment.revision,
+    });
+  }
+  if (moment.status === "corrected") {
+    return registerConfirmedCallThreeMoment(
+      supersedeCallThreeMoment(room, {
+        momentId: moment.id,
+        revision: moment.revision,
+      }),
+      { momentId: moment.id, revision: moment.revision },
+    );
+  }
+  if (moment.status === "confirmed") {
+    return registerConfirmedCallThreeMoment(room, {
+      momentId: moment.id,
+      revision: moment.revision,
+    });
+  }
+  // Provisional and under-review records remain in raw/canonical history, but
+  // never become a Room reaction target.
+  return room;
+}
+
+function appendLifecycle(
+  lifecycle: DurableRoomAggregate["lifecycle"],
+  entry: DurableRoomAggregate["lifecycle"][number],
+) {
+  return lifecycle.at(-1)?.status === entry.status
+    ? lifecycle
+    : [...lifecycle, entry];
+}
+
+function finalFacts(fixture: FixtureSnapshot, finalisedAt: number) {
+  const verified = isVerifiedFinal(fixture);
+  return {
+    finalisedAt,
+    regulationResult: verified ? regulationResult(fixture) : null,
+    totalCards: verified ? cardTotal(fixture) : null,
+    totalGoals: verified ? fixture.score.home + fixture.score.away : null,
+    verified,
+    version: fixture.revision,
+  } as const;
+}
+
+function assertEligibleFixture(fixture: FixtureSnapshot, observedAt: number) {
+  const kickoffAt = Date.parse(fixture.kickoffAt);
+  if (
+    fixture.provenance !== "live_txline" ||
+    fixture.phase !== "scheduled" ||
+    !Number.isFinite(kickoffAt) ||
+    observedAt >= kickoffAt
+  ) {
+    throw new RoomsDomainError(
+      "ROOM_NOT_ELIGIBLE",
+      "Call Three is available only before kickoff for scheduled live TxLINE fixtures",
+    );
+  }
+  return kickoffAt;
 }
 
 export function createDurableRoomService(options: DurableRoomServiceOptions) {
@@ -376,18 +409,31 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
   const makeInviteBytes = options.inviteBytes ?? (() => randomBytes(16));
   const subscribers = new Map<
     string,
-    Map<string, Set<(event: RoomStreamEvent) => void>>
+    Map<string, Set<(event: DurableRoomStreamEvent) => void>>
   >();
 
-  const publish = (record: RoomAggregateRecord<DurableRoomAggregate>) => {
+  const lifetimePointsForFan = async (fanId: string) => {
+    const records = await options.repository.listForFan(fanId);
+    return records.reduce(
+      (total, record) => total + roomPointsForFan(record, fanId),
+      0,
+    );
+  };
+
+  const viewFor = async (
+    record: RoomAggregateRecord<DurableRoomAggregate>,
+    fanId: string,
+  ) => buildView(record, fanId, await lifetimePointsForFan(fanId));
+
+  const publish = async (record: RoomAggregateRecord<DurableRoomAggregate>) => {
     const roomSubscribers = subscribers.get(record.id);
     if (!roomSubscribers) return;
     for (const [fanId, listeners] of roomSubscribers) {
-      const event: RoomStreamEvent = {
+      const event: DurableRoomStreamEvent = {
         event: "room.updated",
         id: `${record.id}:${record.version + 1}`,
         revision: record.version + 1,
-        room: buildView(record, fanId),
+        room: await viewFor(record, fanId),
       };
       for (const listener of listeners) listener(event);
     }
@@ -395,19 +441,23 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
 
   const recordFor = async (roomId: string) => {
     const record = await options.repository.get(roomId);
-    if (!record) {
+    if (!record || !isCallThreeAggregate(record.aggregate)) {
       throw new RoomServiceError("ROOM_NOT_FOUND", 404, "Room not found");
     }
     return record;
   };
 
+  type Mutation = {
+    readonly aggregate: DurableRoomAggregate;
+    readonly finalizedAt?: string | null;
+    readonly status: RoomStatus;
+  };
+
   const update = async (
     roomId: string,
-    mutate: (record: RoomAggregateRecord<DurableRoomAggregate>) => {
-      aggregate: DurableRoomAggregate;
-      finalizedAt?: string | null;
-      status: RoomStatus;
-    } | null,
+    mutate: (
+      record: RoomAggregateRecord<DurableRoomAggregate>,
+    ) => Mutation | null,
   ) => {
     for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt += 1) {
       const current = await recordFor(roomId);
@@ -416,18 +466,17 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
       const updated = await options.repository.compareAndSwap({
         aggregate: next.aggregate,
         expectedVersion: current.version,
-        finalizedAt: next.finalizedAt ?? finalizedAt(current),
+        finalizedAt: next.finalizedAt ?? finalisedAt(current),
         roomId,
         status: next.status,
       });
       if (updated) {
-        publish(updated);
+        await publish(updated);
         return updated;
       }
     }
-    throw new RoomServiceError(
-      "PICKS_OPEN",
-      409,
+    throw new RoomsDomainError(
+      "REVISION_CONFLICT",
       "The Room changed; refresh and try again",
     );
   };
@@ -438,8 +487,8 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
       host: { fanId: string; nickname: string; teamCode?: string | undefined };
       name: string;
     }) {
-      const sourceFixture = await options.fixture(input.fixtureId);
-      if (!sourceFixture) {
+      const fixture = await options.fixture(input.fixtureId);
+      if (!fixture) {
         throw new RoomServiceError(
           "FIXTURE_NOT_FOUND",
           404,
@@ -447,65 +496,34 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
         );
       }
       const createdAt = now();
-      const scheduledKickoff = Date.parse(sourceFixture.kickoffAt);
-      if (!Number.isFinite(scheduledKickoff)) {
-        throw new RoomServiceError(
-          "FIXTURE_NOT_FOUND",
-          404,
-          "Fixture not found",
-        );
-      }
-      if (
-        sourceFixture.provenance === "live_txline" &&
-        createdAt >= scheduledKickoff
-      ) {
-        throw new RoomServiceError(
-          "ROOM_CREATION_CLOSED",
-          409,
-          "Room creation is closed after kickoff",
-        );
-      }
-      const kickoffAt =
-        sourceFixture.provenance === "synthetic_txline_shaped" &&
-        createdAt >= scheduledKickoff
-          ? createdAt + 5 * 60_000
-          : scheduledKickoff;
-      const fixture = {
-        ...sourceFixture,
-        kickoffAt: new Date(kickoffAt).toISOString(),
-      };
+      const kickoffAt = assertEligibleFixture(fixture, createdAt);
       const id = makeRoomId();
       const inviteCode = makeInviteBytes().toString("base64url");
-      const room = createRoom({
+      const room = createCallThreeRoom({
         createdAt,
+        fixture: {
+          fixtureId: fixture.fixtureId,
+          kickoffAt,
+          provenance: fixture.provenance,
+        },
         host: { id: input.host.fanId, nickname: input.host.nickname },
         id,
-        kickoffAt,
-        matchId: fixture.fixtureId,
       });
       const aggregate: DurableRoomAggregate = {
         fixture,
         hostFanId: input.host.fanId,
-        ledger: { [input.host.fanId]: senseBalance() },
         lifecycle: [{ at: createdAt, status: "LOBBY" }],
-        memberTeamCodes: {
-          [input.host.fanId]: input.host.teamCode ?? null,
-        },
+        memberTeamCodes: { [input.host.fanId]: input.host.teamCode ?? null },
         name: normalizedRoomName(input.name),
         reactionRecipients: {},
         room,
-        schemaVersion: 1,
-        senseOutcomes: null,
-        sensePhase: "DRAFT",
-        senseSlates: {},
-        startedAt: null,
-        statTotals: { cards: null, corners: null, goals: null },
+        schemaVersion: 2,
       };
       await options.followFixture?.({
         eventPreferences: ROOM_FOLLOW_EVENT_PREFERENCES,
         fanId: input.host.fanId,
         fixtureId: fixture.fixtureId,
-        mode: modeFor(fixture),
+        mode: "live",
       });
       const record = await options.repository.create({
         aggregate,
@@ -518,21 +536,25 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
         id,
         inviteExpiresAt: new Date(kickoffAt + 8 * 60 * 60_000).toISOString(),
         inviteHash: hashInvite(inviteCode),
-        mode: modeFor(fixture),
+        mode: "live",
         status: "lobby",
       });
       return {
         inviteCode,
         invitePath: `/rooms/join/${inviteCode}`,
-        room: buildView(record, input.host.fanId),
+        room: await viewFor(record, input.host.fanId),
       };
     },
 
-    async preview(inviteCode: string): Promise<RoomPreview> {
+    async preview(inviteCode: string): Promise<DurableRoomPreview> {
       const record = await options.repository.previewByInviteHash(
         hashInvite(inviteCode),
       );
-      if (!record || Date.parse(record.inviteExpiresAt) <= now()) {
+      if (
+        !record ||
+        !isCallThreeAggregate(record.aggregate) ||
+        Date.parse(record.inviteExpiresAt) <= now()
+      ) {
         throw new RoomServiceError(
           "INVITE_NOT_FOUND",
           404,
@@ -546,7 +568,7 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
         throw new RoomServiceError("ROOM_NOT_FOUND", 404, "Room not found");
       }
       return {
-        callsLocked: record.status !== "lobby",
+        callsLocked: record.aggregate.room.status !== "PRE_KICKOFF",
         expiresAt: Date.parse(record.inviteExpiresAt),
         fixture: record.aggregate.fixture,
         hostNickname: host.nickname,
@@ -557,7 +579,7 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
         ),
         name: record.aggregate.name,
         roomId: record.id,
-        status: roomStatus(record.status),
+        status: durableStatus(record.status),
       };
     },
 
@@ -571,7 +593,11 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
         const current = await options.repository.previewByInviteHash(
           hashInvite(input.inviteCode),
         );
-        if (!current || Date.parse(current.inviteExpiresAt) <= now()) {
+        if (
+          !current ||
+          !isCallThreeAggregate(current.aggregate) ||
+          Date.parse(current.inviteExpiresAt) <= now()
+        ) {
           throw new RoomServiceError(
             "INVITE_NOT_FOUND",
             404,
@@ -585,27 +611,30 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
             "This room already has its maximum of 20 fans",
           );
         }
-        const joinedAt =
-          current.status === "lobby"
-            ? now()
-            : Math.max(now(), current.aggregate.room.kickoffAt);
-        const room = joinRoom(current.aggregate.room, {
+        const joinedAt = now();
+        const room = joinCallThreeRoom(current.aggregate.room, {
           joinedAt,
           participant: { id: input.fanId, nickname: input.nickname },
         });
-        const role =
-          room.members.find(({ id }) => id === input.fanId)?.role === "PLAYER"
-            ? "member"
-            : "spectator";
+        const joined = room.members.find(({ id }) => id === input.fanId);
+        if (!joined) {
+          throw new RoomServiceError("ROOM_NOT_FOUND", 404, "Room not found");
+        }
+        const nextStatus: RoomStatus =
+          room.status === "FINAL"
+            ? "final"
+            : room.status === "LIVE"
+              ? "live"
+              : "lobby";
         const aggregate: DurableRoomAggregate = {
           ...current.aggregate,
-          ledger:
-            role === "member"
-              ? {
-                  ...current.aggregate.ledger,
-                  [input.fanId]: senseBalance(),
-                }
-              : current.aggregate.ledger,
+          lifecycle:
+            nextStatus === "live"
+              ? appendLifecycle(current.aggregate.lifecycle, {
+                  at: Math.max(joinedAt, room.kickoffAt),
+                  status: "LIVE",
+                })
+              : current.aggregate.lifecycle,
           memberTeamCodes: {
             ...current.aggregate.memberTeamCodes,
             [input.fanId]: input.teamCode ?? null,
@@ -616,49 +645,52 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
           eventPreferences: ROOM_FOLLOW_EVENT_PREFERENCES,
           fanId: input.fanId,
           fixtureId: current.fixtureId,
-          mode: current.mode,
+          mode: "live",
         });
         const updated = await options.repository.joinAndCompareAndSwap({
           aggregate,
           expectedVersion: current.version,
-          finalizedAt: finalizedAt(current),
+          finalizedAt: finalisedAt(current),
           member: {
             fanId: input.fanId,
             nickname: input.nickname,
-            role,
+            role: joined.role === "PLAYER" ? "member" : "spectator",
             teamCode: input.teamCode ?? null,
           },
           roomId: current.id,
-          status: current.status,
+          status: nextStatus,
         });
         if (updated) {
-          publish(updated);
-          return buildView(updated, input.fanId);
+          await publish(updated);
+          return viewFor(updated, input.fanId);
         }
       }
-      throw new RoomServiceError(
-        "PICKS_OPEN",
-        409,
+      throw new RoomsDomainError(
+        "REVISION_CONFLICT",
         "The Room changed; refresh and try again",
       );
     },
 
     async get(roomId: string, fanId: string) {
-      return buildView(await recordFor(roomId), fanId);
+      return viewFor(await recordFor(roomId), fanId);
     },
 
     async list(fanId: string) {
       const records = await options.repository.listForFan(fanId);
-      return records.map((record) => buildView(record, fanId));
+      const lifetimeTotal = await lifetimePointsForFan(fanId);
+      return records.flatMap((record) =>
+        isCallThreeAggregate(record.aggregate)
+          ? [buildView(record, fanId, lifetimeTotal)]
+          : [],
+      );
     },
 
     async subscribe(
       roomId: string,
       fanId: string,
-      listener: (event: RoomStreamEvent) => void,
+      listener: (event: DurableRoomStreamEvent) => void,
     ) {
       const record = await recordFor(roomId);
-      const room = buildView(record, fanId);
       let roomSubscribers = subscribers.get(roomId);
       if (!roomSubscribers) {
         roomSubscribers = new Map();
@@ -674,7 +706,7 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
         event: "room.snapshot",
         id: `${record.id}:${record.version + 1}`,
         revision: record.version + 1,
-        room,
+        room: await viewFor(record, fanId),
       });
       return () => {
         fanSubscribers?.delete(listener);
@@ -683,28 +715,43 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
       };
     },
 
-    async openPicks(roomId: string, fanId: string) {
-      const updated = await update(roomId, (current) => {
-        if (current.ownerFanId !== fanId) {
-          throw new RoomServiceError(
-            "DEMO_HOST_REQUIRED",
-            403,
-            "Only the room host can open picks",
-          );
-        }
-        if (now() >= current.aggregate.room.kickoffAt) {
-          throw new RoomServiceError(
-            "ROOM_CREATION_CLOSED",
-            409,
-            "Kickoff has passed, so picks cannot be opened",
-          );
-        }
+    async setCalls(input: {
+      calls: readonly CallThreeInput[];
+      fanId: string;
+      roomId: string;
+    }) {
+      const updated = await update(input.roomId, (current) => {
+        const aggregate = requireCallThreeAggregate(current);
         return {
-          aggregate: { ...current.aggregate, sensePhase: "OPEN" },
+          aggregate: {
+            ...aggregate,
+            room: setCallThreeCalls(aggregate.room, {
+              calls: input.calls,
+              changedAt: now(),
+              participantId: input.fanId,
+            }),
+          },
           status: current.status,
         };
       });
-      return buildView(updated, fanId);
+      return viewFor(updated, input.fanId);
+    },
+
+    async lockCalls(input: { fanId: string; roomId: string }) {
+      const updated = await update(input.roomId, (current) => {
+        const aggregate = requireCallThreeAggregate(current);
+        return {
+          aggregate: {
+            ...aggregate,
+            room: lockCallThreeCalls(aggregate.room, {
+              lockedAt: now(),
+              participantId: input.fanId,
+            }),
+          },
+          status: current.status,
+        };
+      });
+      return viewFor(updated, input.fanId);
     },
 
     async react(input: {
@@ -716,7 +763,8 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
       roomId: string;
     }) {
       const updated = await update(input.roomId, (current) => {
-        const recipient = current.aggregate.room.members.find(
+        const aggregate = requireCallThreeAggregate(current);
+        const recipient = aggregate.room.members.find(
           ({ id }) => id === input.recipientParticipantId,
         );
         if (!recipient || input.recipientParticipantId === input.fanId) {
@@ -726,15 +774,11 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
             "Reaction recipient must be another room member",
           );
         }
-        const reactedAt =
-          current.aggregate.startedAt === null
-            ? now()
-            : Math.max(now(), current.aggregate.room.kickoffAt);
-        const result = addReaction(current.aggregate.room, {
+        const result = addCallThreeReaction(aggregate.room, {
           kind: input.kind,
           momentId: input.momentId,
           participantId: input.fanId,
-          reactedAt,
+          reactedAt: Math.max(now(), aggregate.room.kickoffAt),
           revision: input.revision,
         });
         if (!result.accepted || !result.reaction) {
@@ -757,9 +801,9 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
         }
         return {
           aggregate: {
-            ...current.aggregate,
+            ...aggregate,
             reactionRecipients: {
-              ...current.aggregate.reactionRecipients,
+              ...aggregate.reactionRecipients,
               [result.reaction.id]: input.recipientParticipantId,
             },
             room: result.room,
@@ -767,7 +811,7 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
           status: current.status,
         };
       });
-      const room = buildView(updated, input.fanId);
+      const room = await viewFor(updated, input.fanId);
       const reaction = room.reactions.find(
         ({ momentId, revision, senderParticipantId }) =>
           momentId === input.momentId &&
@@ -783,286 +827,78 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
       }
       return { reaction, room };
     },
-
-    async saveSensePicks(input: {
-      fanId: string;
-      picks: readonly SensePickInput[];
-      roomId: string;
-    }) {
-      const updated = await update(input.roomId, (current) => {
-        const member = current.aggregate.room.members.find(
-          ({ id }) => id === input.fanId,
-        );
-        if (!member) {
-          throw new RoomServiceError(
-            "ROOM_SESSION_REQUIRED",
-            403,
-            "This fan is not a Room member",
-          );
-        }
-        if (member.role !== "PLAYER") {
-          throw new RoomServiceError(
-            "PICKS_NOT_OPEN",
-            409,
-            "Spectators cannot submit picks",
-          );
-        }
-        if (
-          current.status !== "lobby" ||
-          current.aggregate.sensePhase !== "OPEN"
-        ) {
-          throw new RoomServiceError(
-            "PICKS_NOT_OPEN",
-            409,
-            "The host has not opened 100-Sense picks",
-          );
-        }
-        if (now() >= current.aggregate.room.kickoffAt) {
-          throw new RoomServiceError(
-            "PICKS_NOT_OPEN",
-            409,
-            "Picks locked at kickoff",
-          );
-        }
-        if (current.aggregate.senseSlates[input.fanId]) {
-          throw new RoomServiceError(
-            "PICKS_OPEN",
-            409,
-            "Your 100-Sense picks are already locked",
-          );
-        }
-        const slate = validateSensePicks(input.fanId, input.picks, now());
-        return {
-          aggregate: {
-            ...current.aggregate,
-            ledger: {
-              ...current.aggregate.ledger,
-              [input.fanId]: {
-                available: 0,
-                committed: STARTING_SENSE,
-                returned: null,
-                starting: STARTING_SENSE,
-              },
-            },
-            senseSlates: {
-              ...current.aggregate.senseSlates,
-              [input.fanId]: slate,
-            },
-          },
-          status: current.status,
-        };
-      });
-      return buildView(updated, input.fanId);
-    },
-
-    async startExperience(roomId: string, fanId: string) {
-      let current = await recordFor(roomId);
-      if (current.ownerFanId !== fanId) {
-        throw new RoomServiceError(
-          "DEMO_HOST_REQUIRED",
-          403,
-          "Only the room host can start this Experience",
-        );
-      }
-      if (current.aggregate.fixture.provenance !== "synthetic_txline_shaped") {
-        throw new RoomServiceError(
-          "DEMO_CONTROL_DISABLED",
-          409,
-          "Real fixtures start from the official match clock",
-        );
-      }
-      if (current.status === "lobby") {
-        current = await update(roomId, (record) => ({
-          aggregate: {
-            ...record.aggregate,
-            lifecycle: [
-              ...record.aggregate.lifecycle,
-              { at: now(), status: "LOCKED" },
-            ],
-            sensePhase: "LOCKED",
-          },
-          status: "locked",
-        }));
-      }
-      if (current.status === "locked") {
-        const startedFixture = options.startFixture
-          ? await options.startFixture({
-              fixture: current.aggregate.fixture,
-              ownerFanId: fanId,
-            })
-          : current.aggregate.fixture;
-        if (
-          startedFixture.fixtureId !== current.aggregate.fixture.fixtureId ||
-          startedFixture.provenance !== "synthetic_txline_shaped"
-        ) {
-          throw new RoomServiceError(
-            "DEMO_CONTROL_DISABLED",
-            409,
-            "Experience start returned a different fixture",
-          );
-        }
-        const kickoffAt = Date.parse(startedFixture.kickoffAt);
-        if (!Number.isFinite(kickoffAt)) {
-          throw new RoomServiceError(
-            "DEMO_CONTROL_DISABLED",
-            409,
-            "Experience start returned an invalid kickoff",
-          );
-        }
-        current = await update(roomId, (record) => {
-          if (record.status !== "locked") return null;
-          return {
-            aggregate: {
-              ...record.aggregate,
-              fixture: startedFixture,
-              lifecycle: [
-                ...record.aggregate.lifecycle,
-                { at: now(), status: "LIVE" },
-              ],
-              room: {
-                ...record.aggregate.room,
-                kickoffAt,
-                status: "LIVE",
-              },
-              sensePhase: "LIVE",
-              startedAt: now(),
-            },
-            status: "live",
-          };
-        });
-      }
-      return buildView(current, fanId);
-    },
-
-    async finalise(input: {
-      finalisedAt: number;
-      fixture: FixtureSnapshot;
-      outcomes: SenseOutcomes;
-      roomId: string;
-    }) {
-      const updated = await update(input.roomId, (current) => {
-        if (
-          current.status === "final" &&
-          current.aggregate.fixture.revision >= input.fixture.revision
-        ) {
-          return null;
-        }
-        const alreadyFinal = current.status === "final";
-        const room = finaliseRoom(current.aggregate.room, {
-          event: "game_finalised",
-          finalisedAt: input.finalisedAt,
-        });
-        const leaderboard = scoreSenseSlates({
-          members: room.members,
-          outcomes: input.outcomes,
-          slates: current.aggregate.senseSlates,
-        });
-        const returnedByFan = new Map(
-          leaderboard.map(({ participantId, returnedSense }) => [
-            participantId,
-            returnedSense,
-          ]),
-        );
-        const ledger = Object.fromEntries(
-          Object.entries(current.aggregate.ledger).map(([fanId, entry]) => [
-            fanId,
-            {
-              ...entry,
-              returned: returnedByFan.get(fanId) ?? 0,
-            },
-          ]),
-        );
-        return {
-          aggregate: {
-            ...current.aggregate,
-            fixture: input.fixture,
-            ledger,
-            lifecycle: alreadyFinal
-              ? current.aggregate.lifecycle
-              : [
-                  ...current.aggregate.lifecycle,
-                  { at: input.finalisedAt, status: "FINAL" },
-                ],
-            room,
-            senseOutcomes: input.outcomes,
-            sensePhase: "FINAL",
-          },
-          finalizedAt: new Date(input.finalisedAt).toISOString(),
-          status: "final",
-        };
-      });
-      return buildView(updated, updated.ownerFanId);
-    },
   };
 
   return {
     ...service,
     async projectFixture(fixture: FixtureSnapshot) {
+      if (fixture.provenance !== "live_txline") return 0;
       const records = await options.repository.listByFixture({
         fixtureId: fixture.fixtureId,
-        mode: modeFor(fixture),
+        mode: "live",
       });
-      for (const record of records) {
-        let current = record;
-        if (fixture.revision <= current.aggregate.fixture.revision) continue;
-        const projectedAt = Math.max(
-          now(),
-          Date.parse(fixture.updatedAt),
-          current.aggregate.room.kickoffAt,
-        );
-        if (current.status === "final") {
-          if (fixture.phase === "full_time") {
-            await service.finalise({
-              finalisedAt: projectedAt,
-              fixture,
-              outcomes: outcomesForFixture(fixture),
-              roomId: current.id,
-            });
-          }
-          continue;
-        }
-        current = await update(current.id, (stored) => {
-          if (fixture.revision <= stored.aggregate.fixture.revision) {
+      let projected = 0;
+      for (const candidate of records) {
+        if (!isCallThreeAggregate(candidate.aggregate)) continue;
+        const before = candidate.version;
+        const updated = await update(candidate.id, (current) => {
+          const aggregate = requireCallThreeAggregate(current);
+          if (fixture.revision <= aggregate.fixture.revision) return null;
+          if (aggregate.room.status === "FINAL" && !isVerifiedFinal(fixture)) {
             return null;
           }
-          const startsMatch = fixture.phase !== "scheduled";
-          const room = fixture.lastEvent
-            ? projectCanonicalMoment(stored.aggregate.room, fixture.lastEvent)
-            : stored.aggregate.room;
-          const transitionsToLive = startsMatch && stored.status !== "live";
+          const observedAt = Math.max(
+            now(),
+            finiteTimestamp(fixture.updatedAt, aggregate.room.kickoffAt),
+            aggregate.room.kickoffAt,
+          );
+          let room = aggregate.room;
+          if (room.status !== "FINAL" && fixture.phase !== "scheduled") {
+            room = startCallThreeRoom(room, { observedAt });
+          }
+          if (
+            room.status !== "FINAL" &&
+            fixture.phase !== "scheduled" &&
+            fixture.lastEvent
+          ) {
+            room = projectCanonicalMoment(room, fixture.lastEvent);
+          }
+
+          let status: RoomStatus =
+            room.status === "FINAL"
+              ? "final"
+              : room.status === "LIVE"
+                ? "live"
+                : "lobby";
+          let finalizedAt: string | null | undefined;
+          if (isVerifiedFinal(fixture)) {
+            room = finaliseCallThreeRoom(room, {
+              facts: finalFacts(fixture, observedAt),
+            });
+            status = "final";
+            finalizedAt = new Date(
+              room.finalisedAt ?? observedAt,
+            ).toISOString();
+          }
+          const lifecycleStatus =
+            status === "final" ? "FINAL" : status === "live" ? "LIVE" : "LOBBY";
           return {
             aggregate: {
-              ...stored.aggregate,
+              ...aggregate,
               fixture,
-              lifecycle: transitionsToLive
-                ? [
-                    ...stored.aggregate.lifecycle,
-                    ...(stored.status === "lobby"
-                      ? [{ at: projectedAt, status: "LOCKED" as const }]
-                      : []),
-                    { at: projectedAt, status: "LIVE" as const },
-                  ]
-                : stored.aggregate.lifecycle,
-              room: transitionsToLive ? { ...room, status: "LIVE" } : room,
-              sensePhase: startsMatch ? "LIVE" : stored.aggregate.sensePhase,
-              startedAt: startsMatch
-                ? (stored.aggregate.startedAt ?? projectedAt)
-                : stored.aggregate.startedAt,
+              lifecycle: appendLifecycle(aggregate.lifecycle, {
+                at: observedAt,
+                status: lifecycleStatus,
+              }),
+              room,
             },
-            status: startsMatch ? "live" : stored.status,
+            ...(finalizedAt === undefined ? {} : { finalizedAt }),
+            status,
           };
         });
-        if (current.aggregate.fixture.revision !== fixture.revision) continue;
-        if (fixture.phase === "full_time" && current.status !== "final") {
-          await service.finalise({
-            finalisedAt: projectedAt,
-            fixture,
-            outcomes: outcomesForFixture(fixture),
-            roomId: current.id,
-          });
-        }
+        if (updated.version > before) projected += 1;
       }
-      return records.length;
+      return projected;
     },
   };
 }

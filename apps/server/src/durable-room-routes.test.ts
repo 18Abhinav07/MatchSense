@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import type { FanRecord, FanSessionRecord } from "@matchsense/db";
+import { RoomsDomainError } from "@matchsense/rooms";
 import { describe, expect, it, vi } from "vitest";
 
 import { createFanSessionService } from "./fan-session.js";
@@ -26,7 +27,7 @@ function fanRecord(id: string): FanRecord {
 function fanSessions() {
   const stored = new Map<string, FanSessionRecord>();
   let id = 0;
-  const service = createFanSessionService({
+  return createFanSessionService({
     id: () => `fan-${++id}`,
     now: () => new Date("2026-07-17T10:00:00.000Z"),
     randomBytes: (size) => Buffer.alloc(size, id + 1),
@@ -47,96 +48,36 @@ function fanSessions() {
         stored.get(sessionHash) ?? null,
     },
   });
-  return service;
 }
 
-describe("durable Room routes", () => {
-  it("prepares one private Experience fixture and its Room for the signed-in host", async () => {
-    const sessions = fanSessions();
-    const host = await sessions.createGuest();
-    const prepareExperienceRoom = vi.fn(async (input) => ({
-      fixtureId: "experience:room-run",
-      inviteCode: "BwcHBwcHBwcHBwcHBwcHBw",
-      invitePath: "/rooms/join/BwcHBwcHBwcHBwcHBwcHBw",
-      room: { id: "room-1" },
-      runId: "room-run",
-      owner: input.fanId,
-    }));
-    const service = {
-      create: vi.fn(),
-      get: vi.fn(),
-      join: vi.fn(),
-      list: vi.fn(),
-      openPicks: vi.fn(),
-      preview: vi.fn(),
-      react: vi.fn(),
-      saveSensePicks: vi.fn(),
-      startExperience: vi.fn(),
-      subscribe: vi.fn(async () => () => undefined),
-    } satisfies DurableRoomRouteDependencies["service"];
-    const app = Fastify();
-    registerDurableRoomRoutes(app, {
-      prepareExperienceRoom,
-      service,
-      sessions,
-    });
-
-    const response = await app.inject({
-      headers: {
-        cookie: `matchsense_session=${host.sessionToken}`,
-        "x-matchsense-csrf": host.csrfToken,
-      },
-      method: "POST",
-      payload: {
-        awayTeam: "FRA",
-        homeTeam: "ARG",
-        name: "Final night",
-        nickname: "Abhinav",
-      },
-      url: "/api/v1/experience/rooms",
-    });
-
-    expect(response.statusCode).toBe(201);
-    expect(response.json()).toMatchObject({
-      fixtureId: "experience:room-run",
-      room: { id: "room-1" },
-      runId: "room-run",
-    });
-    expect(prepareExperienceRoom).toHaveBeenCalledWith({
-      awayTeam: "FRA",
-      fanId: host.fan.id,
-      homeTeam: "ARG",
-      name: "Final night",
-      nickname: "Abhinav",
-    });
-    await app.close();
-  });
-
-  it("ignores spoofed fan headers and owns every mutation through session plus CSRF", async () => {
-    const sessions = fanSessions();
-    const host = await sessions.createGuest();
-    const create = vi.fn(async (input) => ({
+function serviceStub(overrides = {}) {
+  return {
+    create: vi.fn(async (input) => ({
       inviteCode: "BwcHBwcHBwcHBwcHBwcHBw",
       invitePath: "/rooms/join/BwcHBwcHBwcHBwcHBwcHBw",
       owner: input.host.fanId,
       room: { id: "room-1" },
-    }));
-    const react = vi.fn(async (input) => ({
+    })),
+    get: vi.fn(),
+    join: vi.fn(),
+    list: vi.fn(async () => []),
+    lockCalls: vi.fn(async (input) => ({ roomId: input.roomId })),
+    preview: vi.fn(),
+    react: vi.fn(async (input) => ({
       reaction: { id: "reaction-1" },
       room: { id: input.roomId },
-    }));
-    const service = {
-      create,
-      get: vi.fn(),
-      join: vi.fn(),
-      list: vi.fn(async () => []),
-      openPicks: vi.fn(),
-      preview: vi.fn(),
-      react,
-      saveSensePicks: vi.fn(),
-      startExperience: vi.fn(),
-      subscribe: vi.fn(async () => () => undefined),
-    } satisfies DurableRoomRouteDependencies["service"];
+    })),
+    setCalls: vi.fn(async (input) => ({ roomId: input.roomId })),
+    subscribe: vi.fn(async () => () => undefined),
+    ...overrides,
+  } satisfies DurableRoomRouteDependencies["service"];
+}
+
+describe("durable Call Three Room routes", () => {
+  it("owns Room creation and Call Three mutations through the fan session plus CSRF", async () => {
+    const sessions = fanSessions();
+    const host = await sessions.createGuest();
+    const service = serviceStub();
     const app = Fastify();
     registerDurableRoomRoutes(app, { service, sessions });
 
@@ -144,25 +85,21 @@ describe("durable Room routes", () => {
       headers: { "x-matchsense-fan-id": "fan-attacker" },
       method: "POST",
       payload: {
-        fixtureId: "experience:run-1",
+        fixtureId: "live-fixture-1",
         host: { nickname: "Attacker", teamCode: "ARG" },
-        name: "Spoofed room",
+        name: "Spoofed Room",
       },
       url: "/api/v1/rooms",
     });
     expect(spoofed.statusCode).toBe(401);
-    expect(create).not.toHaveBeenCalled();
+    expect(service.create).not.toHaveBeenCalled();
 
     const cookie = `matchsense_session=${host.sessionToken}`;
     const missingCsrf = await app.inject({
       headers: { cookie },
-      method: "POST",
-      payload: {
-        fixtureId: "experience:run-1",
-        host: { nickname: "Abhinav", teamCode: "ARG" },
-        name: "Final night",
-      },
-      url: "/api/v1/rooms",
+      method: "PUT",
+      payload: { calls: [] },
+      url: "/api/v1/rooms/room-1/calls",
     });
     expect(missingCsrf.statusCode).toBe(403);
 
@@ -174,50 +111,142 @@ describe("durable Room routes", () => {
       },
       method: "POST",
       payload: {
-        fixtureId: "experience:run-1",
+        fixtureId: "live-fixture-1",
         host: { nickname: "Abhinav", teamCode: "ARG" },
         name: "Final night",
       },
       url: "/api/v1/rooms",
     });
     expect(created.statusCode).toBe(201);
-    expect(create).toHaveBeenCalledWith({
-      fixtureId: "experience:run-1",
+    expect(service.create).toHaveBeenCalledWith({
+      fixtureId: "live-fixture-1",
       host: { fanId: host.fan.id, nickname: "Abhinav", teamCode: "ARG" },
       name: "Final night",
     });
 
-    const listed = await app.inject({
-      headers: { cookie },
-      method: "GET",
-      url: "/api/v1/rooms",
+    const calls = [
+      { answer: "HOME", confidence: 3, target: "result" },
+      { answer: "YES", confidence: 2, target: "goals" },
+      { answer: "NO", confidence: 1, target: "cards" },
+    ];
+    const saved = await app.inject({
+      headers: { cookie, "x-matchsense-csrf": host.csrfToken },
+      method: "PUT",
+      payload: { calls },
+      url: "/api/v1/rooms/room-1/calls",
     });
-    expect(listed.statusCode).toBe(200);
-    expect(service.list).toHaveBeenCalledWith(host.fan.id);
+    expect(saved.statusCode).toBe(200);
+    expect(service.setCalls).toHaveBeenCalledWith({
+      calls,
+      fanId: host.fan.id,
+      roomId: "room-1",
+    });
 
-    const reaction = await app.inject({
+    const locked = await app.inject({
+      headers: { cookie, "x-matchsense-csrf": host.csrfToken },
+      method: "POST",
+      payload: {},
+      url: "/api/v1/rooms/room-1/calls/lock",
+    });
+    expect(locked.statusCode).toBe(200);
+    expect(service.lockCalls).toHaveBeenCalledWith({
+      fanId: host.fan.id,
+      roomId: "room-1",
+    });
+    await app.close();
+  });
+
+  it("rejects invalid Call Three shapes before the service receives them", async () => {
+    const sessions = fanSessions();
+    const host = await sessions.createGuest();
+    const service = serviceStub();
+    const app = Fastify();
+    registerDurableRoomRoutes(app, { service, sessions });
+
+    const response = await app.inject({
       headers: {
-        cookie,
+        cookie: `matchsense_session=${host.sessionToken}`,
         "x-matchsense-csrf": host.csrfToken,
-        "x-matchsense-fan-id": "fan-attacker",
+      },
+      method: "PUT",
+      payload: {
+        calls: [
+          { answer: "YES", confidence: 3, target: "goals" },
+          { answer: "NO", confidence: 3, target: "cards" },
+        ],
+      },
+      url: "/api/v1/rooms/room-1/calls",
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(service.setCalls).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("does not expose the retired Experience, pick allocation, or manual-start controls", async () => {
+    const sessions = fanSessions();
+    const host = await sessions.createGuest();
+    const prepareExperienceRoom = vi.fn();
+    const service = serviceStub();
+    const app = Fastify();
+    registerDurableRoomRoutes(app, {
+      prepareExperienceRoom,
+      service,
+      sessions,
+    });
+
+    const headers = {
+      cookie: `matchsense_session=${host.sessionToken}`,
+      "x-matchsense-csrf": host.csrfToken,
+    };
+    for (const url of [
+      "/api/v1/experience/rooms",
+      "/api/v1/rooms/room-1/picks/open",
+      "/api/v1/rooms/room-1/demo/start",
+    ]) {
+      const response = await app.inject({
+        headers,
+        method: "POST",
+        payload: {},
+        url,
+      });
+      expect(response.statusCode).toBe(404);
+    }
+    expect(prepareExperienceRoom).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("returns a safe conflict when a fixture is not eligible for Call Three", async () => {
+    const sessions = fanSessions();
+    const host = await sessions.createGuest();
+    const service = serviceStub({
+      create: vi.fn(async () => {
+        throw new RoomsDomainError(
+          "ROOM_NOT_ELIGIBLE",
+          "Call Three requires a scheduled live fixture",
+        );
+      }),
+    });
+    const app = Fastify();
+    registerDurableRoomRoutes(app, { service, sessions });
+
+    const response = await app.inject({
+      headers: {
+        cookie: `matchsense_session=${host.sessionToken}`,
+        "x-matchsense-csrf": host.csrfToken,
       },
       method: "POST",
       payload: {
-        kind: "ROAR",
-        momentId: "goal-1",
-        recipientParticipantId: "fan-friend",
-        revision: 1,
+        fixtureId: "recorded-fixture",
+        host: { nickname: "Abhinav" },
+        name: "No replay calls",
       },
-      url: "/api/v1/rooms/room-1/reactions",
+      url: "/api/v1/rooms",
     });
-    expect(reaction.statusCode).toBe(201);
-    expect(react).toHaveBeenCalledWith({
-      fanId: host.fan.id,
-      kind: "ROAR",
-      momentId: "goal-1",
-      recipientParticipantId: "fan-friend",
-      revision: 1,
-      roomId: "room-1",
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      error: { code: "ROOM_NOT_ELIGIBLE" },
     });
     await app.close();
   });
