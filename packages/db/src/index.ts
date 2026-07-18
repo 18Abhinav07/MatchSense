@@ -127,3 +127,17 @@ export type {
 } from "./in-memory-fixture-truth.js";
 export { isDirectExecution, runDatabaseCli } from "./cli.js";
 export type { DatabaseCliOptions } from "./cli.js";
+export { createFixtureReadRepository } from "./fixture-read-repository.js";
+export type {
+  FixtureBucket,
+  FixtureFeed,
+  FixtureFeedEvent,
+  FixtureLifecycle,
+  FixtureMemoryRead,
+  FixtureMomentResolution,
+  FixtureMomentRevision,
+  FixtureReadMode,
+  FixtureReadRepository,
+  FixtureReadSnapshot,
+  ReplayReadyFixture,
+} from "./fixture-read-repository.js";

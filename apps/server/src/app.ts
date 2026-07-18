@@ -37,6 +37,11 @@ import {
 } from "./fan-routes.js";
 import type { FanSessionService } from "./fan-session.js";
 import {
+  type FixtureReadRouteDependencies,
+  registerFixtureReadRoutes,
+} from "./fixture-read-routes.js";
+import { registerFixtureStreamRoutes } from "./fixture-stream-routes.js";
+import {
   type MemoryRouteDependencies,
   registerMemoryRoutes,
 } from "./memory-routes.js";
@@ -45,6 +50,7 @@ import {
   type PushRouteDependencies,
   registerPushRoutes,
 } from "./push-delivery.js";
+import { registerReplayRoutes } from "./replay-routes.js";
 import { registerRoomRoutes } from "./room-routes.js";
 import { createRoomService, type RoomService } from "./room-service.js";
 
@@ -64,6 +70,7 @@ export interface BuildAppOptions {
   durableRooms?: DurableRoomRouteDependencies;
   experience?: ExperienceRuntime;
   fan?: FanRouteDependencies;
+  fixtureRead?: FixtureReadRouteDependencies;
   manageRuntimeLifecycle?: boolean;
   readinessProbe: ReadinessProbe;
   memory?: MemoryRouteDependencies;
@@ -183,7 +190,11 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     }
   });
 
-  if (options.runtime) {
+  if (options.fixtureRead) {
+    registerFixtureReadRoutes(app, options.fixtureRead);
+    registerFixtureStreamRoutes(app, options.fixtureRead);
+    registerReplayRoutes(app, options.fixtureRead);
+  } else if (options.runtime) {
     registerProductRoutes(app, options.runtime);
     if (options.manageRuntimeLifecycle !== false) {
       app.addHook("preClose", () => {
