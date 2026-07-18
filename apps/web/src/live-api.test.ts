@@ -158,6 +158,32 @@ describe("live product API normalization", () => {
     });
   });
 
+  it("lets a newer TxLINE projection phase outrank a stale schedule row", () => {
+    const fixture = normalizeFixture({
+      fixtureId: "fx-live",
+      lifecycle: "scheduled",
+      mode: "live",
+      projection: {
+        payload: {
+          awayTeam: "ENG",
+          fixtureId: "fx-live",
+          freshness: "live",
+          homeTeam: "FRA",
+          minute: "18'",
+          phase: "first_half",
+          revision: 3,
+          score: { away: 0, home: 1 },
+        },
+        revision: 3,
+      },
+      provenance: "live_txline",
+      teams: { away: "ENG", home: "FRA" },
+    });
+
+    expect(fixture?.lifecycle).toBe("LIVE");
+    expect(todayFixtureBucket(fixture!)).toBe("live");
+  });
+
   it("normalizes a canonical SSE Moment without losing its revision identity", () => {
     const payload = parseCanonicalEvent(
       JSON.stringify({

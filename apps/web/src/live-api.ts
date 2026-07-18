@@ -107,6 +107,28 @@ function normalizeLifecycle(value: unknown): FixtureLifecycle | undefined {
     : undefined;
 }
 
+function lifecycleFromProjectionPhase(
+  value: unknown,
+): FixtureLifecycle | undefined {
+  const phase = text(value).trim().toLowerCase();
+  if (phase === "full_time") return "TERMINAL_FACT_COMMITTED";
+  if (
+    [
+      "first_half",
+      "half_time",
+      "second_half",
+      "regulation_end",
+      "extra_time_first_half",
+      "extra_time_half",
+      "extra_time_second_half",
+      "shootout",
+    ].includes(phase)
+  ) {
+    return "LIVE";
+  }
+  return undefined;
+}
+
 function normalizeFreshness(value: unknown): FixtureFreshness | undefined {
   const normalized = text(value).toLowerCase();
   const allowed: readonly FixtureFreshness[] = [
@@ -178,6 +200,17 @@ export function normalizeFixture(value: unknown): LiveSnapshot | null {
   const teams = record(item.teams);
   const projection = record(item.projection);
   const projected = record(projection?.payload);
+  const explicitLifecycle = normalizeLifecycle(item.lifecycle);
+  const terminalLifecycle =
+    explicitLifecycle === "TERMINAL_FACT_COMMITTED" ||
+    explicitLifecycle === "FINAL" ||
+    explicitLifecycle === "FINAL_REVISED" ||
+    explicitLifecycle === "RESULT_UNAVAILABLE"
+      ? explicitLifecycle
+      : undefined;
+  const projectedLifecycle = lifecycleFromProjectionPhase(
+    projected?.phase ?? item.phase,
+  );
   const homeValue =
     item.homeTeam ??
     teams?.home ??
@@ -221,7 +254,7 @@ export function normalizeFixture(value: unknown): LiveSnapshot | null {
     ),
     kickoffAt:
       text(item.kickoffAt ?? item.startTime ?? item.scheduledAt) || undefined,
-    lifecycle: normalizeLifecycle(item.lifecycle),
+    lifecycle: terminalLifecycle ?? projectedLifecycle ?? explicitLifecycle,
     minute: text(projected?.minute ?? item.minute ?? item.clock, "—"),
     mode: normalizeMode(item.mode),
     phase:
