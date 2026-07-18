@@ -22,6 +22,7 @@ ENV NODE_ENV=production
 ENV PORT=8080
 ENV HOST=0.0.0.0
 ENV DATA_RIGHTS_MODE=txline_hackathon
+ENV ROLE=api
 
 WORKDIR /app/server
 
@@ -31,5 +32,4 @@ COPY --from=builder /workspace/apps/web/dist /app/web/dist
 USER node
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["node", "-e", "const port=process.env.PORT??'8080';fetch('http://127.0.0.1:'+port+'/health/live').then((response)=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"]
-CMD ["node", "dist/main.js"]
+CMD ["node", "dist/entry.js"]

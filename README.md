@@ -7,7 +7,7 @@ tags: [matchsense, production, workspace]
 
 # MatchSense Production Workspace
 
-Lean pnpm monorepo for the MatchSense hackathon PWA and its single Node server.
+Lean pnpm monorepo for the MatchSense hackathon PWA, API service, and collector worker.
 
 ## Requirements
 
@@ -40,33 +40,34 @@ npx --yes pnpm@11.13.0 format:check
 
 ## Railway deployment contract
 
-MatchSense must run as **exactly one Railway application replica**. Canonical
-facts and fan records are durable in PostgreSQL, but SSE subscribers, active
-Listening Mode streams, audio fanout, and listening-session ownership are
-process-local. More than one application replica can route a follow-up request
-to a process that does not own that listener.
+MatchSense runs as **one API replica** plus one separate **collector worker
+service**. The API serves the PWA, database-backed reads, anonymous fan
+sessions, and encrypted push-subscription registration. The collector alone
+holds TxLINE credentials and owns migrations, ingestion, and outbox work.
 
-[`railway.json`](railway.json) is the deployment source of truth. It selects the
-root Dockerfile, disables sleeping and multi-region scaling, fixes the replica
-count at one, disables deployment overlap, and uses database-backed
-`/health/ready` as Railway's health gate. Keep the Railway service root at this
-repository root so the pnpm workspace and shared packages remain in the Docker
-build context. Do not override the start command or scale the app in the
-dashboard.
+[`railway.json`](railway.json) is the API service template: it selects the root
+Dockerfile and uses database-backed `/health/ready` as Railway's health gate.
+[`railway.worker.json`](railway.worker.json) is the worker-service template: it
+starts with `ROLE=worker` and deliberately has no HTTP healthcheck. Keep both
+Railway service roots at this repository root so the pnpm workspace and shared
+packages remain in the Docker build context. The shared image defaults to
+`ROLE=api`; set `ROLE=worker` only on the private worker service.
 
 Provision a Railway PostgreSQL service and configure these application
 variables:
 
-| Variable            | Requirement                                     | Purpose                                                                                                                         |
-| ------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`      | Required                                        | Use the PostgreSQL service's private `DATABASE_URL` reference.                                                                  |
-| `TXLINE_API_TOKEN`  | Required in the default `txline_hackathon` mode | Server-only TxLINE schedule and SSE credential.                                                                                 |
-| `DATA_RIGHTS_MODE`  | Optional                                        | Defaults to `txline_hackathon`; `synthetic_demo` is only for explicit demo/test runs.                                           |
-| `VAPID_SUBJECT`     | Required for Web Push                           | A `mailto:` or HTTPS contact. Set together with both VAPID keys.                                                                |
-| `VAPID_PUBLIC_KEY`  | Required for Web Push                           | Public application-server key exposed to subscribed browsers.                                                                   |
-| `VAPID_PRIVATE_KEY` | Required for Web Push                           | Server-only signing key. Never expose it to the PWA.                                                                            |
-| `GROQ_API_KEY`      | Optional                                        | Enhances canonical-event commentary text; deterministic text remains available without it.                                      |
-| `GEMINI_API_KEY`    | Optional                                        | Enables generated TTS. `GOOGLE_API_KEY` is accepted as its alias; the deterministic audio cue remains available without either. |
+| Variable                              | Requirement                                      | Purpose                                                                                                                         |
+| ------------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                        | Required on both services                        | Use the PostgreSQL service's private `DATABASE_URL` reference.                                                                  |
+| `ROLE`                                | Required by deployment convention                | `api` for the public PWA/API service; `worker` for the private collector.                                                       |
+| `TXLINE_API_TOKEN`                    | Required only on `ROLE=worker`                   | Server-only TxLINE schedule and SSE credential. Never assign it to the API service.                                             |
+| `DATA_RIGHTS_MODE`                    | Optional                                         | Defaults to `txline_hackathon`; the public API rejects synthetic demo mode.                                                     |
+| `VAPID_PUBLIC_KEY`                    | Required on the API when push registration is on | Public application-server key exposed to subscribed browsers.                                                                   |
+| `PUSH_SUBSCRIPTION_ENCRYPTION_SECRET` | Required with Web Push on both services          | Encrypts stored browser subscriptions; it is separate from the VAPID signing private key.                                       |
+| `VAPID_SUBJECT`                       | Required only on `ROLE=worker` for Web Push      | A `mailto:` or HTTPS contact for VAPID signing.                                                                                 |
+| `VAPID_PRIVATE_KEY`                   | Required only on `ROLE=worker` for Web Push      | Server-only VAPID signing key. Never assign it to the API service or expose it to the PWA.                                      |
+| `GROQ_API_KEY`                        | Optional                                         | Enhances canonical-event commentary text; deterministic text remains available without it.                                      |
+| `GEMINI_API_KEY`                      | Optional                                         | Enables generated TTS. `GOOGLE_API_KEY` is accepted as its alias; the deterministic audio cue remains available without either. |
 
 Railway injects `PORT`; the image binds it on `0.0.0.0`. Do not create a
 separate frontend service: the Node server serves the built PWA and `/api`
@@ -81,8 +82,7 @@ Health contracts:
   represented as database readiness.
 
 Before release, run `pnpm test:container`. The smoke test deliberately starts
-the same production image in `synthetic_demo` mode so container, migration,
-PWA routing, health, and graceful-shutdown checks do not depend on an external
-TxLINE credential.
+the API role with no TxLINE credential so container, migration, PWA routing,
+health, and graceful-shutdown checks remain deterministic.
 
 Vault context: [[10-Projects/Web3-Builds/Hackathons/MatchSense/HANDOFF]] · [[10-Projects/Web3-Builds/Hackathons/MatchSense/AGENTS]]

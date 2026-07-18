@@ -434,7 +434,7 @@ export async function startServer(options: StartServerOptions = {}) {
       pushSender && databaseRuntime.fans && databaseRuntime.pushDevices
         ? createDurablePushService({
             cipher: createPushSubscriptionCipher({
-              secret: config.vapid!.privateKey,
+              secret: config.pushSubscriptionEncryptionSecret!,
             }),
             devices: databaseRuntime.pushDevices,
             fans: databaseRuntime.fans,

@@ -6,7 +6,10 @@ import type {
   PushDeviceRecord,
 } from "@matchsense/db";
 
-import { createDurablePushService } from "./durable-push.js";
+import {
+  createDurablePushRegistrationService,
+  createDurablePushService,
+} from "./durable-push.js";
 import { createPushSubscriptionCipher } from "./push-crypto.js";
 
 const subscription = {
@@ -87,6 +90,56 @@ function harness(options: { goals?: boolean; redCards?: boolean } = {}) {
 }
 
 describe("durable targeted push delivery", () => {
+  it("registers encrypted subscriptions without a VAPID sender", async () => {
+    const devices = new Map<string, PushDeviceRecord>();
+    const registration = createDurablePushRegistrationService({
+      cipher: createPushSubscriptionCipher({
+        randomBytes: () => Buffer.alloc(12, 4),
+        secret: "fixture-matchsense-secret-with-enough-entropy",
+      }),
+      devices: {
+        getActiveForFan: async (input) => {
+          const record = devices.get(input.deviceId) ?? null;
+          return record?.fanId === input.fanId ? record : null;
+        },
+        invalidate: async ({ deviceId }) => {
+          const record = devices.get(deviceId);
+          if (!record) return false;
+          devices.set(deviceId, {
+            ...record,
+            invalidatedAt: "2026-07-17T12:30:00.000Z",
+          });
+          return true;
+        },
+        upsertDevice: async (input) => {
+          const record: PushDeviceRecord = {
+            ...input,
+            createdAt: "2026-07-17T12:00:00.000Z",
+            invalidatedAt: null,
+            lastFailureAt: null,
+            lastSuccessAt: null,
+            updatedAt: "2026-07-17T12:00:00.000Z",
+          };
+          devices.set(record.id, record);
+          return record;
+        },
+      },
+      id: () => "api-registration-only",
+    });
+
+    const device = await registration.register({
+      fanId: "fan-1",
+      preferences: { goals: true },
+      subscription,
+    });
+
+    expect(device).toMatchObject({ id: "api-registration-only" });
+    expect(device.ciphertext.byteLength).toBeGreaterThan(0);
+    await expect(
+      registration.invalidate("fan-1", "api-registration-only"),
+    ).resolves.toBe(true);
+  });
+
   it("encrypts a fan device and sends one confirmed Moment only to followers", async () => {
     const { deliveries, sender, service } = harness();
     const device = await service.register({

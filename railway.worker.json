@@ -5,12 +5,10 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "node dist/entry.js",
+    "startCommand": "ROLE=worker node dist/entry.js",
     "numReplicas": 1,
     "multiRegionConfig": null,
     "sleepApplication": false,
-    "healthcheckPath": "/health/ready",
-    "healthcheckTimeout": 300,
     "overlapSeconds": 0,
     "drainingSeconds": 15,
     "restartPolicyType": "ON_FAILURE",

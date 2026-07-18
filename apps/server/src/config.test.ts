@@ -31,6 +31,7 @@ describe("parseServerEnv", () => {
       dataRightsMode: "txline_hackathon",
       host: "0.0.0.0",
       port: 8080,
+      role: "worker",
       txlineApiToken: "fixture-server-only-token",
     });
   });
@@ -54,20 +55,25 @@ describe("parseServerEnv", () => {
     ).toThrow("Invalid MatchSense server configuration");
   });
 
-  it("enables Web Push only with a complete VAPID key set", () => {
-    expect(
-      parseServerEnv({
-        DATABASE_URL: "postgresql://db.example/matchsense",
-        DATA_RIGHTS_MODE: "synthetic_demo",
-        VAPID_PRIVATE_KEY: "fixture-private-key",
-        VAPID_PUBLIC_KEY: "public-key",
-        VAPID_SUBJECT: "mailto:team@matchsense.app",
-      }).vapid,
-    ).toEqual({
+  it("separates push subscription encryption from VAPID signing keys", () => {
+    const config = parseServerEnv({
+      DATABASE_URL: "postgresql://db.example/matchsense",
+      DATA_RIGHTS_MODE: "synthetic_demo",
+      PUSH_SUBSCRIPTION_ENCRYPTION_SECRET:
+        "fixture-subscription-encryption-secret",
+      VAPID_PRIVATE_KEY: "fixture-private-key",
+      VAPID_PUBLIC_KEY: "public-key",
+      VAPID_SUBJECT: "mailto:team@matchsense.app",
+    });
+
+    expect(config.vapid).toEqual({
       privateKey: "fixture-private-key",
       publicKey: "public-key",
       subject: "mailto:team@matchsense.app",
     });
+    expect(config.pushSubscriptionEncryptionSecret).toBe(
+      "fixture-subscription-encryption-secret",
+    );
     expect(() =>
       parseServerEnv({
         DATABASE_URL: "postgresql://db.example/matchsense",
@@ -75,6 +81,43 @@ describe("parseServerEnv", () => {
         VAPID_PUBLIC_KEY: "public-key-only",
       }),
     ).toThrow("Invalid MatchSense server configuration");
+  });
+
+  it("prevents TxLINE credentials and VAPID signing material from entering API processes", () => {
+    expect(() =>
+      parseServerEnv({
+        DATABASE_URL: "postgresql://db.example/matchsense",
+        ROLE: "api",
+        TXLINE_API_TOKEN: "must-never-be-on-the-api-service",
+      }),
+    ).toThrow("API role must not receive TxLINE token");
+    expect(() =>
+      parseServerEnv({
+        DATABASE_URL: "postgresql://db.example/matchsense",
+        ROLE: "api",
+        VAPID_PRIVATE_KEY: "must-never-be-on-the-api-service",
+      }),
+    ).toThrow("API role must not receive VAPID private key");
+  });
+
+  it("requires the TxLINE token only for the collector worker", () => {
+    expect(() =>
+      parseServerEnv({
+        DATABASE_URL: "postgresql://db.example/matchsense",
+        ROLE: "worker",
+      }),
+    ).toThrow("TxLINE token is required");
+
+    const apiConfig = parseServerEnv({
+      DATABASE_URL: "postgresql://db.example/matchsense",
+      ROLE: "api",
+      PUSH_SUBSCRIPTION_ENCRYPTION_SECRET:
+        "fixture-subscription-encryption-secret",
+      VAPID_PUBLIC_KEY: "public-key",
+    });
+    expect(apiConfig).toMatchObject({ role: "api" });
+    expect(apiConfig).not.toHaveProperty("txlineApiToken");
+    expect(apiConfig).not.toHaveProperty("vapid");
   });
 
   it.each([

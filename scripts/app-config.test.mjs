@@ -51,7 +51,7 @@ test("server uses an application manifest instead of library exports", () => {
   const manifest = readJson("apps/server/package.json");
   assertApplicationManifest(manifest, "apps/server/src");
   assert.equal(manifest.scripts.build, "tsc -p tsconfig.build.json");
-  assert.equal(manifest.scripts.start, "node dist/main.js");
+  assert.equal(manifest.scripts.start, "node dist/entry.js");
 });
 
 test("server compiler uses Node runtime module resolution", () => {

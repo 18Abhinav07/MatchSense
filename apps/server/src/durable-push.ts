@@ -36,6 +36,16 @@ export interface DurablePushServiceOptions {
   sender: WebPushSender;
 }
 
+export interface DurablePushRegistrationServiceOptions {
+  cipher: PushSubscriptionCipher;
+  devices: Pick<
+    PushDeviceRepository,
+    "getActiveForFan" | "invalidate" | "upsertDevice"
+  >;
+  id?: () => string;
+  now?: () => string;
+}
+
 function enabled(value: unknown, fallback = true) {
   return typeof value === "boolean" ? value : fallback;
 }
@@ -74,9 +84,51 @@ function deliveryId(input: {
     .slice(0, 32)}`;
 }
 
-export function createDurablePushService(options: DurablePushServiceOptions) {
+export function createDurablePushRegistrationService(
+  options: DurablePushRegistrationServiceOptions,
+) {
   const id = options.id ?? randomUUID;
   const now = options.now ?? (() => new Date().toISOString());
+
+  return {
+    invalidate: async (fanId: string, deviceId: string) => {
+      const device = await options.devices.getActiveForFan({ deviceId, fanId });
+      if (!device) return false;
+      return options.devices.invalidate({ deviceId, failedAt: now() });
+    },
+    register: async (input: {
+      fanId: string;
+      preferences: Record<string, unknown>;
+      subscription: unknown;
+    }) => {
+      const sealed = options.cipher.seal(input.subscription);
+      const parsed = options.cipher.open(sealed);
+      return options.devices.upsertDevice({
+        ...sealed,
+        expiresAt:
+          parsed.expirationTime === null
+            ? null
+            : new Date(parsed.expirationTime).toISOString(),
+        fanId: input.fanId,
+        id: id(),
+        preferences: input.preferences,
+      });
+    },
+  };
+}
+
+export type DurablePushRegistrationService = ReturnType<
+  typeof createDurablePushRegistrationService
+>;
+
+export function createDurablePushService(options: DurablePushServiceOptions) {
+  const now = options.now ?? (() => new Date().toISOString());
+  const registration = createDurablePushRegistrationService({
+    cipher: options.cipher,
+    devices: options.devices,
+    ...(options.id ? { id: options.id } : {}),
+    now,
+  });
 
   const sendDevice = async (
     device: PushDeviceRecord,
@@ -123,6 +175,7 @@ export function createDurablePushService(options: DurablePushServiceOptions) {
   };
 
   return {
+    ...registration,
     deliverToFixture: async (input: MomentPushInput, mode: PersistenceMode) => {
       const followers = await options.fans.listFollowers({
         fixtureId: input.fixtureId,
@@ -152,29 +205,6 @@ export function createDurablePushService(options: DurablePushServiceOptions) {
         attempted: results.length,
       };
     },
-    invalidate: async (fanId: string, deviceId: string) => {
-      const device = await options.devices.getActiveForFan({ deviceId, fanId });
-      if (!device) return false;
-      return options.devices.invalidate({ deviceId, failedAt: now() });
-    },
-    register: async (input: {
-      fanId: string;
-      preferences: Record<string, unknown>;
-      subscription: unknown;
-    }) => {
-      const sealed = options.cipher.seal(input.subscription);
-      const parsed = options.cipher.open(sealed);
-      return options.devices.upsertDevice({
-        ...sealed,
-        expiresAt:
-          parsed.expirationTime === null
-            ? null
-            : new Date(parsed.expirationTime).toISOString(),
-        fanId: input.fanId,
-        id: id(),
-        preferences: input.preferences,
-      });
-    },
     sendTest: async (
       fanId: string,
       deviceId: string,
@@ -198,8 +228,21 @@ const durableRegistrationBody = z
 
 export interface DurablePushRouteDependencies {
   applicationServerKey: string;
-  service: DurablePushService;
+  service: DurablePushRegistrationService;
   sessions: FanSessionService;
+  testService?: Pick<DurablePushService, "sendTest">;
+}
+
+function testDeliveryService(
+  dependencies: DurablePushRouteDependencies,
+): Pick<DurablePushService, "sendTest"> | null {
+  if (dependencies.testService) return dependencies.testService;
+  const candidate = dependencies.service as {
+    sendTest?: DurablePushService["sendTest"];
+  };
+  return typeof candidate.sendTest === "function"
+    ? { sendTest: candidate.sendTest }
+    : null;
 }
 
 export function registerDurablePushRoutes(
@@ -266,7 +309,11 @@ export function registerDurablePushRoutes(
       } catch {
         return reply.code(400).send({ error: "push_moment_invalid" });
       }
-      const accepted = await dependencies.service.sendTest(
+      const testService = testDeliveryService(dependencies);
+      if (!testService) {
+        return reply.code(501).send({ error: "push_test_unavailable" });
+      }
+      const accepted = await testService.sendTest(
         session.fan.id,
         request.params.id,
         input,

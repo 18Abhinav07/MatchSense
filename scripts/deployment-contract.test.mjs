@@ -66,9 +66,13 @@ test("production Dockerfile is immutable, portable, and least privileged", () =>
     "the runtime must drop privileges once and never switch back to root",
   );
   assert.match(dockerfile, /^EXPOSE 8080$/mu);
-  assert.match(dockerfile, /^HEALTHCHECK .*node.*\/health\/live/mu);
-  assert.match(dockerfile, /process\.env\.PORT/u);
-  assert.match(dockerfile, /^CMD \["node", "dist\/main\.js"\]$/mu);
+  assert.doesNotMatch(
+    dockerfile,
+    /^HEALTHCHECK /mu,
+    "the shared image must not force an HTTP healthcheck on worker roles",
+  );
+  assert.match(dockerfile, /^ENV ROLE=api$/mu);
+  assert.match(dockerfile, /^CMD \["node", "dist\/entry\.js"\]$/mu);
   assert.deepEqual(
     runtimeAptPackages(dockerfile),
     ["ffmpeg"],
@@ -133,16 +137,18 @@ test("root exposes real deployment verification commands", () => {
   );
 });
 
-test("Railway config enforces the single-process streaming topology", () => {
+test("Railway role templates keep API health checks off the collector", () => {
   assert.equal(existsSync(path.join(root, "railway.json")), true);
+  assert.equal(existsSync(path.join(root, "railway.worker.json")), true);
   const railway = readJson("railway.json");
+  const worker = readJson("railway.worker.json");
 
   assert.equal(railway.$schema, "https://railway.com/railway.schema.json");
   assert.deepEqual(railway.build, {
     builder: "DOCKERFILE",
     dockerfilePath: "Dockerfile",
   });
-  assert.equal(railway.deploy?.startCommand, "node dist/main.js");
+  assert.equal(railway.deploy?.startCommand, "node dist/entry.js");
   assert.equal(railway.deploy?.numReplicas, 1);
   assert.equal(railway.deploy?.multiRegionConfig, null);
   assert.equal(railway.deploy?.sleepApplication, false);
@@ -153,14 +159,21 @@ test("Railway config enforces the single-process streaming topology", () => {
   assert.equal(railway.deploy?.restartPolicyType, "ON_FAILURE");
   assert.equal(railway.deploy?.restartPolicyMaxRetries, 10);
 
+  assert.equal(worker.$schema, "https://railway.com/railway.schema.json");
+  assert.deepEqual(worker.build, railway.build);
+  assert.equal(worker.deploy?.startCommand, "ROLE=worker node dist/entry.js");
+  assert.equal(Object.hasOwn(worker.deploy ?? {}, "healthcheckPath"), false);
+
   const readme = read("README.md");
-  assert.match(readme, /exactly one Railway application replica/iu);
+  assert.match(readme, /one API replica/iu);
+  assert.match(readme, /collector worker\s+service/iu);
   for (const variable of [
     "DATABASE_URL",
     "TXLINE_API_TOKEN",
     "VAPID_SUBJECT",
     "VAPID_PUBLIC_KEY",
     "VAPID_PRIVATE_KEY",
+    "PUSH_SUBSCRIPTION_ENCRYPTION_SECRET",
     "GROQ_API_KEY",
     "GEMINI_API_KEY",
   ]) {
@@ -215,10 +228,13 @@ test("container smoke uses isolated pinned infrastructure and validates the runt
   assert.match(smoke, /health\/ready/u);
   assert.match(
     smoke,
-    /"start application"[\s\S]+?DATA_RIGHTS_MODE=synthetic_demo[\s\S]+?"--publish"/u,
+    /"start application"[\s\S]+?ROLE=api[\s\S]+?"--publish"/u,
   );
   assert.match(smoke, /node_modules\/@matchsense\/db\/dist\/cli\.js/u);
-  assert.match(smoke, /Database migrations applied: 3; current version: 3/u);
+  assert.match(
+    smoke,
+    /Database migrations applied: \\d\+; current version: \\d\+/u,
+  );
   assert.match(smoke, /Database migrations are current/u);
   assert.match(smoke, /\/app\/web\/dist\/index\.html/u);
   assert.match(smoke, /require\.resolve\(['"]vitest['"]\)/u);
