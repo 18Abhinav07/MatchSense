@@ -5,8 +5,10 @@ import {
   createPostgresDatabase,
   type ApplicationDatabase,
   type OutboxRepository,
+  type RoomAggregateRepository,
   type SourceLeaseRecord,
 } from "@matchsense/db";
+import type { FixtureSnapshot } from "@matchsense/contracts";
 import {
   createTxlineAuthenticatedClient,
   createTxlineRawScoreSource,
@@ -32,6 +34,11 @@ import {
   pushInputFromRealtimeMoment,
   type DurablePushService,
 } from "./durable-push.js";
+import {
+  createDurableRoomService,
+  type DurableRoomAggregate,
+  type DurableRoomService,
+} from "./durable-room-service.js";
 import { type Mp3Contract } from "./mp3.js";
 import {
   createOutboxWorker,
@@ -56,6 +63,7 @@ export type CollectorDatabaseRuntime = Pick<
   | "migrate"
   | "outbox"
   | "pushDevices"
+  | "rooms"
   | "sourceState"
 >;
 
@@ -101,6 +109,52 @@ const COMMENTARY_MP3_CONTRACT: Mp3Contract = {
 export interface CollectorOutboxEffects {
   commentary?: Pick<CommentaryJobWorker, "handleOutbox">;
   push?: Pick<DurablePushService, "deliverToFixture">;
+  rooms?: Pick<DurableRoomService, "projectFixture">;
+}
+
+function object(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function nonemptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
+function nonnegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+function roomFixtureFromRealtimePayload(
+  payload: unknown,
+): FixtureSnapshot | null {
+  const envelope = object(payload);
+  const event = object(envelope?.event);
+  const snapshot = object(event?.snapshot);
+  const score = object(snapshot?.score);
+  if (
+    envelope?.mode !== "live" ||
+    envelope.deliveryIntent !== "realtime" ||
+    snapshot?.provenance !== "live_txline" ||
+    !nonemptyString(snapshot.fixtureId) ||
+    !nonemptyString(snapshot.homeTeam) ||
+    !nonemptyString(snapshot.awayTeam) ||
+    !nonemptyString(snapshot.kickoffAt) ||
+    !nonemptyString(snapshot.minute) ||
+    !nonemptyString(snapshot.phase) ||
+    !nonemptyString(snapshot.updatedAt) ||
+    nonnegativeInteger(snapshot.revision) === null ||
+    nonnegativeInteger(score?.home) === null ||
+    nonnegativeInteger(score?.away) === null
+  ) {
+    return null;
+  }
+  return snapshot as unknown as FixtureSnapshot;
 }
 
 /**
@@ -126,6 +180,14 @@ export function createCollectorOutboxHandlers(
       const candidate = pushInputFromRealtimeMoment(message.payload);
       if (!candidate) return;
       await effects.push?.deliverToFixture(candidate, "live");
+    };
+  }
+  if (effects.rooms) {
+    handlers["room.project"] = async (message) => {
+      if (message.mode !== "live") return;
+      const fixture = roomFixtureFromRealtimePayload(message.payload);
+      if (!fixture) return;
+      await effects.rooms?.projectFixture(fixture);
     };
   }
   return handlers;
@@ -369,6 +431,15 @@ export async function startCollector(
             sender: createVapidWebPushSender(config.vapid),
           })
         : null;
+    // This role only projects existing Rooms. Room creation uses the API
+    // runtime's fan session and live-fixture resolver.
+    const durableRooms = databaseRuntime.rooms
+      ? createDurableRoomService({
+          fixture: () => null,
+          repository:
+            databaseRuntime.rooms as RoomAggregateRepository<DurableRoomAggregate>,
+        })
+      : null;
     outboxWorker =
       options.outboxWorker ??
       (
@@ -379,6 +450,7 @@ export async function startCollector(
             handlers: createCollectorOutboxHandlers({
               ...(commentaryWorker ? { commentary: commentaryWorker } : {}),
               ...(durablePush ? { push: durablePush } : {}),
+              ...(durableRooms ? { rooms: durableRooms } : {}),
             }),
             mode: "live",
             outbox,

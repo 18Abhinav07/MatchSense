@@ -7,6 +7,74 @@ import {
 } from "./collector-main.js";
 
 describe("collector-only runtime", () => {
+  it("projects only realtime live TxLINE snapshots into durable Rooms", async () => {
+    const rooms = {
+      projectFixture: vi.fn(async () => 1),
+    };
+    const handlers = createCollectorOutboxHandlers({ rooms });
+    const snapshot = {
+      awayTeam: "FRA",
+      fixtureId: "fixture-arg-fra",
+      homeTeam: "ARG",
+      kickoffAt: "2026-07-18T18:00:00.000Z",
+      lastEvent: null,
+      minute: "23'",
+      phase: "first_half",
+      provenance: "live_txline",
+      revision: 3,
+      score: { away: 0, home: 1 },
+      sourceLabel: "TXLINE · DEVNET SOURCE",
+      updatedAt: "2026-07-18T18:23:00.000Z",
+    };
+    const payload = {
+      deliveryIntent: "realtime",
+      event: { event: "snapshot", id: "fixture-arg-fra:revision:3", snapshot },
+      mode: "live",
+    };
+
+    expect(handlers["room.project"]).toEqual(expect.any(Function));
+    await handlers["room.project"]?.(
+      { mode: "live", payload, topic: "room.project" } as never,
+      new AbortController().signal,
+    );
+    await handlers["room.project"]?.(
+      {
+        mode: "recorded",
+        payload: { ...payload, mode: "recorded" },
+        topic: "room.project",
+      } as never,
+      new AbortController().signal,
+    );
+    await handlers["room.project"]?.(
+      {
+        mode: "live",
+        payload: { ...payload, deliveryIntent: "reconcile" },
+        topic: "room.project",
+      } as never,
+      new AbortController().signal,
+    );
+    await handlers["room.project"]?.(
+      {
+        mode: "live",
+        payload: {
+          ...payload,
+          event: {
+            ...payload.event,
+            snapshot: {
+              ...snapshot,
+              provenance: "recorded_txline_authorised",
+            },
+          },
+        },
+        topic: "room.project",
+      } as never,
+      new AbortController().signal,
+    );
+
+    expect(rooms.projectFixture).toHaveBeenCalledTimes(1);
+    expect(rooms.projectFixture).toHaveBeenCalledWith(snapshot);
+  });
+
   it("fans out only confirmed realtime canonical work into commentary and push", async () => {
     const commentary = {
       handleOutbox: vi.fn(async () => ({ kind: "ignored" as const })),

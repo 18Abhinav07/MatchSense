@@ -128,4 +128,152 @@ describe("API-only runtime", () => {
       await rm(webDistPath, { force: true, recursive: true });
     }
   });
+
+  it("wires durable Call Three creation to a persisted scheduled live fixture", async () => {
+    const webDistPath = await temporaryWebShell();
+    const fixtureId = "fixture-arg-fra";
+    let session: {
+      csrfHash: string;
+      expiresAt: string;
+      sessionHash: string;
+    } | null = null;
+    const fan = {
+      avatarVariant: null,
+      createdAt: "2026-07-18T12:00:00.000Z",
+      deletedAt: null,
+      favoriteTeam: "ARG",
+      handle: "abhinav",
+      handleNormalized: "abhinav",
+      id: "",
+      preferences: {},
+      profile: {},
+      updatedAt: "2026-07-18T12:00:00.000Z",
+    };
+    const fans = {
+      createGuest: vi.fn(async (input) => {
+        session = input;
+        fan.id = input.fanId;
+        return { ...fan };
+      }),
+      resolveSession: vi.fn(async ({ sessionHash }) => {
+        const stored = session;
+        if (!stored || stored.sessionHash !== sessionHash) return null;
+        return {
+          csrfHash: stored.csrfHash,
+          expiresAt: stored.expiresAt,
+          fan: { ...fan },
+          lastSeenAt: fan.updatedAt,
+          revokedAt: null,
+          sessionHash,
+        };
+      }),
+      upsertFollow: vi.fn(async () => undefined),
+    };
+    const rooms = {
+      create: vi.fn(async (input) => ({
+        aggregate: input.aggregate,
+        createdAt: "2026-07-18T12:00:00.000Z",
+        finalizedAt: null,
+        fixtureId: input.fixtureId,
+        id: input.id,
+        inviteExpiresAt: input.inviteExpiresAt,
+        inviteHash: input.inviteHash,
+        mode: input.mode,
+        ownerFanId: input.host.fanId,
+        status: input.status,
+        updatedAt: "2026-07-18T12:00:00.000Z",
+        version: 0,
+      })),
+      listForFan: vi.fn(async () => []),
+    };
+    const fixtureTruth = {
+      get: vi.fn(async () => ({
+        awayTeamId: "FRA",
+        createdAt: "2026-07-18T12:00:00.000Z",
+        homeTeamId: "ARG",
+        id: fixtureId,
+        metadata: {},
+        mode: "live",
+        provenance: "live_txline",
+        scheduledAt: "2099-07-18T18:00:00.000Z",
+        status: "scheduled",
+        updatedAt: "2026-07-18T12:00:00.000Z",
+      })),
+      getLatestProjection: vi.fn(async () => null),
+    };
+    const database = {
+      check: vi.fn(async () => ({
+        databaseReachable: true,
+        migrationsCurrent: true,
+      })),
+      close: vi.fn(async () => undefined),
+      fans,
+      fixtureTruth,
+      pushDevices: {},
+      rooms,
+    };
+
+    try {
+      const app = await startApi(
+        parseServerEnv({
+          DATABASE_URL: "postgresql://db.example/matchsense",
+          ROLE: "api",
+        }),
+        { databaseRuntime: database as never, listen: false, webDistPath },
+      );
+      const guest = await app.inject({
+        method: "POST",
+        url: "/api/v1/session/guest",
+      });
+      const cookies = guest.headers["set-cookie"] as string[];
+      const cookie = cookies.map((entry) => entry.split(";", 1)[0]).join("; ");
+      const csrf = cookies
+        .find((entry) => entry.startsWith("matchsense_csrf="))!
+        .split(";", 1)[0]!
+        .split("=")[1]!;
+      const response = await app.inject({
+        headers: { cookie, "x-matchsense-csrf": csrf },
+        method: "POST",
+        payload: {
+          fixtureId,
+          host: { nickname: "Abhinav", teamCode: "ARG" },
+          name: "Final night",
+        },
+        url: "/api/v1/rooms",
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toMatchObject({
+        room: {
+          fixture: {
+            fixtureId,
+            provenance: "live_txline",
+            phase: "scheduled",
+          },
+          status: "PRE_KICKOFF",
+        },
+      });
+      expect(fixtureTruth.get).toHaveBeenCalledWith({
+        fixtureId,
+        mode: "live",
+      });
+      expect(fans.upsertFollow).toHaveBeenCalledWith({
+        eventPreferences: {
+          fullTime: true,
+          goals: true,
+          halfTime: true,
+          penalties: true,
+          redCards: true,
+          var: true,
+          yellowCards: true,
+        },
+        fanId: fan.id,
+        fixtureId,
+        mode: "live",
+      });
+      await app.close();
+    } finally {
+      await rm(webDistPath, { force: true, recursive: true });
+    }
+  });
 });
