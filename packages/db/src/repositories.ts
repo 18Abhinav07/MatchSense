@@ -1,5 +1,6 @@
-export type PersistenceMode = "live" | "demo";
-export type PersistenceProvenance = "live_txline" | "synthetic_txline_shaped";
+export type PersistenceMode = "live" | "recorded" | "demo";
+export type PersistenceProvenance =
+  "live_txline" | "recorded_txline_authorised" | "synthetic_txline_shaped";
 export type SourceDeliveryIntent = "realtime" | "reconcile";
 
 export type QueryRow = Record<string, unknown>;
@@ -40,17 +41,25 @@ export interface FixtureUpsert {
 }
 
 export interface RawSourceRecordWrite {
+  canonicalEligible?: boolean;
   dedupeKey: string;
+  deliveryKey?: string;
   deliveryIntent?: SourceDeliveryIntent;
   id: string;
   occurredAt?: string | null;
+  orderingKey?: string;
   payload: unknown;
   payloadHash: string;
   provenance: PersistenceProvenance;
+  rawRetention?: "authorised_raw" | "normalised_only";
   receivedAt: string;
+  responseHash?: string;
+  rightsGrantId?: string;
   source: string;
+  sourcePath?: string;
   sourceRecordId: string | null;
   sourceSequence: string | null;
+  streamKey?: string;
 }
 
 export interface SourceFence {
@@ -382,7 +391,7 @@ function safeInteger(value: unknown, field: string): number {
 
 function mode(row: QueryRow): PersistenceMode {
   const value = requiredString(row, "mode");
-  if (value !== "live" && value !== "demo") {
+  if (value !== "live" && value !== "recorded" && value !== "demo") {
     throw new Error("Database row field mode is invalid");
   }
   return value;
@@ -390,7 +399,11 @@ function mode(row: QueryRow): PersistenceMode {
 
 function provenance(row: QueryRow): PersistenceProvenance {
   const value = requiredString(row, "provenance");
-  if (value !== "live_txline" && value !== "synthetic_txline_shaped") {
+  if (
+    value !== "live_txline" &&
+    value !== "recorded_txline_authorised" &&
+    value !== "synthetic_txline_shaped"
+  ) {
     throw new Error("Database row field provenance is invalid");
   }
   return value;
@@ -423,6 +436,7 @@ function assertModeProvenance(
 ) {
   if (
     (value === "live" && dataProvenance !== "live_txline") ||
+    (value === "recorded" && dataProvenance !== "recorded_txline_authorised") ||
     (value === "demo" && dataProvenance !== "synthetic_txline_shaped")
   ) {
     throw new Error("Persistence mode and provenance do not match");
@@ -550,6 +564,34 @@ function assertRawSourceRecord(
   if (!/^[a-f0-9]{64}$/u.test(raw.payloadHash)) {
     throw new Error("Raw payload hash must be lowercase SHA-256 hex");
   }
+  if (raw.responseHash && !/^[a-f0-9]{64}$/u.test(raw.responseHash)) {
+    throw new Error("Raw response hash must be lowercase SHA-256 hex");
+  }
+  if (
+    raw.rawRetention === "authorised_raw" &&
+    (raw.payload === undefined || raw.payload === null)
+  ) {
+    throw new Error("Authorised raw source payload is required");
+  }
+}
+
+function assertCanonicalEligible(raw: RawSourceRecordWrite) {
+  if (raw.canonicalEligible === false) {
+    throw new Error("Source-only delivery cannot create canonical truth");
+  }
+}
+
+function rawPersistenceMetadata(raw: RawSourceRecordWrite) {
+  return {
+    canonicalEligible: raw.canonicalEligible ?? true,
+    deliveryKey: raw.deliveryKey ?? raw.payloadHash,
+    orderingKey: raw.orderingKey ?? raw.sourceSequence ?? raw.id,
+    rawRetention: raw.rawRetention ?? "normalised_only",
+    responseHash: raw.responseHash ?? raw.payloadHash,
+    rightsGrantId: raw.rightsGrantId ?? "legacy-unverified",
+    sourcePath: raw.sourcePath ?? "legacy-unverified",
+    streamKey: raw.streamKey ?? raw.source,
+  };
 }
 
 async function lockCurrentSourceFence(
@@ -560,7 +602,7 @@ async function lockCurrentSourceFence(
     sourceFence: SourceFence | undefined;
   },
 ): Promise<boolean> {
-  if (input.mode === "demo") return true;
+  if (input.mode === "demo" || input.mode === "recorded") return true;
   const fence = input.sourceFence;
   if (!fence || fence.source !== input.rawSource) return false;
   assertFencingToken(fence.fencingToken);
@@ -587,14 +629,16 @@ async function insertRawSourceRecord(
   executor: SqlExecutor,
   input: CommitRawSourceRecordInput,
 ): Promise<boolean> {
+  const metadata = rawPersistenceMetadata(input.raw);
   const rows = await executor.unsafe(
     `INSERT INTO matchsense.raw_source_records (
   mode, id, fixture_id, source, source_record_id, source_sequence,
   dedupe_key, payload_hash, provenance, payload, received_at,
-  delivery_intent, occurred_at
+  delivery_intent, occurred_at, delivery_key, ordering_key, source_path,
+  stream_key, response_hash, rights_grant_id, raw_retention, canonical_eligible
 )
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::timestamptz,
-  $12, $13::timestamptz)
+  $12, $13::timestamptz, $14, $15, $16, $17, $18, $19, $20, $21)
 ON CONFLICT (mode, source, fixture_id, dedupe_key) DO NOTHING
 RETURNING id;`,
     [
@@ -607,10 +651,20 @@ RETURNING id;`,
       input.raw.dedupeKey,
       input.raw.payloadHash,
       input.raw.provenance,
-      input.mode === "live" ? null : json(input.raw.payload),
+      metadata.rawRetention === "authorised_raw"
+        ? json(input.raw.payload)
+        : null,
       input.raw.receivedAt,
       input.raw.deliveryIntent ?? "realtime",
       input.raw.occurredAt ?? null,
+      metadata.deliveryKey,
+      metadata.orderingKey,
+      metadata.sourcePath,
+      metadata.streamKey,
+      metadata.responseHash,
+      metadata.rightsGrantId,
+      metadata.rawRetention,
+      metadata.canonicalEligible,
     ],
   );
   return rows[0] !== undefined;
@@ -718,6 +772,9 @@ export function createFixtureTruthRepository(
         ) {
           return { kind: "duplicate" };
         }
+        if (input.raw.canonicalEligible === false) {
+          return { kind: "accepted_no_change" };
+        }
 
         const fixtureRows = await transaction.unsafe(
           `SELECT id
@@ -802,9 +859,9 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb);`,
 
         const eventRows = await transaction.unsafe(
           `INSERT INTO matchsense.fixture_events (
-  mode, fixture_id, sequence, event_id, event_type, payload
+  mode, fixture_id, sequence, event_id, event_type, payload, source_record_id
 )
-SELECT $1, $2, COALESCE(MAX(sequence), 0) + 1, $3, $4, $5::jsonb
+SELECT $1, $2, COALESCE(MAX(sequence), 0) + 1, $3, $4, $5::jsonb, $6
 FROM matchsense.fixture_events
 WHERE mode = $1 AND fixture_id = $2
 RETURNING sequence;`,
@@ -814,6 +871,7 @@ RETURNING sequence;`,
             plan.event.id,
             plan.event.type,
             json(plan.event.payload),
+            input.raw.id,
           ],
         );
         const eventRow = eventRows[0];
@@ -823,10 +881,10 @@ RETURNING sequence;`,
         for (const message of plan.outbox) {
           await transaction.unsafe(
             `INSERT INTO matchsense.outbox (
-  mode, id, fixture_id, topic, idempotency_key, payload, available_at
+  mode, id, fixture_id, topic, idempotency_key, payload, available_at, source_record_id
 )
 VALUES ($1, $2, $3, $4, $5, $6::jsonb,
-  COALESCE($7::timestamptz, clock_timestamp()));`,
+  COALESCE($7::timestamptz, clock_timestamp()), $8);`,
             [
               input.mode,
               message.id,
@@ -835,6 +893,7 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb,
               message.idempotencyKey,
               json(message.payload),
               message.availableAt ?? null,
+              input.raw.id,
             ],
           );
         }
@@ -889,6 +948,7 @@ LIMIT $4;`,
     },
     commitSourceChange: async (input) => {
       assertRawSourceRecord(input.mode, input.raw);
+      assertCanonicalEligible(input.raw);
       assertSafeNonNegativeInteger(input.expectedRevision, "expectedRevision");
       const nextRevision = input.expectedRevision + 1;
       if (
@@ -991,9 +1051,9 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb);`,
         );
         const eventRows = await transaction.unsafe(
           `INSERT INTO matchsense.fixture_events (
-  mode, fixture_id, sequence, event_id, event_type, payload
+  mode, fixture_id, sequence, event_id, event_type, payload, source_record_id
 )
-SELECT $1, $2, COALESCE(MAX(sequence), 0) + 1, $3, $4, $5::jsonb
+SELECT $1, $2, COALESCE(MAX(sequence), 0) + 1, $3, $4, $5::jsonb, $6
 FROM matchsense.fixture_events
 WHERE mode = $1 AND fixture_id = $2
 RETURNING sequence;`,
@@ -1003,6 +1063,7 @@ RETURNING sequence;`,
             input.event.id,
             input.event.type,
             json(input.event.payload),
+            input.raw.id,
           ],
         );
         const eventRow = eventRows[0];
@@ -1010,9 +1071,9 @@ RETURNING sequence;`,
         const eventSequence = safeInteger(eventRow.sequence, "sequence");
         await transaction.unsafe(
           `INSERT INTO matchsense.outbox (
-  mode, id, fixture_id, topic, idempotency_key, payload, available_at
+  mode, id, fixture_id, topic, idempotency_key, payload, available_at, source_record_id
 )
-VALUES ($1, $2, $3, $4, $5, $6::jsonb, COALESCE($7::timestamptz, clock_timestamp()));`,
+VALUES ($1, $2, $3, $4, $5, $6::jsonb, COALESCE($7::timestamptz, clock_timestamp()), $8);`,
           [
             input.mode,
             input.outbox.id,
@@ -1021,6 +1082,7 @@ VALUES ($1, $2, $3, $4, $5, $6::jsonb, COALESCE($7::timestamptz, clock_timestamp
             input.outbox.idempotencyKey,
             json(input.outbox.payload),
             input.outbox.availableAt ?? null,
+            input.raw.id,
           ],
         );
 

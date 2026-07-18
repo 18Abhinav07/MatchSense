@@ -163,4 +163,47 @@ describe("atomic fixture envelope processing", () => {
     ).resolves.toEqual({ kind: "duplicate" });
     expect(derive).not.toHaveBeenCalled();
   });
+
+  it("persists a source-only delivery without creating a projection, Moment, event, or outbox", async () => {
+    const fake = fakeClient();
+    const repository = createFixtureTruthRepository(fake.client);
+    const derive = vi.fn();
+
+    await expect(
+      repository.processSourceEnvelope({
+        derive,
+        fixtureId: "fixture-1",
+        mode: "live",
+        raw: {
+          canonicalEligible: false,
+          dedupeKey: "txline:coverage-42",
+          deliveryIntent: "reconcile",
+          id: "raw-coverage-42",
+          occurredAt: "2026-07-17T12:01:00.000Z",
+          payload: { coverage: "closed" },
+          payloadHash: "c".repeat(64),
+          provenance: "live_txline",
+          receivedAt: "2026-07-17T12:01:00.000Z",
+          source: "txline",
+          sourceRecordId: "coverage-42",
+          sourceSequence: "42",
+        },
+        sourceFence: {
+          fencingToken: 1,
+          holderId: "txline-worker",
+          source: "txline",
+          streamKey: "scores:mainnet",
+        },
+      }),
+    ).resolves.toEqual({ kind: "accepted_no_change" });
+
+    expect(derive).not.toHaveBeenCalled();
+    expect(
+      fake.queries.some(({ query }) =>
+        /fixture_projections|canonical_moments|moment_revisions|fixture_events|outbox/u.test(
+          query,
+        ),
+      ),
+    ).toBe(false);
+  });
 });

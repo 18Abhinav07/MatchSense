@@ -24,6 +24,29 @@ export {
   createPostgresMigrationStore,
 } from "./postgres.js";
 export type { ApplicationDatabase, PostgresClient } from "./postgres.js";
+export { createArchiveRepository } from "./archive-repositories.js";
+export type {
+  ArchiveManifest,
+  ArchiveManifestStatus,
+  ArchiveMode,
+  ArchiveProvenance,
+  ArchiveRepository,
+  DurableRawRetention,
+  DurableSourceDelivery,
+  InsertDeliveryResult,
+  RightsGrant,
+  RightsGrantWrite,
+  VerifyArchiveInput,
+} from "./archive-repositories.js";
+export { createCommentaryJobRepository } from "./commentary-job-repository.js";
+export type {
+  CommentaryJob,
+  CommentaryJobInput,
+  CommentaryJobRepository,
+  CommentaryJobStatus,
+  CompletedCommentaryJob,
+  FailedCommentaryJob,
+} from "./commentary-job-repository.js";
 export {
   createCommentaryArtifactRepository,
   createFixtureTruthRepository,

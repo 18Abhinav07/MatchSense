@@ -1,5 +1,13 @@
 import postgres, { type Sql, type TransactionSql } from "postgres";
 
+import {
+  createArchiveRepository,
+  type ArchiveRepository,
+} from "./archive-repositories.js";
+import {
+  createCommentaryJobRepository,
+  type CommentaryJobRepository,
+} from "./commentary-job-repository.js";
 import type { AppliedMigration, MigrationDefinition } from "./migrations.js";
 import {
   createCommentaryArtifactRepository,
@@ -44,7 +52,9 @@ export interface PostgresClient extends QueryExecutor {
 }
 
 export interface ApplicationDatabase extends DatabaseRuntime {
+  archive: ArchiveRepository;
   commentaryArtifacts: CommentaryArtifactRepository;
+  commentaryJobs: CommentaryJobRepository;
   experiences: ExperienceRepository;
   fans: FanRepository;
   fixtureTruth: FixtureTruthRepository;
@@ -161,7 +171,9 @@ export function createApplicationDatabase(
   });
 
   return Object.assign(runtime, {
+    archive: createArchiveRepository(client),
     commentaryArtifacts: createCommentaryArtifactRepository(client),
+    commentaryJobs: createCommentaryJobRepository(client),
     experiences: createExperienceRepository(client),
     fans: createFanRepository(client),
     fixtureTruth: createFixtureTruthRepository(client),

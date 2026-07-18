@@ -50,7 +50,7 @@ const prefixCatalog = [
 
 describe("migration catalog and planning", () => {
   it("publishes a deterministic schema-only baseline migration", () => {
-    expect(db.migrationCatalog).toHaveLength(3);
+    expect(db.migrationCatalog).toHaveLength(4);
 
     const migration = db.migrationCatalog?.[0];
     expect(migration).toMatchObject({
@@ -208,6 +208,48 @@ describe("migration catalog and planning", () => {
     expect(migration?.sql).toMatch(/PRIMARY KEY \(run_id, beat_index\)/u);
     expect(migration?.sql).toMatch(
       /PRIMARY KEY \(fan_id, mode, fixture_id, revision\)/u,
+    );
+  });
+
+  it("retires synthetic public modes and adds the authorised archive/job foundation in v4", () => {
+    const migration = db.migrationCatalog?.[3];
+
+    expect(db.migrationCatalog).toHaveLength(4);
+    expect(migration).toMatchObject({
+      description:
+        "retire synthetic public modes and add authorised archive jobs",
+      version: 4,
+    });
+    expect(migration?.checksum).toBe(
+      createHash("sha256")
+        .update(migration?.sql ?? "")
+        .digest("hex"),
+    );
+    expect(migration?.sql).toContain(
+      "DELETE FROM matchsense.fixtures WHERE mode = 'demo'",
+    );
+    expect(migration?.sql).toContain("CHECK (mode IN ('live', 'recorded'))");
+    expect(migration?.sql).toContain("CREATE TABLE matchsense.rights_grants");
+    expect(migration?.sql).toContain(
+      "CREATE TABLE matchsense.archive_manifests",
+    );
+    expect(migration?.sql).toContain(
+      "CREATE TABLE matchsense.archive_manifest_entries",
+    );
+    expect(migration?.sql).toContain("CREATE TABLE matchsense.commentary_jobs");
+    expect(migration?.sql).toContain(
+      "raw_source_records_delivery_intent_check",
+    );
+    expect(migration?.sql).toContain("ordering_key text NOT NULL");
+    expect(migration?.sql).toContain("source_path text NOT NULL");
+    expect(migration?.sql).toContain("response_hash text NOT NULL");
+    expect(migration?.sql).toContain("rights_grant_id text NOT NULL");
+    expect(migration?.sql).toContain("canonical_eligible boolean;");
+    expect(migration?.sql).toContain(
+      "ALTER COLUMN canonical_eligible SET NOT NULL",
+    );
+    expect(migration?.sql).toContain(
+      "source-only delivery cannot create canonical truth",
     );
   });
 
