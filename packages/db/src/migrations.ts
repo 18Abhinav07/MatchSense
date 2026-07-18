@@ -943,6 +943,66 @@ ALTER TABLE matchsense.featured_replay_configs
   ADD CONSTRAINT featured_replay_configs_manifest_hash_check
     CHECK (length(archive_manifest_hash) = 64);`.trim(),
   ),
+  defineMigration(
+    8,
+    "fence archive import claims with verified output bindings",
+    `ALTER TABLE matchsense.archive_import_jobs
+  ADD COLUMN claim_generation bigint NOT NULL DEFAULT 0
+    CHECK (claim_generation >= 0),
+  ADD COLUMN claim_started_at timestamptz;
+
+-- A claim that began before this migration cannot produce the generation-bound
+-- evidence required below. Requeue it rather than letting an old worker finalise.
+UPDATE matchsense.archive_import_jobs
+SET state = 'retry_wait',
+    claimed_by = NULL,
+    claim_expires_at = NULL,
+    claim_started_at = NULL,
+    available_at = clock_timestamp(),
+    last_error = COALESCE(
+      last_error,
+      'archive import claim reset for generation fencing migration'
+    ),
+    updated_at = clock_timestamp()
+WHERE state = 'claimed';
+
+ALTER TABLE matchsense.archive_import_jobs
+  DROP CONSTRAINT IF EXISTS archive_import_jobs_claim_pair;
+ALTER TABLE matchsense.archive_import_jobs
+  ADD CONSTRAINT archive_import_jobs_claim_pair
+    CHECK (
+      (claimed_by IS NULL AND claim_expires_at IS NULL AND claim_started_at IS NULL)
+      OR
+      (claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_started_at IS NOT NULL)
+    );
+ALTER TABLE matchsense.archive_import_jobs
+  ADD CONSTRAINT archive_import_jobs_claim_generation_when_claimed
+    CHECK (state <> 'claimed' OR claim_generation > 0);
+
+CREATE TABLE matchsense.archive_import_job_outputs (
+  fixture_id text NOT NULL
+    REFERENCES matchsense.archive_import_jobs (fixture_id) ON DELETE CASCADE,
+  claim_generation bigint NOT NULL CHECK (claim_generation > 0),
+  claim_started_at timestamptz NOT NULL,
+  source_terminal_record_id text NOT NULL
+    CHECK (length(btrim(source_terminal_record_id)) > 0),
+  worker_id text NOT NULL CHECK (length(btrim(worker_id)) > 0),
+  archive_manifest_id text NOT NULL
+    REFERENCES matchsense.archive_manifests (id),
+  archive_manifest_hash text NOT NULL
+    CHECK (length(archive_manifest_hash) = 64),
+  archive_terminal_delivery_id text NOT NULL
+    CHECK (length(btrim(archive_terminal_delivery_id)) > 0),
+  archive_verified_at timestamptz NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (fixture_id, claim_generation)
+);
+
+CREATE INDEX archive_import_job_outputs_manifest_idx
+  ON matchsense.archive_import_job_outputs (
+    archive_manifest_id ASC, archive_manifest_hash ASC
+  );`.trim(),
+  ),
 ]);
 
 export function planMigrations(

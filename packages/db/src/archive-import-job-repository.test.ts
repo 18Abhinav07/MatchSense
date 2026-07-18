@@ -21,6 +21,8 @@ type ArchiveImportJob = {
   attemptCount: number;
   availableAt: string;
   claimExpiresAt: string | null;
+  claimGeneration: number;
+  claimStartedAt: string | null;
   claimedBy: string | null;
   contextHash: string;
   fixtureId: string;
@@ -32,7 +34,22 @@ type ArchiveImportJob = {
   state: string;
 };
 
+type ArchiveImportOutput = {
+  archiveManifestHash: string;
+  archiveManifestId: string;
+  archiveTerminalDeliveryId: string;
+  archiveVerifiedAt: string;
+  claimGeneration: number;
+  claimStartedAt: string;
+  fixtureId: string;
+  sourceTerminalRecordId: string;
+  workerId: string;
+};
+
 type ArchiveImportJobRepository = {
+  bindVerifiedArchiveOutput(
+    input: Record<string, unknown>,
+  ): Promise<ArchiveImportOutput>;
   claim(workerId: string, now: Date): Promise<ArchiveImportJob | null>;
   enqueue(input: Record<string, unknown>): Promise<ArchiveImportJob>;
   markBlockedRights(input: Record<string, unknown>): Promise<ArchiveImportJob>;
@@ -101,6 +118,8 @@ function jobRow(
     attempt_count: 0,
     available_at: "2026-07-18T12:00:00.000Z",
     claim_expires_at: null,
+    claim_generation: 0,
+    claim_started_at: null,
     claimed_by: null,
     context_hash: jobInput.contextHash,
     created_at: "2026-07-18T11:59:00.000Z",
@@ -114,6 +133,24 @@ function jobRow(
     source_terminal_record_id: jobInput.sourceTerminalRecordId,
     state: "queued",
     updated_at: "2026-07-18T11:59:00.000Z",
+    ...overrides,
+  };
+}
+
+function outputRow(
+  overrides: Partial<Record<string, unknown>> = {},
+): Record<string, unknown> {
+  return {
+    archive_manifest_hash: "1".repeat(64),
+    archive_manifest_id: "manifest-18237038",
+    archive_terminal_delivery_id: "archive-terminal-1026",
+    archive_verified_at: "2026-07-18T12:00:01.000Z",
+    claim_generation: 1,
+    claim_started_at: "2026-07-18T12:00:00.000Z",
+    created_at: "2026-07-18T12:00:01.000Z",
+    fixture_id: jobInput.fixtureId,
+    source_terminal_record_id: jobInput.sourceTerminalRecordId,
+    worker_id: "archive-worker-a",
     ...overrides,
   };
 }
@@ -222,6 +259,8 @@ describe("archive import job repository", () => {
             jobRow({
               attempt_count: 1,
               claim_expires_at: "2026-07-18T12:02:00.000Z",
+              claim_generation: 1,
+              claim_started_at: "2026-07-18T12:00:00.000Z",
               claimed_by: "archive-worker-a",
               state: "claimed",
             }),
@@ -234,6 +273,7 @@ describe("archive import job repository", () => {
       jobs?.claim("archive-worker-a", new Date("2026-07-18T12:00:00.000Z")),
     ).resolves.toMatchObject({
       attemptCount: 1,
+      claimGeneration: 1,
       claimedBy: "archive-worker-a",
       state: "claimed",
     });
@@ -243,6 +283,12 @@ describe("archive import job repository", () => {
     );
     expect(fake.queries[0]?.query).toContain("available_at <= $2::timestamptz");
     expect(fake.queries[0]?.query).toContain("interval '120 seconds'");
+    expect(fake.queries[0]?.query).toContain(
+      "claim_generation = job.claim_generation + 1",
+    );
+    expect(fake.queries[0]?.query).toContain(
+      "claim_started_at = clock_timestamp()",
+    );
   });
 
   it("recovers expired leases before a new worker claims work", async () => {
@@ -263,6 +309,9 @@ describe("archive import job repository", () => {
 
   it("transitions a worker-owned claim through retry and terminal archive outcomes", async () => {
     const fake = testClient((query) => {
+      if (query.includes("INSERT INTO matchsense.archive_import_job_outputs")) {
+        return [outputRow()];
+      }
       if (query.includes("state = 'retry_wait'")) {
         return [
           jobRow({
@@ -300,20 +349,34 @@ describe("archive import job repository", () => {
     await expect(
       jobs?.markRetry({
         availableAt: "2026-07-18T12:05:00.000Z",
+        claimGeneration: 1,
         error: "temporary history timeout",
         fixtureId: jobInput.fixtureId,
         workerId: "archive-worker-a",
       }),
     ).resolves.toMatchObject({ state: "retry_wait" });
     await expect(
-      jobs?.markReplayReady({
+      jobs?.bindVerifiedArchiveOutput({
+        archiveManifestHash: "1".repeat(64),
         archiveManifestId: "manifest-18237038",
+        claimGeneration: 1,
+        fixtureId: jobInput.fixtureId,
+        workerId: "archive-worker-a",
+      }),
+    ).resolves.toMatchObject({
+      archiveManifestHash: "1".repeat(64),
+      claimGeneration: 1,
+    });
+    await expect(
+      jobs?.markReplayReady({
+        claimGeneration: 1,
         fixtureId: jobInput.fixtureId,
         workerId: "archive-worker-a",
       }),
     ).resolves.toMatchObject({ state: "replay_ready" });
     await expect(
       jobs?.markBlockedRights({
+        claimGeneration: 1,
         error: "rights expired",
         fixtureId: jobInput.fixtureId,
         workerId: "archive-worker-a",
@@ -321,6 +384,7 @@ describe("archive import job repository", () => {
     ).resolves.toMatchObject({ state: "blocked_rights" });
     await expect(
       jobs?.markRejected({
+        claimGeneration: 1,
         error: "terminal validation failed",
         fixtureId: jobInput.fixtureId,
         workerId: "archive-worker-a",
@@ -334,13 +398,20 @@ describe("archive import job repository", () => {
         expect(transition.query).toContain(
           "claim_expires_at > clock_timestamp()",
         );
+        expect(transition.query).toContain("claim_generation = $");
       }
     }
     const replayReady = fake.queries.find(({ query }) =>
       query.includes("state = 'replay_ready'"),
     );
     expect(replayReady?.query).toContain(
-      "archive_manifest_hash = archive.delivery_manifest_hash",
+      "archive_manifest_hash = output.archive_manifest_hash",
+    );
+    expect(replayReady?.query).toContain(
+      "output.claim_generation = job.claim_generation",
+    );
+    expect(replayReady?.query).toContain(
+      "archive.terminal_delivery_id = output.archive_terminal_delivery_id",
     );
     expect(replayReady?.query).toContain(
       "JOIN matchsense.rights_grants AS grant",
@@ -349,6 +420,182 @@ describe("archive import job repository", () => {
     expect(replayReady?.query).toContain("grant.revoked_at IS NULL");
     expect(replayReady?.query).toContain(
       "grant.scopes @> ARRAY['replay']::text[]",
+    );
+  });
+
+  it("fences stale claims and requires a current-generation archive output binding", async () => {
+    const h1 = "1".repeat(64);
+    const h2 = "2".repeat(64);
+    let claimCount = 0;
+    let currentGeneration = 0;
+    let boundGeneration: number | null = null;
+    const fake = testClient((query, parameters) => {
+      if (query.includes("WITH candidate AS")) {
+        claimCount += 1;
+        currentGeneration = claimCount;
+        return [
+          jobRow({
+            claim_expires_at: "2026-07-18T12:02:00.000Z",
+            claim_generation: currentGeneration,
+            claim_started_at: "2026-07-18T12:00:00.000Z",
+            claimed_by: "archive-worker-a",
+            source_terminal_record_id:
+              currentGeneration === 1
+                ? "source-terminal-h1"
+                : "source-terminal-h2",
+            state: "claimed",
+          }),
+        ];
+      }
+      if (query.includes("recovered_count")) {
+        return [{ recovered_count: "1" }];
+      }
+      if (query.includes("INSERT INTO matchsense.archive_import_job_outputs")) {
+        const hash = parameters[1];
+        const generation = parameters.at(-1);
+        if (generation === currentGeneration && hash === h2) {
+          boundGeneration = currentGeneration;
+          return [
+            outputRow({
+              archive_manifest_hash: h2,
+              archive_terminal_delivery_id: "archive-terminal-h2",
+              claim_generation: currentGeneration,
+              source_terminal_record_id: "source-terminal-h2",
+            }),
+          ];
+        }
+        return [];
+      }
+      if (query.includes("SET state = 'replay_ready'")) {
+        const generation = parameters.at(-1);
+        return boundGeneration === generation &&
+          generation === currentGeneration
+          ? [
+              jobRow({
+                archive_manifest_hash: h2,
+                archive_manifest_id: "manifest-18237038",
+                claim_generation: currentGeneration,
+                state: "replay_ready",
+              }),
+            ]
+          : [];
+      }
+      return [];
+    });
+    const jobs = db.createArchiveImportJobRepository?.(fake.client);
+
+    const h1Claim = await jobs?.claim(
+      "archive-worker-a",
+      new Date("2026-07-18T12:00:00.000Z"),
+    );
+    expect(h1Claim?.claimGeneration).toBe(1);
+
+    // h1 is deliberately not bindable to the correction generation below.
+    await expect(
+      jobs?.recoverExpiredClaims(new Date("2026-07-18T12:03:00.000Z")),
+    ).resolves.toBe(1);
+    const h2Claim = await jobs?.claim(
+      "archive-worker-a",
+      new Date("2026-07-18T12:03:00.000Z"),
+    );
+    expect(h2Claim?.claimGeneration).toBe(2);
+
+    await expect(
+      jobs?.markRetry({
+        availableAt: "2026-07-18T12:05:00.000Z",
+        claimGeneration: 1,
+        error: "stale retry",
+        fixtureId: jobInput.fixtureId,
+        workerId: "archive-worker-a",
+      }),
+    ).rejects.toThrow("Archive import job is not claimed by this worker");
+    await expect(
+      jobs?.markBlockedRights({
+        claimGeneration: 1,
+        error: "stale rights",
+        fixtureId: jobInput.fixtureId,
+        workerId: "archive-worker-a",
+      }),
+    ).rejects.toThrow("Archive import job is not claimed by this worker");
+    await expect(
+      jobs?.markRejected({
+        claimGeneration: 1,
+        error: "stale terminal",
+        fixtureId: jobInput.fixtureId,
+        workerId: "archive-worker-a",
+      }),
+    ).rejects.toThrow("Archive import job is not claimed by this worker");
+    await expect(
+      jobs?.markReplayReady({
+        claimGeneration: 1,
+        fixtureId: jobInput.fixtureId,
+        workerId: "archive-worker-a",
+      }),
+    ).rejects.toThrow(
+      "Archive import job claim or verified archive output is invalid",
+    );
+
+    await expect(
+      jobs?.bindVerifiedArchiveOutput({
+        archiveManifestHash: h1,
+        archiveManifestId: "manifest-18237038",
+        claimGeneration: 2,
+        fixtureId: jobInput.fixtureId,
+        workerId: "archive-worker-a",
+      }),
+    ).rejects.toThrow(
+      "Archive import job claim or current archive output is invalid",
+    );
+    await expect(
+      jobs?.markReplayReady({
+        claimGeneration: 2,
+        fixtureId: jobInput.fixtureId,
+        workerId: "archive-worker-a",
+      }),
+    ).rejects.toThrow(
+      "Archive import job claim or verified archive output is invalid",
+    );
+    await expect(
+      jobs?.bindVerifiedArchiveOutput({
+        archiveManifestHash: h2,
+        archiveManifestId: "manifest-18237038",
+        claimGeneration: 2,
+        fixtureId: jobInput.fixtureId,
+        workerId: "archive-worker-a",
+      }),
+    ).resolves.toMatchObject({
+      archiveManifestHash: h2,
+      claimGeneration: 2,
+      sourceTerminalRecordId: "source-terminal-h2",
+    });
+    await expect(
+      jobs?.markReplayReady({
+        claimGeneration: 2,
+        fixtureId: jobInput.fixtureId,
+        workerId: "archive-worker-a",
+      }),
+    ).resolves.toMatchObject({
+      archiveManifestHash: h2,
+      claimGeneration: 2,
+      state: "replay_ready",
+    });
+
+    const binding = fake.queries.find(({ query }) =>
+      query.includes("INSERT INTO matchsense.archive_import_job_outputs"),
+    );
+    expect(binding?.query).toContain("job.claim_generation = $5");
+    expect(binding?.query).toContain("archive.delivery_manifest_hash = $2");
+    expect(binding?.query).toContain(
+      "archive.verified_at >= job.claim_started_at",
+    );
+    const ready = fake.queries.find(({ query }) =>
+      query.includes("SET state = 'replay_ready'"),
+    );
+    expect(ready?.query).toContain(
+      "output.claim_generation = job.claim_generation",
+    );
+    expect(ready?.query).toContain(
+      "output.source_terminal_record_id = job.source_terminal_record_id",
     );
   });
 });

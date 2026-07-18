@@ -50,7 +50,7 @@ const prefixCatalog = [
 
 describe("migration catalog and planning", () => {
   it("publishes a deterministic schema-only baseline migration", () => {
-    expect(db.migrationCatalog).toHaveLength(7);
+    expect(db.migrationCatalog).toHaveLength(8);
 
     const migration = db.migrationCatalog?.[0];
     expect(migration).toMatchObject({
@@ -214,7 +214,7 @@ describe("migration catalog and planning", () => {
   it("retires synthetic public modes and adds the authorised archive/job foundation in v4", () => {
     const migration = db.migrationCatalog?.[3];
 
-    expect(db.migrationCatalog).toHaveLength(7);
+    expect(db.migrationCatalog).toHaveLength(8);
     expect(migration).toMatchObject({
       description:
         "retire synthetic public modes and add authorised archive jobs",
@@ -318,7 +318,7 @@ describe("migration catalog and planning", () => {
   it("adds durable archive-import leases and manifest-pinned featured replay readiness in v6", () => {
     const migration = db.migrationCatalog?.[5];
 
-    expect(db.migrationCatalog).toHaveLength(7);
+    expect(db.migrationCatalog).toHaveLength(8);
     expect(migration).toMatchObject({
       description:
         "create durable archive import jobs and featured replay readiness",
@@ -374,6 +374,37 @@ describe("migration catalog and planning", () => {
     expect(migration?.sql).toContain(
       "ALTER COLUMN archive_manifest_hash SET NOT NULL",
     );
+  });
+
+  it("fences archive claims and records only post-claim verified outputs in v8", () => {
+    const migration = db.migrationCatalog?.[7];
+
+    expect(migration).toMatchObject({
+      description: "fence archive import claims with verified output bindings",
+      version: 8,
+    });
+    expect(migration?.checksum).toBe(
+      createHash("sha256")
+        .update(migration?.sql ?? "")
+        .digest("hex"),
+    );
+    expect(migration?.sql).toContain(
+      "ADD COLUMN claim_generation bigint NOT NULL DEFAULT 0",
+    );
+    expect(migration?.sql).toContain("ADD COLUMN claim_started_at timestamptz");
+    expect(migration?.sql).toContain(
+      "CREATE TABLE matchsense.archive_import_job_outputs",
+    );
+    expect(migration?.sql).toContain(
+      "PRIMARY KEY (fixture_id, claim_generation)",
+    );
+    expect(migration?.sql).toContain(
+      "archive_verified_at timestamptz NOT NULL",
+    );
+    expect(migration?.sql).toContain(
+      "archive_terminal_delivery_id text NOT NULL",
+    );
+    expect(migration?.sql).toContain("archive_import_jobs_claim_pair");
   });
 
   it("orders pending migrations and reports a repeat run as current", () => {

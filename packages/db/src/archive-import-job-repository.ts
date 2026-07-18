@@ -28,6 +28,8 @@ export interface ArchiveImportJob extends ArchiveImportJobInput {
   attemptCount: number;
   availableAt: string;
   claimExpiresAt: string | null;
+  claimGeneration: number;
+  claimStartedAt: string | null;
   claimedBy: string | null;
   createdAt: string;
   lastError: string | null;
@@ -35,33 +37,48 @@ export interface ArchiveImportJob extends ArchiveImportJobInput {
   updatedAt: string;
 }
 
-export interface RetryArchiveImportJob {
+export interface ClaimedArchiveImportJob {
+  claimGeneration: number;
+  fixtureId: string;
+  workerId: string;
+}
+
+export interface RetryArchiveImportJob extends ClaimedArchiveImportJob {
   availableAt: string;
   error: string;
-  fixtureId: string;
-  workerId: string;
 }
 
-export interface TerminalArchiveImportJob {
+export interface TerminalArchiveImportJob extends ClaimedArchiveImportJob {
   error: string;
-  fixtureId: string;
-  workerId: string;
 }
 
-export interface MarkArchiveImportReplayReady {
+export interface BindVerifiedArchiveOutput extends ClaimedArchiveImportJob {
+  archiveManifestHash: string;
   archiveManifestId: string;
+}
+
+/** Immutable verification evidence for one concrete archive-import claim. */
+export interface ArchiveImportVerifiedOutput {
+  archiveManifestHash: string;
+  archiveManifestId: string;
+  archiveTerminalDeliveryId: string;
+  archiveVerifiedAt: string;
+  claimGeneration: number;
+  claimStartedAt: string;
   fixtureId: string;
+  sourceTerminalRecordId: string;
   workerId: string;
 }
 
 export interface ArchiveImportJobRepository {
+  bindVerifiedArchiveOutput(
+    input: BindVerifiedArchiveOutput,
+  ): Promise<ArchiveImportVerifiedOutput>;
   claim(workerId: string, now: Date): Promise<ArchiveImportJob | null>;
   enqueue(input: ArchiveImportJobInput): Promise<ArchiveImportJob>;
   markBlockedRights(input: TerminalArchiveImportJob): Promise<ArchiveImportJob>;
   markRejected(input: TerminalArchiveImportJob): Promise<ArchiveImportJob>;
-  markReplayReady(
-    input: MarkArchiveImportReplayReady,
-  ): Promise<ArchiveImportJob>;
+  markReplayReady(input: ClaimedArchiveImportJob): Promise<ArchiveImportJob>;
   markRetry(input: RetryArchiveImportJob): Promise<ArchiveImportJob>;
   recoverExpiredClaims(now: Date): Promise<number>;
 }
@@ -97,7 +114,11 @@ export interface FeaturedReplayRepository {
 const jobColumns = `fixture_id, home_team_id, away_team_id, kickoff_at,
 participant1_is_home, context_hash, reason, state, archive_manifest_id,
 archive_manifest_hash, attempt_count, last_error, available_at, claimed_by, claim_expires_at,
-source_terminal_record_id, created_at, updated_at`;
+claim_generation, claim_started_at, source_terminal_record_id, created_at, updated_at`;
+
+const outputColumns = `fixture_id, claim_generation, claim_started_at,
+source_terminal_record_id, worker_id, archive_manifest_id, archive_manifest_hash,
+archive_terminal_delivery_id, archive_verified_at, created_at`;
 
 function requiredString(row: QueryRow, key: string): string {
   const value = row[key];
@@ -169,6 +190,8 @@ function parseJob(row: QueryRow): ArchiveImportJob {
     availableAt: timestamp(row, "available_at"),
     awayTeamId: requiredString(row, "away_team_id"),
     claimExpiresAt: nullableTimestamp(row, "claim_expires_at"),
+    claimGeneration: safeInteger(row, "claim_generation"),
+    claimStartedAt: nullableTimestamp(row, "claim_started_at"),
     claimedBy: nullableString(row, "claimed_by"),
     contextHash: requiredString(row, "context_hash"),
     createdAt: timestamp(row, "created_at"),
@@ -181,6 +204,23 @@ function parseJob(row: QueryRow): ArchiveImportJob {
     sourceTerminalRecordId: requiredString(row, "source_terminal_record_id"),
     state: importState(requiredString(row, "state")),
     updatedAt: timestamp(row, "updated_at"),
+  };
+}
+
+function parseVerifiedOutput(row: QueryRow): ArchiveImportVerifiedOutput {
+  return {
+    archiveManifestHash: requiredString(row, "archive_manifest_hash"),
+    archiveManifestId: requiredString(row, "archive_manifest_id"),
+    archiveTerminalDeliveryId: requiredString(
+      row,
+      "archive_terminal_delivery_id",
+    ),
+    archiveVerifiedAt: timestamp(row, "archive_verified_at"),
+    claimGeneration: safeInteger(row, "claim_generation"),
+    claimStartedAt: timestamp(row, "claim_started_at"),
+    fixtureId: requiredString(row, "fixture_id"),
+    sourceTerminalRecordId: requiredString(row, "source_terminal_record_id"),
+    workerId: requiredString(row, "worker_id"),
   };
 }
 
@@ -216,16 +256,34 @@ function assertJobInput(input: ArchiveImportJobInput): void {
   assertSha256(input.contextHash, "Frozen fixture context hash");
 }
 
+function assertClaimGeneration(value: number): void {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error("Archive import claim generation is invalid");
+  }
+}
+
+function assertClaimedTransition(input: ClaimedArchiveImportJob): void {
+  assertNonempty(input.fixtureId, "Fixture id");
+  assertNonempty(input.workerId, "Archive import worker id");
+  assertClaimGeneration(input.claimGeneration);
+}
+
 function assertWorkerTransition(
   input: TerminalArchiveImportJob | RetryArchiveImportJob,
 ): void {
-  assertNonempty(input.fixtureId, "Fixture id");
-  assertNonempty(input.workerId, "Archive import worker id");
+  assertClaimedTransition(input);
   assertNonempty(input.error, "Archive import error");
 }
 
 function jobSelectColumns(alias = "job"): string {
   return jobColumns
+    .split(",")
+    .map((column) => `${alias}.${column.trim()}`)
+    .join(", ");
+}
+
+function outputSelectColumns(alias = "output"): string {
+  return outputColumns
     .split(",")
     .map((column) => `${alias}.${column.trim()}`)
     .join(", ");
@@ -252,6 +310,7 @@ SET reason = EXCLUDED.reason,
     available_at = clock_timestamp(),
     claimed_by = NULL,
     claim_expires_at = NULL,
+    claim_started_at = NULL,
     last_error = NULL,
     source_terminal_record_id = EXCLUDED.source_terminal_record_id,
     updated_at = clock_timestamp()
@@ -302,7 +361,9 @@ FOR SHARE;`,
 UPDATE matchsense.archive_import_jobs AS job
 SET state = 'claimed',
     claimed_by = $1,
-    claim_expires_at = $2::timestamptz + interval '120 seconds',
+    claim_expires_at = clock_timestamp() + interval '120 seconds',
+    claim_generation = job.claim_generation + 1,
+    claim_started_at = clock_timestamp(),
     attempt_count = job.attempt_count + 1,
     last_error = NULL,
     updated_at = clock_timestamp()
@@ -324,6 +385,7 @@ RETURNING ${jobSelectColumns()};`,
   SET state = 'retry_wait',
       claimed_by = NULL,
       claim_expires_at = NULL,
+      claim_started_at = NULL,
       available_at = $1::timestamptz,
       last_error = COALESCE(last_error, 'archive import claim lease expired'),
       updated_at = clock_timestamp()
@@ -354,54 +416,130 @@ FROM recovered;`,
 SET state = 'retry_wait',
     claimed_by = NULL,
     claim_expires_at = NULL,
+    claim_started_at = NULL,
     available_at = $1::timestamptz,
     last_error = $2,
     updated_at = clock_timestamp()
 WHERE fixture_id = $3
   AND state = 'claimed'
   AND claimed_by = $4
+  AND claim_generation = $5
   AND claim_expires_at > clock_timestamp()
 RETURNING ${jobColumns};`,
-        [input.availableAt, input.error, input.fixtureId, input.workerId],
+        [
+          input.availableAt,
+          input.error,
+          input.fixtureId,
+          input.workerId,
+          input.claimGeneration,
+        ],
       );
       if (!rows[0]) {
         throw new Error("Archive import job is not claimed by this worker");
       }
       return parseJob(rows[0]);
     },
-    markReplayReady: async (input) => {
-      assertNonempty(input.fixtureId, "Fixture id");
-      assertNonempty(input.workerId, "Archive import worker id");
+    bindVerifiedArchiveOutput: async (input) => {
+      assertClaimedTransition(input);
       assertNonempty(input.archiveManifestId, "Archive manifest id");
+      assertSha256(input.archiveManifestHash, "Archive manifest hash");
       const rows = await client.unsafe(
-        `UPDATE matchsense.archive_import_jobs AS job
-SET state = 'replay_ready',
-    archive_manifest_id = archive.id,
-    archive_manifest_hash = archive.delivery_manifest_hash,
-    claimed_by = NULL,
-    claim_expires_at = NULL,
-    last_error = NULL,
-    updated_at = clock_timestamp()
-FROM matchsense.archive_manifests AS archive
+        `INSERT INTO matchsense.archive_import_job_outputs AS output (
+  fixture_id, claim_generation, claim_started_at, source_terminal_record_id,
+  worker_id, archive_manifest_id, archive_manifest_hash,
+  archive_terminal_delivery_id, archive_verified_at
+)
+SELECT job.fixture_id, job.claim_generation, job.claim_started_at,
+  job.source_terminal_record_id, job.claimed_by, archive.id,
+  archive.delivery_manifest_hash, archive.terminal_delivery_id,
+  archive.verified_at
+FROM matchsense.archive_import_jobs AS job
+JOIN matchsense.archive_manifests AS archive ON archive.id = $1
 JOIN matchsense.rights_grants AS grant ON grant.id = archive.rights_grant_id
-WHERE job.fixture_id = $2
+WHERE job.fixture_id = $3
   AND job.state = 'claimed'
-  AND job.claimed_by = $3
+  AND job.claimed_by = $4
+  AND job.claim_generation = $5
+  AND job.claim_started_at IS NOT NULL
   AND job.claim_expires_at > clock_timestamp()
-  AND archive.id = $1
+  AND archive.delivery_manifest_hash = $2
   AND archive.fixture_id = job.fixture_id
   AND archive.mode = 'recorded'
   AND archive.status = 'REPLAY_READY'
+  AND archive.verified_at IS NOT NULL
+  AND archive.verified_at >= job.claim_started_at
+  AND grant.active = true
+  AND grant.revoked_at IS NULL
+  AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())
+  AND grant.scopes @> ARRAY['replay']::text[]
+ON CONFLICT (fixture_id, claim_generation) DO UPDATE
+SET archive_manifest_id = output.archive_manifest_id
+WHERE output.claim_started_at = EXCLUDED.claim_started_at
+  AND output.source_terminal_record_id = EXCLUDED.source_terminal_record_id
+  AND output.worker_id = EXCLUDED.worker_id
+  AND output.archive_manifest_id = EXCLUDED.archive_manifest_id
+  AND output.archive_manifest_hash = EXCLUDED.archive_manifest_hash
+  AND output.archive_terminal_delivery_id = EXCLUDED.archive_terminal_delivery_id
+  AND output.archive_verified_at = EXCLUDED.archive_verified_at
+RETURNING ${outputSelectColumns()};`,
+        [
+          input.archiveManifestId,
+          input.archiveManifestHash,
+          input.fixtureId,
+          input.workerId,
+          input.claimGeneration,
+        ],
+      );
+      if (!rows[0]) {
+        throw new Error(
+          "Archive import job claim or current archive output is invalid",
+        );
+      }
+      return parseVerifiedOutput(rows[0]);
+    },
+    markReplayReady: async (input) => {
+      assertClaimedTransition(input);
+      const rows = await client.unsafe(
+        `UPDATE matchsense.archive_import_jobs AS job
+SET state = 'replay_ready',
+    archive_manifest_id = output.archive_manifest_id,
+    archive_manifest_hash = output.archive_manifest_hash,
+    claimed_by = NULL,
+    claim_expires_at = NULL,
+    claim_started_at = NULL,
+    last_error = NULL,
+    updated_at = clock_timestamp()
+FROM matchsense.archive_import_job_outputs AS output
+JOIN matchsense.archive_manifests AS archive
+  ON archive.id = output.archive_manifest_id
+JOIN matchsense.rights_grants AS grant ON grant.id = archive.rights_grant_id
+WHERE job.fixture_id = $1
+  AND job.state = 'claimed'
+  AND job.claimed_by = $2
+  AND job.claim_generation = $3
+  AND job.claim_expires_at > clock_timestamp()
+  AND output.fixture_id = job.fixture_id
+  AND output.claim_generation = job.claim_generation
+  AND output.claim_started_at = job.claim_started_at
+  AND output.worker_id = job.claimed_by
+  AND output.source_terminal_record_id = job.source_terminal_record_id
+  AND archive.fixture_id = job.fixture_id
+  AND archive.mode = 'recorded'
+  AND archive.status = 'REPLAY_READY'
+  AND archive.delivery_manifest_hash = output.archive_manifest_hash
+  AND archive.terminal_delivery_id = output.archive_terminal_delivery_id
+  AND archive.verified_at = output.archive_verified_at
+  AND archive.verified_at >= job.claim_started_at
   AND grant.active = true
   AND grant.revoked_at IS NULL
   AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())
   AND grant.scopes @> ARRAY['replay']::text[]
 RETURNING ${jobSelectColumns()};`,
-        [input.archiveManifestId, input.fixtureId, input.workerId],
+        [input.fixtureId, input.workerId, input.claimGeneration],
       );
       if (!rows[0]) {
         throw new Error(
-          "Archive import job claim or replay-ready manifest is invalid",
+          "Archive import job claim or verified archive output is invalid",
         );
       }
       return parseJob(rows[0]);
@@ -413,14 +551,16 @@ RETURNING ${jobSelectColumns()};`,
 SET state = 'blocked_rights',
     claimed_by = NULL,
     claim_expires_at = NULL,
+    claim_started_at = NULL,
     last_error = $1,
     updated_at = clock_timestamp()
 WHERE fixture_id = $2
   AND state = 'claimed'
   AND claimed_by = $3
+  AND claim_generation = $4
   AND claim_expires_at > clock_timestamp()
 RETURNING ${jobColumns};`,
-        [input.error, input.fixtureId, input.workerId],
+        [input.error, input.fixtureId, input.workerId, input.claimGeneration],
       );
       if (!rows[0]) {
         throw new Error("Archive import job is not claimed by this worker");
@@ -434,14 +574,16 @@ RETURNING ${jobColumns};`,
 SET state = 'rejected',
     claimed_by = NULL,
     claim_expires_at = NULL,
+    claim_started_at = NULL,
     last_error = $1,
     updated_at = clock_timestamp()
 WHERE fixture_id = $2
   AND state = 'claimed'
   AND claimed_by = $3
+  AND claim_generation = $4
   AND claim_expires_at > clock_timestamp()
 RETURNING ${jobColumns};`,
-        [input.error, input.fixtureId, input.workerId],
+        [input.error, input.fixtureId, input.workerId, input.claimGeneration],
       );
       if (!rows[0]) {
         throw new Error("Archive import job is not claimed by this worker");
