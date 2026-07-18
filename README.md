@@ -45,13 +45,19 @@ service**. The API serves the PWA, database-backed reads, anonymous fan
 sessions, and encrypted push-subscription registration. The collector alone
 holds TxLINE credentials and owns migrations, ingestion, and outbox work.
 
-[`railway.json`](railway.json) is the API service template: it selects the root
-Dockerfile and uses database-backed `/health/ready` as Railway's health gate.
-[`railway.worker.json`](railway.worker.json) is the worker-service template: it
-starts with `ROLE=worker` and deliberately has no HTTP healthcheck. Keep both
-Railway service roots at this repository root so the pnpm workspace and shared
-packages remain in the Docker build context. The shared image defaults to
-`ROLE=api`; set `ROLE=worker` only on the private worker service.
+[`railway.json`](railway.json) contains only settings shared by both services:
+the root Dockerfile and lifecycle policy. Keep both Railway service roots at
+this repository root so the pnpm workspace and shared packages remain in the
+Docker build context. Configure the role-specific settings in Railway once:
+
+| Service                | Start command        | Health check                                                   |
+| ---------------------- | -------------------- | -------------------------------------------------------------- |
+| `matchsense`           | `node dist/entry.js` | `/health/ready` with a 300-second timeout                      |
+| `matchsense-collector` | `node dist/entry.js` | none — it is a private long-running worker, not an HTTP server |
+
+The shared image defaults to `ROLE=api`; set `ROLE=worker` only on the private
+collector service. Keeping the process settings outside the shared config
+prevents a worker deployment from inheriting the API health gate.
 
 Provision a Railway PostgreSQL service and configure these application
 variables:

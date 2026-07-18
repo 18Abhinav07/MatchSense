@@ -137,32 +137,29 @@ test("root exposes real deployment verification commands", () => {
   );
 });
 
-test("Railway role templates keep API health checks off the collector", () => {
+test("Railway config keeps role-specific process settings out of a shared repository config", () => {
   assert.equal(existsSync(path.join(root, "railway.json")), true);
-  assert.equal(existsSync(path.join(root, "railway.worker.json")), true);
   const railway = readJson("railway.json");
-  const worker = readJson("railway.worker.json");
 
   assert.equal(railway.$schema, "https://railway.com/railway.schema.json");
   assert.deepEqual(railway.build, {
     builder: "DOCKERFILE",
     dockerfilePath: "Dockerfile",
   });
-  assert.equal(railway.deploy?.startCommand, "node dist/entry.js");
+  assert.equal(Object.hasOwn(railway.deploy ?? {}, "startCommand"), false);
   assert.equal(railway.deploy?.numReplicas, 1);
   assert.equal(railway.deploy?.multiRegionConfig, null);
   assert.equal(railway.deploy?.sleepApplication, false);
-  assert.equal(railway.deploy?.healthcheckPath, "/health/ready");
-  assert.equal(railway.deploy?.healthcheckTimeout, 300);
+  assert.equal(Object.hasOwn(railway.deploy ?? {}, "healthcheckPath"), false);
+  assert.equal(
+    Object.hasOwn(railway.deploy ?? {}, "healthcheckTimeout"),
+    false,
+  );
   assert.equal(railway.deploy?.overlapSeconds, 0);
   assert.equal(railway.deploy?.drainingSeconds, 15);
   assert.equal(railway.deploy?.restartPolicyType, "ON_FAILURE");
   assert.equal(railway.deploy?.restartPolicyMaxRetries, 10);
-
-  assert.equal(worker.$schema, "https://railway.com/railway.schema.json");
-  assert.deepEqual(worker.build, railway.build);
-  assert.equal(worker.deploy?.startCommand, "ROLE=worker node dist/entry.js");
-  assert.equal(Object.hasOwn(worker.deploy ?? {}, "healthcheckPath"), false);
+  assert.equal(existsSync(path.join(root, "railway.worker.json")), false);
 
   const readme = read("README.md");
   assert.match(readme, /one API replica/iu);
