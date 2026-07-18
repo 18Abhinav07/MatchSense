@@ -19,7 +19,12 @@ import {
 
 export type ApiDatabaseRuntime = Pick<
   ApplicationDatabase,
-  "check" | "close" | "fans" | "pushDevices"
+  | "check"
+  | "close"
+  | "commentaryArtifacts"
+  | "fans"
+  | "fixtureTruth"
+  | "pushDevices"
 >;
 
 export interface StartApiOptions {
@@ -62,12 +67,20 @@ export async function startApi(
           devices: databaseRuntime.pushDevices,
         })
       : null;
+  const commentaryArtifacts =
+    databaseRuntime.commentaryArtifacts && databaseRuntime.fixtureTruth
+      ? {
+          artifacts: databaseRuntime.commentaryArtifacts,
+          truth: databaseRuntime.fixtureTruth,
+        }
+      : null;
 
   let app: FastifyInstance | null = null;
   let unregisterSignals: () => void = () => undefined;
   try {
     app = buildApp({
       allowDemoShell: false,
+      ...(commentaryArtifacts ? { commentaryArtifacts } : {}),
       demo: false,
       ...(pushRegistration && config.vapidPublicKey
         ? {

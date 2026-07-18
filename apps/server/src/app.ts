@@ -18,6 +18,10 @@ import {
 import type { AudioWritable } from "./audio-hub.js";
 import { registerDemoRoutes } from "./demo-routes.js";
 import {
+  type CommentaryArtifactRouteDependencies,
+  registerCommentaryArtifactRoutes,
+} from "./commentary-artifact-routes.js";
+import {
   createDemoSessionRuntime,
   type DemoSessionRuntime,
 } from "./demo-runtime.js";
@@ -65,6 +69,7 @@ export interface ReadinessProbe {
 
 export interface BuildAppOptions {
   allowDemoShell?: boolean;
+  commentaryArtifacts?: CommentaryArtifactRouteDependencies;
   demo?: DemoSessionRuntime | false;
   durablePush?: DurablePushRouteDependencies;
   durableRooms?: DurableRoomRouteDependencies;
@@ -201,6 +206,9 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
         options.runtime?.close();
       });
     }
+  }
+  if (options.commentaryArtifacts) {
+    registerCommentaryArtifactRoutes(app, options.commentaryArtifacts);
   }
   if (options.experience) {
     registerExperienceRoutes(app, options.experience, options.fan?.sessions);

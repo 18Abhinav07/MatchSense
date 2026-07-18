@@ -9,6 +9,7 @@ import type {
 import {
   createDurablePushRegistrationService,
   createDurablePushService,
+  pushInputFromRealtimeMoment,
 } from "./durable-push.js";
 import { createPushSubscriptionCipher } from "./push-crypto.js";
 
@@ -33,7 +34,7 @@ function harness(options: { goals?: boolean; redCards?: boolean } = {}) {
     },
     fanId: "fan-1",
     fixtureId: "experience:run-1",
-    mode: "demo",
+    mode: "live",
   };
   const repository = {
     getActiveForFan: async (input: { deviceId: string; fanId: string }) => {
@@ -70,7 +71,9 @@ function harness(options: { goals?: boolean; redCards?: boolean } = {}) {
     }),
   };
   const sender = {
-    send: vi.fn(async () => ({ accepted: true })),
+    send: vi.fn(async (_subscription: unknown, _payload: string) => ({
+      accepted: true,
+    })),
   };
   const service = createDurablePushService({
     cipher: createPushSubscriptionCipher({
@@ -90,6 +93,54 @@ function harness(options: { goals?: boolean; redCards?: boolean } = {}) {
 }
 
 describe("durable targeted push delivery", () => {
+  it("derives factual push input only from a confirmed realtime live Moment", () => {
+    const payload = {
+      deliveryIntent: "realtime",
+      event: {
+        event: "moment.created",
+        moment: {
+          celebratesGoal: true,
+          eventTeam: "ARG",
+          familyId: "txline:fixture:action:23",
+          fixtureId: "fixture-1",
+          id: "txline:fixture:action:23",
+          kind: "goal",
+          minute: "23'",
+          occurredAt: "2026-07-18T12:23:00.000Z",
+          provenance: "live_txline",
+          revision: 3,
+          score: { away: 0, home: 1 },
+          status: "confirmed",
+        },
+        snapshot: { updatedAt: "2026-07-18T12:23:00.000Z" },
+      },
+      mode: "live",
+    };
+
+    expect(pushInputFromRealtimeMoment(payload)).toEqual({
+      body: "Score: ARG 1–0. Tap to open the Moment.",
+      eventKind: "goal",
+      familyId: "txline:fixture:action:23",
+      fixtureId: "fixture-1",
+      momentId: "txline:fixture:action:23",
+      occurredAt: "2026-07-18T12:23:00.000Z",
+      revision: 3,
+      title: "⚽ GOAL — ARG 1–0, 23'",
+    });
+    expect(
+      pushInputFromRealtimeMoment({
+        ...payload,
+        deliveryIntent: "reconcile",
+      }),
+    ).toBeNull();
+    expect(
+      pushInputFromRealtimeMoment({
+        ...payload,
+        mode: "recorded",
+      }),
+    ).toBeNull();
+  });
+
   it("registers encrypted subscriptions without a VAPID sender", async () => {
     const devices = new Map<string, PushDeviceRecord>();
     const registration = createDurablePushRegistrationService({
@@ -158,7 +209,7 @@ describe("durable targeted push delivery", () => {
           revision: 3,
           title: "GOAL — Argentina 1–0 France",
         },
-        "demo",
+        "live",
       ),
     ).resolves.toEqual({ accepted: 1, attempted: 1 });
     expect(device).toMatchObject({ id: "generated-1" });
@@ -184,7 +235,7 @@ describe("durable targeted push delivery", () => {
           revision: 3,
           title: "GOAL — Argentina 1–0 France",
         },
-        "demo",
+        "live",
       ),
     ).resolves.toEqual({ accepted: 0, attempted: 0 });
     expect(sender.send).not.toHaveBeenCalled();
@@ -209,9 +260,67 @@ describe("durable targeted push delivery", () => {
           revision: 8,
           title: "🟥 RED CARD — France",
         },
-        "demo",
+        "live",
       ),
     ).resolves.toEqual({ accepted: 1, attempted: 1 });
     expect(sender.send).toHaveBeenCalledOnce();
+  });
+
+  it("never sends an archived/demo candidate as if it were a current live Moment", async () => {
+    const { sender, service } = harness();
+    await service.register({
+      fanId: "fan-1",
+      preferences: { goals: true },
+      subscription,
+    });
+
+    await expect(
+      service.deliverToFixture(
+        {
+          body: "A historical score.",
+          familyId: "archive:goal:1",
+          fixtureId: "archive:fixture-1",
+          momentId: "archive:goal:1",
+          occurredAt: "2026-07-17T12:12:00.000Z",
+          revision: 1,
+          title: "GOAL — ARCHIVE",
+        },
+        "demo",
+      ),
+    ).resolves.toEqual({ accepted: 0, attempted: 0 });
+    expect(sender.send).not.toHaveBeenCalled();
+  });
+
+  it("marks a user-requested test alert with its own non-live tag namespace", async () => {
+    const { sender, service } = harness();
+    const device = await service.register({
+      fanId: "fan-1",
+      preferences: { goals: true },
+      subscription,
+    });
+
+    await expect(
+      service.sendTest(
+        "fan-1",
+        device.id,
+        {
+          body: "This is a MatchSense test alert.",
+          familyId: "test:goal",
+          fixtureId: "experience:run-1",
+          momentId: "test:goal",
+          occurredAt: "2026-07-17T12:12:00.000Z",
+          revision: 1,
+          title: "TEST ALERT",
+        },
+        "live",
+      ),
+    ).resolves.toBe(true);
+
+    const payload = JSON.parse(sender.send.mock.calls[0]?.[1] ?? "{}") as {
+      kind?: string;
+      tag?: string;
+    };
+    expect(payload.kind).toBe("test");
+    expect(payload.tag).toMatch(/^matchsense:test:/u);
   });
 });

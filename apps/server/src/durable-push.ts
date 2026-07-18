@@ -12,6 +12,7 @@ import type {
 
 import {
   createMomentPushEnvelope,
+  createTestPushEnvelope,
   parseMomentPushInput,
   type MomentPushInput,
   type WebPushSender,
@@ -63,12 +64,120 @@ function preferenceFor(
   return enabled(preferences.goals ?? preferences.goal);
 }
 
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function nonemptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
+function nonnegativeInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+/**
+ * Converts the collector's canonical outbox payload into a browser-safe push
+ * payload. It deliberately rejects all historic/reconcile/provisional shapes.
+ */
+export function pushInputFromRealtimeMoment(
+  payload: unknown,
+): MomentPushInput | null {
+  const envelope = record(payload);
+  const event = record(envelope?.event);
+  const moment = record(event?.moment);
+  const snapshot = record(event?.snapshot);
+  if (
+    envelope?.mode !== "live" ||
+    envelope.deliveryIntent !== "realtime" ||
+    !moment ||
+    moment.provenance !== "live_txline" ||
+    moment.status !== "confirmed"
+  ) {
+    return null;
+  }
+  const fixtureId = nonemptyString(moment.fixtureId);
+  const familyId = nonemptyString(moment.familyId);
+  const minute = nonemptyString(moment.minute);
+  const team = nonemptyString(moment.eventTeam) ?? "MATCH";
+  const revision = nonnegativeInteger(moment.revision);
+  const score = record(moment.score);
+  const home = nonnegativeInteger(score?.home);
+  const away = nonnegativeInteger(score?.away);
+  const occurredAt =
+    nonemptyString(moment.occurredAt) ?? nonemptyString(snapshot?.updatedAt);
+  if (
+    !fixtureId ||
+    !familyId ||
+    !minute ||
+    revision === null ||
+    revision < 1 ||
+    home === null ||
+    away === null ||
+    !occurredAt ||
+    !z.iso.datetime({ offset: true }).safeParse(occurredAt).success
+  ) {
+    return null;
+  }
+  const kind = moment.kind;
+  const eventKind: MomentPushInput["eventKind"] =
+    kind === "goal" && moment.celebratesGoal === true
+      ? "goal"
+      : kind === "card.red"
+        ? "card.red"
+        : kind === "phase.full_time"
+          ? "phase.full_time"
+          : undefined;
+  if (!eventKind) return null;
+  if (eventKind === "goal") {
+    return {
+      body: `Score: ${team} ${home}–${away}. Tap to open the Moment.`,
+      eventKind,
+      familyId,
+      fixtureId,
+      momentId: familyId,
+      occurredAt,
+      revision,
+      title: `⚽ GOAL — ${team} ${home}–${away}, ${minute}`,
+    };
+  }
+  if (eventKind === "card.red") {
+    return {
+      body: `Red card for ${team}. Score: ${home}–${away}. Tap to open the Moment.`,
+      eventKind,
+      familyId,
+      fixtureId,
+      momentId: familyId,
+      occurredAt,
+      revision,
+      title: `🟥 RED CARD — ${team}, ${minute}`,
+    };
+  }
+  return {
+    body: "The result is final. Tap to open the Match Memory.",
+    eventKind,
+    familyId,
+    fixtureId,
+    momentId: familyId,
+    occurredAt,
+    revision,
+    title: `FULL TIME — ${home}–${away}`,
+  };
+}
+
 function deliveryId(input: {
   deviceId: string;
   fixtureId: string;
   mode: PersistenceMode;
   momentId: string;
   revision: number;
+  testRunId?: string;
 }) {
   return `push_${createHash("sha256")
     .update(
@@ -78,6 +187,7 @@ function deliveryId(input: {
         input.fixtureId,
         input.momentId,
         input.revision,
+        input.testRunId ?? "moment",
       ].join("|"),
     )
     .digest("hex")
@@ -134,6 +244,7 @@ export function createDurablePushService(options: DurablePushServiceOptions) {
     device: PushDeviceRecord,
     input: MomentPushInput,
     mode: PersistenceMode,
+    delivery: { testRunId?: string } = {},
   ) => {
     const record = {
       deviceId: device.id,
@@ -144,6 +255,7 @@ export function createDurablePushService(options: DurablePushServiceOptions) {
         mode,
         momentId: input.momentId,
         revision: input.revision,
+        ...(delivery.testRunId ? { testRunId: delivery.testRunId } : {}),
       }),
       mode,
       momentId: input.momentId,
@@ -153,7 +265,11 @@ export function createDurablePushService(options: DurablePushServiceOptions) {
       const subscription = options.cipher.open(device);
       const result = await options.sender.send(
         subscription,
-        JSON.stringify(createMomentPushEnvelope(input)),
+        JSON.stringify(
+          delivery.testRunId
+            ? createTestPushEnvelope(input, delivery.testRunId)
+            : createMomentPushEnvelope(input),
+        ),
       );
       await options.devices.recordDelivery({
         ...record,
@@ -177,6 +293,9 @@ export function createDurablePushService(options: DurablePushServiceOptions) {
   return {
     ...registration,
     deliverToFixture: async (input: MomentPushInput, mode: PersistenceMode) => {
+      // Recorded archives, reconciliation, and legacy demo state are never
+      // allowed to create a user-visible live notification.
+      if (mode !== "live") return { accepted: 0, attempted: 0 };
       const followers = await options.fans.listFollowers({
         fixtureId: input.fixtureId,
         mode,
@@ -211,8 +330,13 @@ export function createDurablePushService(options: DurablePushServiceOptions) {
       input: MomentPushInput,
       mode: PersistenceMode,
     ) => {
+      if (mode !== "live") return false;
       const device = await options.devices.getActiveForFan({ deviceId, fanId });
-      return device ? sendDevice(device, input, mode) : null;
+      return device
+        ? sendDevice(device, input, mode, {
+            testRunId: options.id?.() ?? randomUUID(),
+          })
+        : null;
     },
   };
 }
@@ -317,7 +441,7 @@ export function registerDurablePushRoutes(
         session.fan.id,
         request.params.id,
         input,
-        input.fixtureId.startsWith("experience:") ? "demo" : "live",
+        "live",
       );
       if (accepted === null) {
         return reply.code(404).send({ error: "push_device_not_found" });

@@ -57,4 +57,75 @@ describe("API-only runtime", () => {
       await rm(webDistPath, { force: true, recursive: true });
     }
   });
+
+  it("exposes ready live commentary artifacts through the credential-free API role", async () => {
+    const webDistPath = await temporaryWebShell();
+    const fixtureId = "fixture-arg-fra";
+    const familyId = "txline:fixture-arg-fra:action:goal-23";
+    const database = {
+      check: vi.fn(async () => ({
+        databaseReachable: true,
+        migrationsCurrent: true,
+      })),
+      close: vi.fn(async () => undefined),
+      commentaryArtifacts: {
+        get: vi.fn(async () => ({
+          bytes: new Uint8Array([0x49, 0x44, 0x33, 0x04]),
+          createdAt: "2026-07-18T12:23:00.000Z",
+          fixtureId,
+          id: "audio-1",
+          language: "en",
+          mediaType: "audio/mpeg",
+          mode: "live",
+          momentId: familyId,
+          momentRevision: 3,
+          templateVersion: "factual-v1",
+          updatedAt: "2026-07-18T12:23:00.000Z",
+          voice: "Kore",
+        })),
+      },
+      fans: {},
+      fixtureTruth: {
+        eventsAfter: vi.fn(async () => [
+          {
+            createdAt: "2026-07-18T12:23:00.000Z",
+            eventId: `${fixtureId}:revision:3`,
+            eventType: "moment.created",
+            fixtureId,
+            mode: "live",
+            payload: {
+              event: "moment.created",
+              moment: {
+                familyId,
+                fixtureId,
+                revision: 3,
+                status: "confirmed",
+              },
+            },
+            sequence: 1,
+          },
+        ]),
+      },
+      pushDevices: {},
+    };
+
+    try {
+      const app = await startApi(
+        parseServerEnv({
+          DATABASE_URL: "postgresql://db.example/matchsense",
+          ROLE: "api",
+        }),
+        { databaseRuntime: database as never, listen: false, webDistPath },
+      );
+      const response = await app.inject({
+        url: `/api/v1/fixtures/${fixtureId}/moments/${familyId}:3/audio`,
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["content-type"]).toContain("audio/mpeg");
+      await app.close();
+    } finally {
+      await rm(webDistPath, { force: true, recursive: true });
+    }
+  });
 });

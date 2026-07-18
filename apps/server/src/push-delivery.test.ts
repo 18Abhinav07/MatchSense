@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createMomentPushEnvelope,
+  createTestPushEnvelope,
   registerPushRoutes,
   type WebPushSender,
 } from "./push-delivery.js";
@@ -20,6 +21,7 @@ const validSubscription = {
 
 const moment = {
   body: "Argentina lead France 1–0 in the 23rd minute.",
+  familyId: "arg-fra-demo:score:1-0",
   fixtureId: "arg-fra-demo",
   momentId: "arg-fra-demo:score:1-0",
   occurredAt: "2026-07-16T12:12:07.000Z",
@@ -31,14 +33,28 @@ describe("canonical Moment push envelope", () => {
   it("derives identity and safe deep-link data rather than accepting a URL", () => {
     expect(createMomentPushEnvelope(moment)).toEqual({
       body: moment.body,
+      familyId: moment.familyId,
       fixtureId: moment.fixtureId,
       identity: "arg-fra-demo:score:1-0:1",
+      intentId: expect.stringMatching(/^intent_[a-f0-9]{32}$/u),
+      kind: "moment",
       momentId: moment.momentId,
       occurredAt: moment.occurredAt,
       revision: 1,
+      route: "/matches/arg-fra-demo/moments/arg-fra-demo%3Ascore%3A1-0%3A1",
       schemaVersion: 1,
+      tag: "matchsense:arg-fra-demo:arg-fra-demo:score:1-0",
       title: moment.title,
       type: "matchsense.moment",
+    });
+  });
+
+  it("uses a separate test-only tag namespace that cannot be mistaken for live sport", () => {
+    expect(createTestPushEnvelope(moment, "run-20260718")).toMatchObject({
+      familyId: moment.familyId,
+      kind: "test",
+      route: "/matches/arg-fra-demo/moments/arg-fra-demo%3Ascore%3A1-0%3A1",
+      tag: "matchsense:test:run-20260718:arg-fra-demo:arg-fra-demo:score:1-0",
     });
   });
 });
@@ -83,7 +99,7 @@ describe("push delivery routes", () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith(
       validSubscription,
-      JSON.stringify(createMomentPushEnvelope(moment)),
+      JSON.stringify(createTestPushEnvelope(moment, "push-registration-1")),
     );
     await app.close();
   });

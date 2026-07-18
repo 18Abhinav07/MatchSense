@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
@@ -11,6 +13,12 @@ const momentPushInput = z
   .object({
     body: z.string().trim().min(1).max(300),
     eventKind: z.enum(["goal", "card.red", "phase.full_time"]).optional(),
+    familyId: z
+      .string()
+      .min(1)
+      .max(240)
+      .regex(/^[A-Za-z0-9_:-]+$/u)
+      .optional(),
     fixtureId: z
       .string()
       .min(1)
@@ -30,10 +38,28 @@ export function parseMomentPushInput(input: unknown): MomentPushInput {
 }
 
 export interface MomentPushEnvelope extends MomentPushInput {
+  familyId: string;
   identity: string;
+  intentId: string;
+  kind: "moment";
+  route: string;
   schemaVersion: 1;
+  tag: string;
   type: "matchsense.moment";
 }
+
+export interface TestPushEnvelope extends MomentPushInput {
+  familyId: string;
+  identity: string;
+  intentId: string;
+  kind: "test";
+  route: string;
+  schemaVersion: 1;
+  tag: string;
+  type: "matchsense.moment";
+}
+
+export type PushPayloadV1 = MomentPushEnvelope | TestPushEnvelope;
 
 export interface WebPushSender {
   send(
@@ -72,10 +98,51 @@ export function createMomentPushEnvelope(
   input: MomentPushInput,
 ): MomentPushEnvelope {
   const parsed = momentPushInput.parse(input);
+  const familyId = parsed.familyId ?? parsed.momentId;
   return {
     ...parsed,
-    identity: `${parsed.momentId}:${parsed.revision}`,
+    familyId,
+    identity: `${familyId}:${parsed.revision}`,
+    intentId: `intent_${createHash("sha256")
+      .update([parsed.fixtureId, familyId, parsed.revision].join("|"))
+      .digest("hex")
+      .slice(0, 32)}`,
+    kind: "moment",
+    route: `/matches/${encodeURIComponent(
+      parsed.fixtureId,
+    )}/moments/${encodeURIComponent(`${familyId}:${parsed.revision}`)}`,
     schemaVersion: 1,
+    tag: `matchsense:${parsed.fixtureId}:${familyId}`,
+    type: "matchsense.moment",
+  };
+}
+
+/** A test alert is deliberately namespaced away from real Moment replacement. */
+export function createTestPushEnvelope(
+  input: MomentPushInput,
+  testRunId: string,
+): TestPushEnvelope {
+  const parsed = momentPushInput.parse(input);
+  if (!/^[A-Za-z0-9_-]{1,80}$/u.test(testRunId)) {
+    throw new Error("Push test run id is invalid");
+  }
+  const familyId = parsed.familyId ?? parsed.momentId;
+  return {
+    ...parsed,
+    familyId,
+    identity: `test:${testRunId}:${familyId}:${parsed.revision}`,
+    intentId: `test_${createHash("sha256")
+      .update(
+        [testRunId, parsed.fixtureId, familyId, parsed.revision].join("|"),
+      )
+      .digest("hex")
+      .slice(0, 32)}`,
+    kind: "test",
+    route: `/matches/${encodeURIComponent(
+      parsed.fixtureId,
+    )}/moments/${encodeURIComponent(`${familyId}:${parsed.revision}`)}`,
+    schemaVersion: 1,
+    tag: `matchsense:test:${testRunId}:${parsed.fixtureId}:${familyId}`,
     type: "matchsense.moment",
   };
 }
@@ -135,7 +202,9 @@ export function registerPushRoutes(
       const registration = dependencies.store.get(request.params.id);
       if (!registration) return notFound(reply);
       try {
-        const payload = JSON.stringify(createMomentPushEnvelope(input.data));
+        const payload = JSON.stringify(
+          createTestPushEnvelope(input.data, registration.id),
+        );
         const result = await dependencies.sender.send(
           registration.subscription,
           payload,

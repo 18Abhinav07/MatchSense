@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { createCommentaryPipeline } from "@matchsense/commentary";
 import {
   createPostgresDatabase,
   type ApplicationDatabase,
@@ -14,22 +15,48 @@ import {
 } from "@matchsense/txline-adapter";
 
 import type { ServerConfig } from "./config.js";
+import {
+  createCommentaryJobWorker,
+  createPipelineCommentaryGenerator,
+  type CommentaryJobWorker,
+} from "./commentary-job-worker.js";
 import { createArchiveService } from "./collector/archive-service.js";
 import {
   createScheduleSync,
   durableFixtureFromSchedule,
 } from "./collector/schedule-sync.js";
 import { createTxlineCollector } from "./collector/txline-collector.js";
-import { createOutboxWorker, type OutboxWorker } from "./outbox-worker.js";
+import { transcodeWavToStreamMp3 } from "./audio-transcoder.js";
+import {
+  createDurablePushService,
+  pushInputFromRealtimeMoment,
+  type DurablePushService,
+} from "./durable-push.js";
+import { type Mp3Contract } from "./mp3.js";
+import {
+  createOutboxWorker,
+  type OutboxHandler,
+  type OutboxWorker,
+} from "./outbox-worker.js";
+import { createPushSubscriptionCipher } from "./push-crypto.js";
 import {
   createShutdownFailureReporter,
   registerShutdownSignals,
   type ShutdownSignalSource,
 } from "./start.js";
+import { createVapidWebPushSender } from "./web-push-sender.js";
 
 export type CollectorDatabaseRuntime = Pick<
   ApplicationDatabase,
-  "archive" | "close" | "fixtureTruth" | "migrate" | "outbox" | "sourceState"
+  | "archive"
+  | "close"
+  | "commentaryJobs"
+  | "fans"
+  | "fixtureTruth"
+  | "migrate"
+  | "outbox"
+  | "pushDevices"
+  | "sourceState"
 >;
 
 export interface CollectorSourceLifecycle {
@@ -38,6 +65,7 @@ export interface CollectorSourceLifecycle {
 }
 
 export interface StartCollectorOptions {
+  commentaryWorker?: CommentaryJobWorker;
   databaseFactory?: (databaseUrl: string) => CollectorDatabaseRuntime;
   databaseRuntime?: CollectorDatabaseRuntime;
   outboxWorker?: OutboxWorker;
@@ -58,6 +86,50 @@ const STREAM_KEY = "scores:mainnet";
 const LEASE_DURATION_MS = 90_000;
 const LEASE_RENEWAL_MS = 30_000;
 const HACKATHON_RIGHTS_GRANT_ID = "txline-world-cup-hackathon-2026";
+const COMMENTARY_MP3_CONTRACT: Mp3Contract = {
+  bitrateKbps: 64,
+  byteLength: 0,
+  channels: 1,
+  durationMs: 0,
+  frameCount: 0,
+  layer: 3,
+  sampleRateHz: 44_100,
+  samplesPerFrame: 1_152,
+  version: 1,
+};
+
+export interface CollectorOutboxEffects {
+  commentary?: Pick<CommentaryJobWorker, "handleOutbox">;
+  push?: Pick<DurablePushService, "deliverToFixture">;
+}
+
+/**
+ * The collector is the only process allowed to turn a committed source event
+ * into external work. Both handlers defend the source boundary again so an
+ * archived/reconciliation row cannot become audible or visible to a fan.
+ */
+export function createCollectorOutboxHandlers(
+  effects: CollectorOutboxEffects,
+): Readonly<Record<string, OutboxHandler>> {
+  const handlers: Record<string, OutboxHandler> = {};
+  if (effects.commentary) {
+    handlers["fixture.broadcast"] = async (message) => {
+      await effects.commentary?.handleOutbox(message);
+    };
+    handlers["commentary.prepare"] = async (message) => {
+      await effects.commentary?.handleOutbox(message);
+    };
+  }
+  if (effects.push) {
+    handlers["push.candidate"] = async (message) => {
+      if (message.mode !== "live") return;
+      const candidate = pushInputFromRealtimeMoment(message.payload);
+      if (!candidate) return;
+      await effects.push?.deliverToFixture(candidate, "live");
+    };
+  }
+  return handlers;
+}
 
 function leaseUntil() {
   return new Date(Date.now() + LEASE_DURATION_MS).toISOString();
@@ -131,7 +203,7 @@ export function createDurableCollectorLifecycle(input: {
           active: true,
           id: HACKATHON_RIGHTS_GRANT_ID,
           reference: "TxLINE World Cup Hackathon 2026",
-          scopes: ["raw_retention", "replay"],
+          scopes: ["audio", "raw_retention", "replay"],
         });
         const schedule = await fetchTxlineWorldCupSchedule(input.txlineClient);
         if (schedule.length === 0) {
@@ -243,6 +315,7 @@ export async function startCollector(
   let closed = false;
   let unregisterSignals: () => void = () => undefined;
   let outboxWorker: OutboxWorker | null = null;
+  let commentaryWorker: CommentaryJobWorker | null = null;
   let sourceLifecycle: CollectorSourceLifecycle | null = null;
   let sourceStarted = false;
 
@@ -252,6 +325,7 @@ export async function startCollector(
     unregisterSignals();
     if (sourceStarted) await sourceLifecycle?.stop();
     await outboxWorker?.stop();
+    await commentaryWorker?.stop();
     await databaseRuntime.close();
   };
 
@@ -266,6 +340,35 @@ export async function startCollector(
         database: databaseRuntime,
         txlineClient,
       });
+    commentaryWorker =
+      options.commentaryWorker ??
+      (databaseRuntime.commentaryJobs && databaseRuntime.fixtureTruth
+        ? createCommentaryJobWorker({
+            generator: createPipelineCommentaryGenerator({
+              pipeline: createCommentaryPipeline({ env: process.env }),
+              transcode: (wavBytes) =>
+                transcodeWavToStreamMp3(wavBytes, {
+                  expected: COMMENTARY_MP3_CONTRACT,
+                }),
+            }),
+            jobs: databaseRuntime.commentaryJobs,
+            truth: databaseRuntime.fixtureTruth,
+          })
+        : null);
+    const durablePush =
+      config.vapid &&
+      config.pushSubscriptionEncryptionSecret &&
+      databaseRuntime.fans &&
+      databaseRuntime.pushDevices
+        ? createDurablePushService({
+            cipher: createPushSubscriptionCipher({
+              secret: config.pushSubscriptionEncryptionSecret,
+            }),
+            devices: databaseRuntime.pushDevices,
+            fans: databaseRuntime.fans,
+            sender: createVapidWebPushSender(config.vapid),
+          })
+        : null;
     outboxWorker =
       options.outboxWorker ??
       (
@@ -273,13 +376,17 @@ export async function startCollector(
         ((outbox) =>
           createOutboxWorker({
             consumer: "collector",
-            handlers: {},
+            handlers: createCollectorOutboxHandlers({
+              ...(commentaryWorker ? { commentary: commentaryWorker } : {}),
+              ...(durablePush ? { push: durablePush } : {}),
+            }),
             mode: "live",
             outbox,
           }))
       )(databaseRuntime.outbox);
     await sourceLifecycle.start();
     sourceStarted = true;
+    commentaryWorker?.start();
     outboxWorker.start();
     unregisterSignals = registerShutdownSignals(
       options.signalSource ?? process,
