@@ -3,8 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { FanProfile } from "../fan-profile.js";
-import type { ProductCatalog } from "../live-api.js";
+import type { MomentResolution, ProductCatalog } from "../live-api.js";
+import type { VerifiedFixtureMemory } from "../memory-api.js";
 import type { LiveSnapshot } from "../product-state.js";
+import type { RecordedReplayTimeline } from "../replay-api.js";
 
 import { AppRouter, type AppRouterProps } from "./AppRouter.js";
 
@@ -49,6 +51,54 @@ const fixture: LiveSnapshot = {
   score: { away: 0, home: 1 },
 };
 
+const recordedFixture: LiveSnapshot = {
+  archiveManifestId: "archive-arg-fra",
+  archiveStatus: "REPLAY_READY",
+  awayTeam: "FRA",
+  fixtureId: "arg-fra",
+  homeTeam: "ARG",
+  lifecycle: "FINAL",
+  minute: "FT",
+  mode: "recorded",
+  provenance: "recorded_txline_authorised",
+  score: { away: 1, home: 2 },
+};
+
+const memory: VerifiedFixtureMemory = {
+  archiveManifestId: "archive-arg-fra",
+  fixture: recordedFixture as VerifiedFixtureMemory["fixture"],
+  timeline: [],
+};
+
+const momentResolution: MomentResolution = {
+  latest: {
+    celebratesGoal: true,
+    eventTeam: "ARG",
+    id: "goal-1",
+    identity: "goal-1:1",
+    kind: "goal",
+    minute: "23'",
+    revision: 1,
+    score: { away: 0, home: 1 },
+    status: "confirmed",
+  },
+  requested: null,
+  snapshot: fixture,
+  superseded: false,
+};
+
+const replay: RecordedReplayTimeline = {
+  archiveManifestId: "archive-arg-fra",
+  events: [],
+  fixtureId: "arg-fra",
+  fixtureMode: "recorded",
+  highWaterSequence: 0,
+  id: "recorded_YXJnLWZyYQ.YXJjaGl2ZS1hcmctZnJh",
+  mode: "recorded",
+  replaySeq: 0,
+  snapshot: recordedFixture as RecordedReplayTimeline["snapshot"],
+};
+
 function render(props: Partial<AppRouterProps>) {
   return renderToStaticMarkup(
     createElement(AppRouter as FunctionComponent<AppRouterProps>, {
@@ -84,5 +134,29 @@ describe("truthful application router", () => {
     expect(markup).toContain("YOUR MATCH DAY");
     expect(markup).not.toContain("JUDGED DEMO");
     expect(markup).not.toContain("Open Demo Mode");
+  });
+
+  it("routes verified Memory, revision-safe Moments, and recorded replay surfaces", () => {
+    const memoryMarkup = render({
+      initialMemory: memory,
+      initialPath: "/matches/arg-fra/memory",
+    });
+    const momentMarkup = render({
+      initialMomentResolution: momentResolution,
+      initialPath: "/matches/arg-fra/moments/goal-1%3A1",
+    });
+    const replayLibraryMarkup = render({
+      initialPath: "/replays",
+      initialReplayHistory: [recordedFixture],
+    });
+    const replayMarkup = render({
+      initialPath: "/replays/recorded_YXJnLWZyYQ.YXJjaGl2ZS1hcmctZnJh",
+      initialReplayTimeline: replay,
+    });
+
+    expect(memoryMarkup).toContain("ARCHIVE VERIFIED");
+    expect(momentMarkup).toContain("GOAL CONFIRMED");
+    expect(replayLibraryMarkup).toContain("RECORDED REPLAYS");
+    expect(replayMarkup).toContain("RECORDED · TXLINE DATA");
   });
 });

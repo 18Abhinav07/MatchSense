@@ -61,4 +61,59 @@ describe("MatchHub", () => {
     expect(markup).toContain("Loading match truth");
     expect(markup).not.toContain("0—0");
   });
+
+  it("keeps an unprojected fixture scoreless instead of rendering 0—0", () => {
+    const markup = renderToStaticMarkup(
+      createElement(MatchHub, {
+        catalog,
+        favoriteTeam: null,
+        fixture: {
+          awayTeam: "FRA",
+          fixtureId: "scheduled-1",
+          homeTeam: "ARG",
+          lifecycle: "SCHEDULED",
+          minute: "—",
+          score: null,
+        },
+        state: "ready",
+      }),
+    );
+
+    expect(markup).toContain("SCORE NOT PUBLISHED");
+    expect(markup).not.toContain("0—0");
+  });
+
+  it("offers an exact deep link to the latest canonical Moment only when connected", () => {
+    const markup = renderToStaticMarkup(
+      createElement(MatchHub, {
+        catalog,
+        favoriteTeam: "ARG",
+        fixture: {
+          awayTeam: "FRA",
+          fixtureId: "fx-1",
+          freshness: "live",
+          homeTeam: "ARG",
+          lastEvent: {
+            celebratesGoal: true,
+            eventTeam: "ARG",
+            id: "goal-1",
+            identity: "goal-1:2",
+            kind: "goal",
+            minute: "63′",
+            revision: 2,
+            score: { away: 0, home: 1 },
+            status: "confirmed",
+          },
+          lifecycle: "LIVE",
+          minute: "63′",
+          score: { away: 0, home: 1 },
+        },
+        onOpenMoment: () => undefined,
+        state: "ready",
+      }),
+    );
+
+    expect(markup).toContain("Open current Moment");
+    expect(markup).not.toContain("Replay a demo");
+  });
 });

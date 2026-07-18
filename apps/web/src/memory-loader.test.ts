@@ -1,52 +1,48 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import type { MatchMemoryRecord } from "./memory-api.js";
-import type { MatchMemoryView } from "./memory-view.js";
-import { loadMemoryHistory, loadOneMemory } from "./memory-loader.js";
+import type { VerifiedFixtureMemory } from "./memory-api.js";
+import {
+  loadVerifiedMemory,
+  loadVerifiedMemoryHistory,
+} from "./memory-loader.js";
 
-const remote = { fixtureId: "remote" } as MatchMemoryRecord;
-const local = { snapshot: { fixtureId: "local" } } as MatchMemoryView;
+const memory = {
+  archiveManifestId: "archive-final",
+  fixture: {
+    archiveManifestId: "archive-final",
+    archiveStatus: "REPLAY_READY",
+    awayTeam: "FRA",
+    fixtureId: "fx-final",
+    homeTeam: "ARG",
+    lifecycle: "FINAL",
+    minute: "FT",
+    mode: "recorded",
+    provenance: "recorded_txline_authorised",
+    score: { away: 1, home: 2 },
+  },
+  timeline: [],
+} as VerifiedFixtureMemory;
 
-describe("server-first Match Memory loading", () => {
-  it("never reads device history when authenticated server history succeeds", async () => {
-    const readLocal = vi.fn(() => [local]);
-
+describe("verified Memory loading", () => {
+  it("returns the archive-backed response without a browser fallback", async () => {
     await expect(
-      loadMemoryHistory({
-        fetchRemote: async () => [remote],
-        readLocal,
-        toView: () => ({
-          ...local,
-          snapshot: { ...local.snapshot, fixtureId: "remote" },
-        }),
-      }),
-    ).resolves.toMatchObject({
-      entries: [{ snapshot: { fixtureId: "remote" } }],
-      source: "server",
-    });
-    expect(readLocal).not.toHaveBeenCalled();
+      loadVerifiedMemory({ fetchRemote: async () => memory }),
+    ).resolves.toEqual({ memory, source: "archive-verified" });
   });
 
-  it("uses a clearly typed device fallback only when the server fails", async () => {
+  it("propagates an unavailable archive instead of rendering device-created history", async () => {
     await expect(
-      loadMemoryHistory({
+      loadVerifiedMemory({
         fetchRemote: async () => {
-          throw new Error("offline");
+          throw new Error("archive unavailable");
         },
-        readLocal: () => [local],
-        toView: vi.fn(),
       }),
-    ).resolves.toEqual({ entries: [local], source: "local-fallback" });
+    ).rejects.toThrow("archive unavailable");
+  });
 
+  it("returns only server-verified history entries", async () => {
     await expect(
-      loadOneMemory({
-        fetchRemote: async () => {
-          throw new Error("offline");
-        },
-        fixtureId: "local",
-        readLocal: () => local,
-        toView: vi.fn(),
-      }),
-    ).resolves.toEqual({ view: local, source: "local-fallback" });
+      loadVerifiedMemoryHistory({ fetchRemote: async () => [memory] }),
+    ).resolves.toEqual({ entries: [memory], source: "archive-verified" });
   });
 });

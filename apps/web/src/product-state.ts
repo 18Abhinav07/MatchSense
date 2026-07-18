@@ -13,7 +13,10 @@ export type FixtureFreshness = "live" | "cached" | "stale" | "offline";
 
 export type FixtureArchiveStatus = "PENDING" | "REPLAY_READY" | "INVALID";
 
+export type FixtureMode = "live" | "recorded";
+
 export interface LiveSnapshot {
+  archiveManifestId?: string | undefined;
   archiveStatus?: FixtureArchiveStatus | undefined;
   fixtureId: string;
   freshness?: FixtureFreshness | undefined;
@@ -25,7 +28,7 @@ export interface LiveSnapshot {
   competition?: string | undefined;
   venue?: string | undefined;
   minute: string;
-  score: { home: number; away: number };
+  score: { home: number; away: number } | null;
   phase?: string | undefined;
   provenance?: string | undefined;
   sourceLabel?: string | undefined;
@@ -33,6 +36,7 @@ export interface LiveSnapshot {
   updatedAt?: string | undefined;
   lastEvent?: LiveMoment | null | undefined;
   lifecycle?: FixtureLifecycle | undefined;
+  mode?: FixtureMode | undefined;
 }
 
 export interface LiveMoment {

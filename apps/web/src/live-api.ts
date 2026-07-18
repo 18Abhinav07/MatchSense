@@ -5,6 +5,7 @@ import type {
   FixtureArchiveStatus,
   FixtureFreshness,
   FixtureLifecycle,
+  FixtureMode,
   LiveCommentary,
   LiveMoment,
   LiveSnapshot,
@@ -40,6 +41,14 @@ export interface MomentResolution {
   snapshot: LiveSnapshot;
 }
 
+export interface MomentResolutionApi {
+  fetchMomentResolution(
+    fixtureId: string,
+    momentIdentity: string,
+    signal?: AbortSignal,
+  ): Promise<MomentResolution>;
+}
+
 function record(value: unknown): JsonRecord | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonRecord)
@@ -67,12 +76,19 @@ function teamName(value: unknown, fallback: string) {
   return data ? text(data.name ?? data.displayName, fallback) : fallback;
 }
 
-function normalizeScore(value: unknown) {
+function normalizeScore(value: unknown): { away: number; home: number } | null {
   const score = record(value);
-  return {
-    away: finiteNumber(score?.away ?? score?.awayGoals),
-    home: finiteNumber(score?.home ?? score?.homeGoals),
-  };
+  const home = score?.home ?? score?.homeGoals;
+  const away = score?.away ?? score?.awayGoals;
+  if (
+    typeof home !== "number" ||
+    !Number.isFinite(home) ||
+    typeof away !== "number" ||
+    !Number.isFinite(away)
+  ) {
+    return null;
+  }
+  return { away, home };
 }
 
 function normalizeLifecycle(value: unknown): FixtureLifecycle | undefined {
@@ -118,6 +134,10 @@ function normalizeArchiveStatus(
     : undefined;
 }
 
+function normalizeMode(value: unknown): FixtureMode | undefined {
+  return value === "live" || value === "recorded" ? value : undefined;
+}
+
 export function normalizeMoment(
   value: unknown,
   fixture: Pick<LiveSnapshot, "fixtureId" | "homeTeam" | "score">,
@@ -132,6 +152,8 @@ export function normalizeMoment(
     item.eventTeam ?? item.team ?? item.teamCode,
     fixture.homeTeam,
   );
+  const parsedScore = normalizeScore(item.score ?? fixture.score);
+  if (!parsedScore) return null;
   return {
     celebratesGoal: item.celebratesGoal === true,
     detail: text(item.detail) || undefined,
@@ -142,7 +164,7 @@ export function normalizeMoment(
     minute: text(item.minute, "—"),
     playerName: text(item.playerName ?? item.playerDisplayName) || undefined,
     revision,
-    score: normalizeScore(item.score ?? fixture.score),
+    score: parsedScore,
     status: text(item.status, "confirmed").toLowerCase(),
     title: text(item.title ?? item.label) || undefined,
   };
@@ -153,34 +175,80 @@ export function normalizeFixture(value: unknown): LiveSnapshot | null {
   if (!item) return null;
   const fixtureId = text(item.fixtureId ?? item.id);
   if (!fixtureId) return null;
-  const homeValue = item.homeTeam ?? item.homeParticipant ?? item.participant1;
-  const awayValue = item.awayTeam ?? item.awayParticipant ?? item.participant2;
+  const teams = record(item.teams);
+  const projection = record(item.projection);
+  const projected = record(projection?.payload);
+  const homeValue =
+    item.homeTeam ??
+    teams?.home ??
+    projected?.homeTeam ??
+    item.homeParticipant ??
+    item.participant1;
+  const awayValue =
+    item.awayTeam ??
+    teams?.away ??
+    projected?.awayTeam ??
+    item.awayParticipant ??
+    item.participant2;
   const homeTeam = teamCode(homeValue, "HOME");
   const awayTeam = teamCode(awayValue, "AWAY");
-  const score = normalizeScore(item.score);
+  const score = normalizeScore(projected?.score ?? item.score);
   const base: LiveSnapshot = {
+    archiveManifestId:
+      text(item.archiveManifestId ?? record(item.archive)?.id) || undefined,
     archiveStatus: normalizeArchiveStatus(
-      item.archiveStatus ?? record(item.archive)?.status,
+      item.archiveStatus ??
+        record(item.archive)?.status ??
+        (item.replayReady === true ? "REPLAY_READY" : undefined),
     ),
     awayTeam,
-    awayTeamName: text(item.awayTeamName, teamName(awayValue, awayTeam)),
-    competition: text(item.competition ?? item.competitionName) || undefined,
+    awayTeamName: text(
+      projected?.awayTeamName ?? item.awayTeamName,
+      teamName(awayValue, awayTeam),
+    ),
+    competition:
+      text(
+        projected?.competition ?? item.competition ?? item.competitionName,
+      ) || undefined,
     fixtureId,
-    freshness: normalizeFreshness(item.freshness ?? item.dataFreshness),
+    freshness: normalizeFreshness(
+      projected?.freshness ?? item.freshness ?? item.dataFreshness,
+    ),
     homeTeam,
-    homeTeamName: text(item.homeTeamName, teamName(homeValue, homeTeam)),
-    kickoffAt: text(item.kickoffAt ?? item.startTime) || undefined,
+    homeTeamName: text(
+      projected?.homeTeamName ?? item.homeTeamName,
+      teamName(homeValue, homeTeam),
+    ),
+    kickoffAt:
+      text(item.kickoffAt ?? item.startTime ?? item.scheduledAt) || undefined,
     lifecycle: normalizeLifecycle(item.lifecycle),
-    minute: text(item.minute ?? item.clock, "—"),
-    phase: text(item.phase ?? item.status).toLowerCase() || undefined,
-    provenance: text(item.provenance, "live_txline"),
-    revision: Math.max(0, finiteNumber(item.revision, 0)),
+    minute: text(projected?.minute ?? item.minute ?? item.clock, "—"),
+    mode: normalizeMode(item.mode),
+    phase:
+      text(projected?.phase ?? item.phase ?? item.status).toLowerCase() ||
+      undefined,
+    provenance: text(projected?.provenance ?? item.provenance, "live_txline"),
+    revision: Math.max(
+      0,
+      finiteNumber(projection?.revision ?? item.revision, 0),
+    ),
     score,
-    sourceLabel: text(item.sourceLabel, "TXLINE MATCH DATA"),
-    updatedAt: text(item.updatedAt ?? item.observedAt) || undefined,
-    venue: text(item.venue ?? item.venueName) || undefined,
+    sourceLabel:
+      text(projected?.sourceLabel ?? item.sourceLabel, "TXLINE MATCH DATA") ||
+      undefined,
+    updatedAt:
+      text(
+        projection?.updatedAt ??
+          projected?.updatedAt ??
+          item.updatedAt ??
+          item.observedAt,
+      ) || undefined,
+    venue: text(projected?.venue ?? item.venue ?? item.venueName) || undefined,
   };
-  base.lastEvent = normalizeMoment(item.lastEvent, base);
+  base.lastEvent = normalizeMoment(
+    projected?.lastEvent ?? item.lastEvent,
+    base,
+  );
   return base;
 }
 
@@ -284,31 +352,50 @@ export async function fetchFixture(fixtureId: string, signal?: AbortSignal) {
   return createProductApi().fetchFixture(fixtureId, signal);
 }
 
-export async function fetchMomentResolution(
-  fixtureId: string,
-  momentIdentity: string,
-  signal?: AbortSignal,
-): Promise<MomentResolution> {
-  const payload = record(
-    await fetchJson(
-      `/api/v1/fixtures/${encodeURIComponent(fixtureId)}/moments/${encodeURIComponent(momentIdentity)}`,
-      fetch,
-      signal,
-    ),
-  );
+function momentRevisionInput(value: unknown): unknown {
+  const data = record(value);
+  if (!data) return value;
+  if (data.moment !== undefined) return data.moment;
+  const payload = record(data.payload);
+  if (!payload) return data;
+  if (payload.moment !== undefined) return payload.moment;
+  const nestedEvent = record(payload.event);
+  if (nestedEvent?.moment !== undefined) return nestedEvent.moment;
+  return payload;
+}
+
+function normalizeMomentRevision(
+  value: unknown,
+  snapshot: LiveSnapshot,
+): LiveMoment | null {
+  const data = record(value);
+  const moment = normalizeMoment(momentRevisionInput(value), snapshot);
+  if (!moment) return null;
+  const envelopeRevision = data
+    ? finiteNumber(data.revision, moment.revision)
+    : moment.revision;
+  return envelopeRevision === moment.revision ? moment : null;
+}
+
+function normalizeMomentResolutionPayload(
+  value: unknown,
+): MomentResolution | null {
+  const payload = record(value);
   const snapshot = normalizeFixture(payload?.snapshot);
-  if (!payload || !snapshot) throw new Error("Moment resolution was invalid");
+  if (!payload || !snapshot) return null;
   const requested =
     payload.requested === null
       ? null
-      : normalizeMoment(payload.requested, snapshot);
+      : normalizeMomentRevision(payload.requested, snapshot);
   const latest =
-    payload.latest === null ? null : normalizeMoment(payload.latest, snapshot);
+    payload.latest === null
+      ? null
+      : normalizeMomentRevision(payload.latest, snapshot);
   if (
     (payload.requested !== null && !requested) ||
     (payload.latest !== null && !latest)
   ) {
-    throw new Error("Moment resolution was invalid");
+    return null;
   }
   return {
     latest,
@@ -316,6 +403,37 @@ export async function fetchMomentResolution(
     snapshot,
     superseded: payload.superseded === true,
   };
+}
+
+export function createMomentResolutionApi(
+  options: { fetcher?: typeof fetch | undefined } = {},
+): MomentResolutionApi {
+  const fetcher = options.fetcher ?? fetch;
+  return {
+    fetchMomentResolution: async (fixtureId, momentIdentity, signal) => {
+      const resolution = normalizeMomentResolutionPayload(
+        await fetchJson(
+          `/api/v1/fixtures/${encodeURIComponent(fixtureId)}/moments/${encodeURIComponent(momentIdentity)}`,
+          fetcher,
+          signal,
+        ),
+      );
+      if (!resolution) throw new Error("Moment resolution was invalid");
+      return resolution;
+    },
+  };
+}
+
+export async function fetchMomentResolution(
+  fixtureId: string,
+  momentIdentity: string,
+  signal?: AbortSignal,
+): Promise<MomentResolution> {
+  return createMomentResolutionApi().fetchMomentResolution(
+    fixtureId,
+    momentIdentity,
+    signal,
+  );
 }
 
 export function parseSnapshotEvent(value: string) {

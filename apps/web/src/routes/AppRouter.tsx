@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { TeamFlag } from "../components/TeamFlag.js";
+import { MemorySourceNotice } from "../MemorySourceNotice.js";
 import {
   createFanProfileApi,
   profileComplete,
@@ -8,19 +9,36 @@ import {
   type FanProfileApi,
 } from "../fan-profile.js";
 import { FanAvatar } from "../features/fan/FanSurfaces.js";
+import { MemorySurface } from "../features/memory/MemorySurface.js";
+import { MomentController } from "../features/moments/MomentController.js";
 import {
   OnboardingFlow,
   type OnboardingProfileApi,
 } from "../features/onboarding/OnboardingFlow.js";
 import { MatchHub } from "../features/fixture/MatchHub.js";
+import { RecordedReplayLibrary } from "../features/replay/RecordedReplayLibrary.js";
+import { RecordedReplayScreen } from "../features/replay/RecordedReplayScreen.js";
 import { TodayHub, type TodayHubState } from "../features/today/TodayHub.js";
 import {
+  createMomentResolutionApi,
   createProductApi,
+  type MomentResolution,
+  type MomentResolutionApi,
   type ProductApi,
   type ProductCatalog,
   type ProductTeam,
 } from "../live-api.js";
+import {
+  createMemoryApi,
+  type MemoryApi,
+  type VerifiedFixtureMemory,
+} from "../memory-api.js";
 import { normalizePath, type LiveSnapshot } from "../product-state.js";
+import {
+  createRecordedReplayApi,
+  type RecordedReplayApi,
+  type RecordedReplayTimeline,
+} from "../replay-api.js";
 
 import "./app-router.css";
 
@@ -31,11 +49,18 @@ const EMPTY_CATALOG: ProductCatalog = { teams: [] };
 export interface AppRouterProps {
   initialCatalog?: ProductCatalog | undefined;
   initialFixtures?: readonly LiveSnapshot[] | undefined;
+  initialMemory?: VerifiedFixtureMemory | undefined;
+  initialMomentResolution?: MomentResolution | undefined;
   /** Undefined means bootstrap from the server; null is a known guest profile. */
   initialProfile?: FanProfile | null | undefined;
   initialPath?: string | undefined;
+  initialReplayHistory?: readonly LiveSnapshot[] | undefined;
+  initialReplayTimeline?: RecordedReplayTimeline | undefined;
+  memoryApi?: MemoryApi | undefined;
+  momentApi?: MomentResolutionApi | undefined;
   productApi?: ProductApi | undefined;
   profileApi?: FanProfileApi | undefined;
+  replayApi?: RecordedReplayApi | undefined;
 }
 
 function currentPath() {
@@ -57,7 +82,33 @@ function publicPath(path: string) {
 
 function fixtureIdFrom(path: string) {
   const matched = /^\/matches\/([^/]+)(?:\/live)?$/u.exec(path);
-  return matched ? decodeURIComponent(matched[1] ?? "") : null;
+  return matched ? decodeRouteSegment(matched[1]) : null;
+}
+
+function decodeRouteSegment(value: string | undefined) {
+  if (!value) return null;
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
+function memoryFixtureIdFrom(path: string) {
+  const matched = /^\/matches\/([^/]+)\/memory$/u.exec(path);
+  return matched ? decodeRouteSegment(matched[1]) : null;
+}
+
+function momentRouteFrom(path: string) {
+  const matched = /^\/matches\/([^/]+)\/moments\/([^/]+)$/u.exec(path);
+  const fixtureId = decodeRouteSegment(matched?.[1]);
+  const identity = decodeRouteSegment(matched?.[2]);
+  return fixtureId && identity ? { fixtureId, identity } : null;
+}
+
+function replaySessionIdFrom(path: string) {
+  const matched = /^\/replays\/([^/]+)$/u.exec(path);
+  return matched ? decodeRouteSegment(matched[1]) : null;
 }
 
 function teamFor(
@@ -174,15 +225,34 @@ function UnsupportedRoute({ onBack }: { onBack(): void }) {
 export function AppRouter({
   initialCatalog,
   initialFixtures,
+  initialMemory,
+  initialMomentResolution,
   initialPath,
   initialProfile,
+  initialReplayHistory,
+  initialReplayTimeline,
+  memoryApi,
+  momentApi,
   productApi,
   profileApi,
+  replayApi,
 }: AppRouterProps) {
   const product = useMemo(() => productApi ?? createProductApi(), [productApi]);
+  const memoryClient = useMemo(
+    () => memoryApi ?? createMemoryApi(),
+    [memoryApi],
+  );
+  const moments = useMemo(
+    () => momentApi ?? createMomentResolutionApi(),
+    [momentApi],
+  );
   const profiles = useMemo(
     () => profileApi ?? createFanProfileApi(),
     [profileApi],
+  );
+  const replays = useMemo(
+    () => replayApi ?? createRecordedReplayApi(),
+    [replayApi],
   );
   const [path, setPath] = useState(() =>
     publicPath(initialPath ?? currentPath()),
@@ -206,7 +276,35 @@ export function AppRouter({
   const [fixturesState, setFixturesState] = useState<ResourceState>(
     initialFixtures === undefined ? "loading" : "ready",
   );
+  const [memory, setMemory] = useState<VerifiedFixtureMemory | null>(
+    initialMemory ?? null,
+  );
+  const [memoryState, setMemoryState] = useState<ResourceState>(
+    initialMemory === undefined ? "loading" : "ready",
+  );
+  const [momentResolution, setMomentResolution] =
+    useState<MomentResolution | null>(initialMomentResolution ?? null);
+  const [momentState, setMomentState] = useState<ResourceState>(
+    initialMomentResolution === undefined ? "loading" : "ready",
+  );
+  const [replayHistory, setReplayHistory] = useState<readonly LiveSnapshot[]>(
+    initialReplayHistory ?? [],
+  );
+  const [replayHistoryState, setReplayHistoryState] = useState<ResourceState>(
+    initialReplayHistory === undefined ? "loading" : "ready",
+  );
+  const [replayTimeline, setReplayTimeline] =
+    useState<RecordedReplayTimeline | null>(initialReplayTimeline ?? null);
+  const [replayTimelineState, setReplayTimelineState] = useState<ResourceState>(
+    initialReplayTimeline === undefined ? "loading" : "ready",
+  );
+  const [replayLaunchFailed, setReplayLaunchFailed] = useState(false);
   const selectedFixtureId = fixtureIdFrom(path);
+  const memoryFixtureId = memoryFixtureIdFrom(path);
+  const momentRoute = momentRouteFrom(path);
+  const momentFixtureId = momentRoute?.fixtureId ?? null;
+  const momentIdentity = momentRoute?.identity ?? null;
+  const replaySessionId = replaySessionIdFrom(path);
   const scheduledFixture =
     fixtures.find((fixture) => fixture.fixtureId === selectedFixtureId) ?? null;
   const [exactFixture, setExactFixture] = useState<LiveSnapshot | null>(null);
@@ -305,6 +403,123 @@ export function AppRouter({
     return () => controller.abort();
   }, [product, scheduledFixture, selectedFixtureId]);
 
+  useEffect(() => {
+    if (!memoryFixtureId) return;
+    if (initialMemory?.fixture.fixtureId === memoryFixtureId) {
+      setMemory(initialMemory);
+      setMemoryState("ready");
+      return;
+    }
+    const controller = new AbortController();
+    setMemory(null);
+    setMemoryState("loading");
+    void memoryClient
+      .fetchFixtureMemory(memoryFixtureId, controller.signal)
+      .then((next) => {
+        setMemory(next);
+        setMemoryState("ready");
+      })
+      .catch((error: unknown) => {
+        if ((error as { name?: string }).name !== "AbortError") {
+          setMemoryState("unavailable");
+        }
+      });
+    return () => controller.abort();
+  }, [initialMemory, memoryClient, memoryFixtureId, reload]);
+
+  useEffect(() => {
+    if (!momentFixtureId || !momentIdentity) return;
+    if (
+      initialMomentResolution &&
+      initialMomentResolution.snapshot.fixtureId === momentFixtureId
+    ) {
+      setMomentResolution(initialMomentResolution);
+      setMomentState("ready");
+      return;
+    }
+    const controller = new AbortController();
+    setMomentResolution(null);
+    setMomentState("loading");
+    void moments
+      .fetchMomentResolution(momentFixtureId, momentIdentity, controller.signal)
+      .then((next) => {
+        setMomentResolution(next);
+        setMomentState("ready");
+      })
+      .catch((error: unknown) => {
+        if ((error as { name?: string }).name !== "AbortError") {
+          setMomentState("unavailable");
+        }
+      });
+    return () => controller.abort();
+  }, [
+    initialMomentResolution,
+    momentFixtureId,
+    momentIdentity,
+    moments,
+    reload,
+  ]);
+
+  useEffect(() => {
+    if (path !== "/replays") return;
+    if (initialReplayHistory !== undefined) {
+      setReplayHistory(initialReplayHistory);
+      setReplayHistoryState("ready");
+      return;
+    }
+    const controller = new AbortController();
+    setReplayHistoryState("loading");
+    void memoryClient
+      .fetchHistory(controller.signal)
+      .then((next) => {
+        setReplayHistory(next);
+        setReplayHistoryState("ready");
+      })
+      .catch((error: unknown) => {
+        if ((error as { name?: string }).name !== "AbortError") {
+          setReplayHistoryState("unavailable");
+        }
+      });
+    return () => controller.abort();
+  }, [initialReplayHistory, memoryClient, path, reload]);
+
+  useEffect(() => {
+    if (!replaySessionId) return;
+    if (initialReplayTimeline?.id === replaySessionId) {
+      setReplayTimeline(initialReplayTimeline);
+      setReplayTimelineState("ready");
+      return;
+    }
+    const controller = new AbortController();
+    setReplayTimeline(null);
+    setReplayTimelineState("loading");
+    void replays
+      .fetchTimeline(replaySessionId, controller.signal)
+      .then((next) => {
+        setReplayTimeline(next);
+        setReplayTimelineState("ready");
+      })
+      .catch((error: unknown) => {
+        if ((error as { name?: string }).name !== "AbortError") {
+          setReplayTimelineState("unavailable");
+        }
+      });
+    return () => controller.abort();
+  }, [initialReplayTimeline, replaySessionId, replays, reload]);
+
+  const openReplay = useCallback(
+    (fixtureId: string) => {
+      setReplayLaunchFailed(false);
+      void replays
+        .start(fixtureId)
+        .then((session) =>
+          navigate(`/replays/${encodeURIComponent(session.id)}`),
+        )
+        .catch(() => setReplayLaunchFailed(true));
+    },
+    [navigate, replays],
+  );
+
   if (profileState === "loading") return <OpeningShell />;
   if (profileState === "unavailable")
     return <UnavailableShell onRetry={retry} />;
@@ -319,6 +534,129 @@ export function AppRouter({
           navigate("/");
         }}
         profileApi={profiles as OnboardingProfileApi}
+      />
+    );
+  }
+
+  if (memoryFixtureId) {
+    if (memoryState === "loading") {
+      return (
+        <main className="ms-router-unavailable" id="main-content">
+          <MemorySourceNotice source="loading" />
+        </main>
+      );
+    }
+    if (memoryState === "unavailable" || !memory) {
+      return (
+        <main className="ms-router-unavailable" id="main-content">
+          <MemorySourceNotice source="unavailable" />
+          <button onClick={() => navigate("/replays")} type="button">
+            Back to recorded replays
+          </button>
+        </main>
+      );
+    }
+    return (
+      <MemorySurface
+        catalog={catalog}
+        memory={memory}
+        onBack={() => navigate("/replays")}
+        onOpenReplay={openReplay}
+      />
+    );
+  }
+
+  if (momentFixtureId && momentIdentity) {
+    if (momentState === "loading") {
+      return (
+        <main className="ms-router-unavailable" id="main-content" role="status">
+          <p>Opening current Moment truth</p>
+          <span>
+            MatchSense will not animate an old notification before its current
+            revision is known.
+          </span>
+        </main>
+      );
+    }
+    if (momentState === "unavailable" || !momentResolution) {
+      return (
+        <main className="ms-router-unavailable" id="main-content" role="status">
+          <p>Current Moment unavailable</p>
+          <span>
+            This link could not be reconciled with the current match revision.
+          </span>
+          <button
+            onClick={() =>
+              navigate(`/matches/${encodeURIComponent(momentFixtureId)}`)
+            }
+            type="button"
+          >
+            Open match truth
+          </button>
+        </main>
+      );
+    }
+    return (
+      <MomentController
+        catalog={catalog}
+        onClose={() =>
+          navigate(`/matches/${encodeURIComponent(momentFixtureId)}`)
+        }
+        resolution={momentResolution}
+      />
+    );
+  }
+
+  if (path === "/replays") {
+    return (
+      <>
+        <RecordedReplayLibrary
+          catalog={catalog}
+          fixtures={replayHistory}
+          onBack={() => navigate("/")}
+          onOpenMemory={(fixtureId) =>
+            navigate(`/matches/${encodeURIComponent(fixtureId)}/memory`)
+          }
+          onOpenReplay={openReplay}
+          state={replayHistoryState}
+        />
+        {replayLaunchFailed ? (
+          <p className="ms-router-replay-error" role="status">
+            This replay is no longer authorised or available from the archive.
+          </p>
+        ) : null}
+      </>
+    );
+  }
+
+  if (replaySessionId) {
+    if (replayTimelineState === "loading") {
+      return (
+        <main className="ms-router-unavailable" id="main-content" role="status">
+          <p>Opening recorded replay</p>
+          <span>Loading the authorised archive in its recorded sequence.</span>
+        </main>
+      );
+    }
+    if (replayTimelineState === "unavailable" || !replayTimeline) {
+      return (
+        <main className="ms-router-unavailable" id="main-content" role="status">
+          <p>Recorded replay unavailable</p>
+          <span>
+            MatchSense will not replace a missing archive with a simulated
+            match.
+          </span>
+          <button onClick={() => navigate("/replays")} type="button">
+            Back to recorded replays
+          </button>
+        </main>
+      );
+    }
+    return (
+      <RecordedReplayScreen
+        catalog={catalog}
+        onBack={() => navigate("/replays")}
+        replay={replayTimeline}
       />
     );
   }
@@ -338,6 +676,7 @@ export function AppRouter({
         onOpenFixture={(fixtureId) =>
           navigate(`/matches/${encodeURIComponent(fixtureId)}`)
         }
+        onOpenReplays={() => navigate("/replays")}
         state={todayState}
       />
     );
@@ -350,6 +689,12 @@ export function AppRouter({
         favoriteTeam={profile.favoriteTeam}
         fixture={scheduledFixture ?? exactFixture}
         onBack={() => navigate("/")}
+        onOpenMoment={(identity) => {
+          if (!selectedFixtureId) return;
+          navigate(
+            `/matches/${encodeURIComponent(selectedFixtureId)}/moments/${encodeURIComponent(identity)}`,
+          );
+        }}
         state={exactFixtureState}
       />
     );

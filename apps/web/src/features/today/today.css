@@ -26,7 +26,7 @@
 .ms-today-masthead a span {
   color: #9fd16e;
 }
-.ms-today-masthead > span,
+.ms-today-masthead > div > span,
 .ms-today-hero p,
 .ms-today-hero aside span,
 .ms-today-section header span,
@@ -38,8 +38,26 @@
   letter-spacing: 0.12em;
   text-transform: uppercase;
 }
-.ms-today-masthead > span {
+.ms-today-masthead > div {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+}
+.ms-today-masthead > div > span {
   color: #9aa99a;
+}
+.ms-today-masthead > div > button {
+  padding: 0;
+  color: #d7e6d3;
+  border: 0;
+  border-bottom: 1px solid rgb(215 230 211 / 48%);
+  background: transparent;
+  font:
+    760 10px/1.3 "SFMono-Regular",
+    ui-monospace,
+    monospace;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
 
 .ms-today-hero {

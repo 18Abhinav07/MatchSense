@@ -50,7 +50,7 @@ export function FixtureCard({
 }) {
   const home = teamFor(catalog, fixture.homeTeam, fixture.homeTeamName);
   const away = teamFor(catalog, fixture.awayTeam, fixture.awayTeamName);
-  const scoreVisible = tone !== "upcoming";
+  const scoreVisible = tone !== "upcoming" && fixture.score !== null;
   const detail =
     tone === "live"
       ? fixture.minute
@@ -80,10 +80,12 @@ export function FixtureCard({
         <strong className="ms-fixture-card-score">
           {scoreVisible ? (
             <>
-              <span>{fixture.score.home}</span>
+              <span>{fixture.score?.home}</span>
               <i>—</i>
-              <span>{fixture.score.away}</span>
+              <span>{fixture.score?.away}</span>
             </>
+          ) : tone !== "upcoming" ? (
+            <span>SCORE PENDING</span>
           ) : (
             <span>vs</span>
           )}

@@ -1,43 +1,16 @@
-import type { MatchMemoryRecord } from "./memory-api.js";
-import type { MatchMemoryView } from "./memory-view.js";
+import type { VerifiedFixtureMemory } from "./memory-api.js";
 
-export async function loadMemoryHistory(input: {
-  fetchRemote(): Promise<readonly MatchMemoryRecord[]>;
-  readLocal(): MatchMemoryView[];
-  toView(memory: MatchMemoryRecord): MatchMemoryView;
-}): Promise<{
-  entries: MatchMemoryView[];
-  source: "local-fallback" | "server";
-}> {
-  try {
-    return {
-      entries: (await input.fetchRemote()).map(input.toView),
-      source: "server",
-    };
-  } catch (error) {
-    if ((error as { name?: string }).name === "AbortError") throw error;
-    return { entries: input.readLocal(), source: "local-fallback" };
-  }
+export async function loadVerifiedMemory(input: {
+  fetchRemote(): Promise<VerifiedFixtureMemory>;
+}): Promise<{ memory: VerifiedFixtureMemory; source: "archive-verified" }> {
+  return { memory: await input.fetchRemote(), source: "archive-verified" };
 }
 
-export async function loadOneMemory(input: {
-  fetchRemote(fixtureId: string): Promise<MatchMemoryRecord>;
-  fixtureId: string;
-  readLocal(fixtureId: string): MatchMemoryView | null;
-  toView(memory: MatchMemoryRecord): MatchMemoryView;
+export async function loadVerifiedMemoryHistory(input: {
+  fetchRemote(): Promise<readonly VerifiedFixtureMemory[]>;
 }): Promise<{
-  source: "local-fallback" | "server";
-  view: MatchMemoryView;
+  entries: readonly VerifiedFixtureMemory[];
+  source: "archive-verified";
 }> {
-  try {
-    return {
-      source: "server",
-      view: input.toView(await input.fetchRemote(input.fixtureId)),
-    };
-  } catch (error) {
-    if ((error as { name?: string }).name === "AbortError") throw error;
-    const local = input.readLocal(input.fixtureId);
-    if (!local) throw error;
-    return { source: "local-fallback", view: local };
-  }
+  return { entries: await input.fetchRemote(), source: "archive-verified" };
 }

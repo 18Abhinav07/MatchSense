@@ -1,0 +1,268 @@
+.ms-memory-surface {
+  min-height: 100dvh;
+  padding: 0 clamp(20px, 5vw, 76px) 90px;
+  color: #f5f5ed;
+  background:
+    radial-gradient(
+      circle at 50% -10%,
+      rgb(117 170 219 / 24%),
+      transparent 33rem
+    ),
+    #101a13;
+}
+
+.ms-memory-surface__header {
+  display: flex;
+  min-height: 82px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid rgb(255 255 255 / 12%);
+}
+
+.ms-memory-surface__header button,
+.ms-memory-surface--unavailable > button {
+  padding: 0;
+  color: #f5f5ed;
+  border: 0;
+  border-bottom: 1px solid rgb(255 255 255 / 48%);
+  background: transparent;
+  font:
+    800 15px/1 "Avenir Next",
+    "Segoe UI Variable",
+    sans-serif;
+}
+
+.ms-memory-surface__header > span,
+.ms-memory-surface__record header > span,
+.ms-memory-surface__record header p,
+.ms-memory-surface__footer > span {
+  color: #aab9a7;
+  font:
+    760 10px/1.35 "SFMono-Regular",
+    ui-monospace,
+    monospace;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.ms-memory-surface__result {
+  width: min(100%, 1080px);
+  margin: clamp(34px, 7vw, 86px) auto 0;
+}
+
+.ms-memory-surface__result .memory-source-notice {
+  justify-content: center;
+  margin: 0 auto 38px;
+}
+
+.ms-memory-surface__scoreline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: clamp(18px, 5vw, 74px);
+  align-items: center;
+}
+
+.ms-memory-surface__scoreline > div {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.ms-memory-surface__scoreline .ms-team-flag {
+  width: min(100%, 176px);
+}
+
+.ms-memory-surface__scoreline > div > span {
+  max-width: 13ch;
+  overflow-wrap: anywhere;
+  font-size: clamp(20px, 4vw, 42px);
+  font-weight: 800;
+  letter-spacing: -0.06em;
+  text-align: center;
+}
+
+.ms-memory-surface__scoreline > strong {
+  display: grid;
+  grid-template-columns: auto auto auto;
+  gap: 8px;
+  align-items: center;
+  color: #f5f5ed;
+  font-size: clamp(44px, 8vw, 90px);
+  line-height: 0.85;
+  letter-spacing: -0.09em;
+}
+
+.ms-memory-surface__scoreline > strong i {
+  color: #799079;
+  font-style: normal;
+}
+
+.ms-memory-surface__scoreline > strong small {
+  grid-column: 1 / -1;
+  color: #aab9a7;
+  font:
+    760 10px/1.35 "SFMono-Regular",
+    ui-monospace,
+    monospace;
+  letter-spacing: 0.12em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.ms-memory-surface__result > p {
+  margin: 36px 0 0;
+  color: #aab9a7;
+  font:
+    760 11px/1.35 "SFMono-Regular",
+    ui-monospace,
+    monospace;
+  letter-spacing: 0.12em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.ms-memory-surface__record {
+  width: min(100%, 960px);
+  margin: clamp(64px, 10vw, 128px) auto 0;
+}
+
+.ms-memory-surface__record > header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid rgb(255 255 255 / 13%);
+}
+
+.ms-memory-surface__record header p {
+  margin: 0;
+  color: #9fd16e;
+}
+
+.ms-memory-surface__record h1 {
+  margin: 8px 0 0;
+  font-size: clamp(28px, 5vw, 52px);
+  line-height: 0.95;
+  letter-spacing: -0.065em;
+}
+
+.ms-memory-surface__record header > span {
+  max-width: 24ch;
+  text-align: right;
+}
+
+.ms-memory-surface__record ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ms-memory-surface__record li {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: start;
+  padding: 24px 0;
+  border-bottom: 1px solid rgb(255 255 255 / 10%);
+}
+
+.ms-memory-surface__record time,
+.ms-memory-surface__record li small {
+  color: #aab9a7;
+  font:
+    760 11px/1.4 "SFMono-Regular",
+    ui-monospace,
+    monospace;
+  letter-spacing: 0.09em;
+}
+
+.ms-memory-surface__record li div {
+  display: grid;
+  gap: 7px;
+}
+
+.ms-memory-surface__record li strong {
+  font-size: 18px;
+  letter-spacing: -0.035em;
+}
+
+.ms-memory-surface__record li div span,
+.ms-memory-surface__empty {
+  color: #aab9a7;
+  line-height: 1.5;
+}
+
+.ms-memory-surface__empty {
+  padding: 28px 0;
+}
+
+.ms-memory-surface__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  width: min(100%, 960px);
+  margin: 42px auto 0;
+}
+
+.ms-memory-surface__footer button {
+  min-height: 50px;
+  padding: 0 22px;
+  color: #0f1a13;
+  border: 0;
+  background: #b9ef83;
+  box-shadow: 0 13px 28px rgb(101 165 65 / 22%);
+  font:
+    850 14px/1 "Avenir Next",
+    "Segoe UI Variable",
+    sans-serif;
+}
+
+.ms-memory-surface--unavailable {
+  display: grid;
+  place-content: center;
+  gap: 22px;
+}
+
+@media (max-width: 620px) {
+  .ms-memory-surface {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .ms-memory-surface__header {
+    min-height: 68px;
+  }
+
+  .ms-memory-surface__scoreline {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .ms-memory-surface__scoreline > strong {
+    grid-row: 2;
+    grid-column: 1 / -1;
+    justify-self: center;
+  }
+
+  .ms-memory-surface__record > header,
+  .ms-memory-surface__footer {
+    align-items: start;
+    flex-direction: column;
+  }
+
+  .ms-memory-surface__record header > span {
+    text-align: left;
+  }
+
+  .ms-memory-surface__record li {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+
+  .ms-memory-surface__record li small {
+    grid-column: 2;
+  }
+}

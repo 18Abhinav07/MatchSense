@@ -1,0 +1,271 @@
+.ms-moment-controller {
+  --moment-accent: #7ec75f;
+  --moment-deep: #102519;
+  --moment-ink: #f5f5ed;
+  min-height: 100dvh;
+  padding: 0 clamp(20px, 5vw, 76px) 84px;
+  overflow: hidden;
+  color: var(--moment-ink);
+  background:
+    radial-gradient(
+      circle at 88% 12%,
+      color-mix(in srgb, var(--moment-accent) 28%, transparent),
+      transparent 34rem
+    ),
+    linear-gradient(135deg, #0a120d, var(--moment-deep));
+}
+
+.ms-moment-controller[data-tone="var"] {
+  --moment-accent: #e0a23d;
+  --moment-deep: #2a1c0c;
+}
+
+.ms-moment-controller[data-tone="yellow"] {
+  --moment-accent: #f1c84a;
+  --moment-deep: #332905;
+}
+
+.ms-moment-controller[data-tone="red"] {
+  --moment-accent: #e15b51;
+  --moment-deep: #34120f;
+}
+
+.ms-moment-controller[data-tone="neutral"] {
+  --moment-accent: #9aa99a;
+  --moment-deep: #17201a;
+}
+
+.ms-moment-controller__header {
+  display: flex;
+  min-height: 82px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  border-bottom: 1px solid rgb(255 255 255 / 13%);
+}
+
+.ms-moment-controller__header button {
+  padding: 0;
+  color: var(--moment-ink);
+  border: 0;
+  border-bottom: 1px solid rgb(255 255 255 / 48%);
+  background: transparent;
+  font:
+    800 15px/1 "Avenir Next",
+    "Segoe UI Variable",
+    sans-serif;
+}
+
+.ms-moment-controller__header > span,
+.ms-moment-controller__fact > span,
+.ms-moment-controller__kicker,
+.ms-moment-controller__copy dt,
+.ms-moment-controller__revision strong {
+  font:
+    760 10px/1.35 "SFMono-Regular",
+    ui-monospace,
+    monospace;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.ms-moment-controller__header > span,
+.ms-moment-controller__fact > span {
+  color: rgb(245 245 237 / 65%);
+  text-align: right;
+}
+
+.ms-moment-controller__fact {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  width: min(100%, 780px);
+  margin: clamp(42px, 8vw, 100px) auto 0;
+}
+
+.ms-moment-controller__teams {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+}
+
+.ms-moment-controller__teams .ms-team-flag {
+  width: 54px;
+}
+
+.ms-moment-controller__fact strong {
+  font-size: clamp(24px, 6vw, 56px);
+  line-height: 0.95;
+  letter-spacing: -0.07em;
+  text-align: center;
+}
+
+.ms-moment-controller__moment {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(160px, 0.45fr);
+  gap: clamp(28px, 7vw, 112px);
+  align-items: end;
+  width: min(100%, 960px);
+  min-height: min(56dvh, 620px);
+  margin: clamp(34px, 7vw, 90px) auto 0;
+  padding: clamp(28px, 5vw, 64px);
+  isolation: isolate;
+  border: 1px solid rgb(255 255 255 / 14%);
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / 9%), rgb(255 255 255 / 2%)),
+    rgb(0 0 0 / 17%);
+  box-shadow: 0 34px 90px rgb(0 0 0 / 26%);
+}
+
+.ms-moment-controller__moment::before {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  content: "";
+  opacity: 0.18;
+  background-image: linear-gradient(
+    90deg,
+    transparent 49%,
+    rgb(255 255 255 / 60%) 50%,
+    transparent 51%
+  );
+  background-size: 100% 100%;
+}
+
+.ms-moment-controller__pulse {
+  position: absolute;
+  z-index: -1;
+  top: clamp(22px, 8vw, 82px);
+  right: clamp(22px, 8vw, 84px);
+  width: min(34vw, 270px);
+  aspect-ratio: 1;
+  border: 1px solid color-mix(in srgb, var(--moment-accent) 80%, transparent);
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 25px color-mix(in srgb, var(--moment-accent) 10%, transparent),
+    0 0 0 58px color-mix(in srgb, var(--moment-accent) 5%, transparent);
+  animation: ms-moment-breathe 2.7s cubic-bezier(0.19, 1, 0.22, 1) infinite;
+}
+
+.ms-moment-controller__copy {
+  min-width: 0;
+}
+
+.ms-moment-controller__kicker,
+.ms-moment-controller__copy dt {
+  color: var(--moment-accent);
+}
+
+.ms-moment-controller__copy h1 {
+  max-width: 11ch;
+  margin: 17px 0 0;
+  font-size: clamp(38px, 7.4vw, 88px);
+  line-height: 0.88;
+  letter-spacing: -0.075em;
+  overflow-wrap: anywhere;
+}
+
+.ms-moment-controller__copy p {
+  max-width: 42ch;
+  margin: 22px 0 0;
+  color: rgb(245 245 237 / 78%);
+  font-size: clamp(16px, 2vw, 20px);
+  line-height: 1.5;
+}
+
+.ms-moment-controller__copy dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin: 40px 0 0;
+  background: rgb(255 255 255 / 12%);
+}
+
+.ms-moment-controller__copy dl > div {
+  min-width: 0;
+  padding: 16px;
+  background: rgb(5 12 8 / 55%);
+}
+
+.ms-moment-controller__copy dd {
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+  font:
+    800 13px/1.2 "Avenir Next",
+    "Segoe UI Variable",
+    sans-serif;
+}
+
+.ms-moment-controller__event-flag {
+  width: min(100%, 244px);
+  justify-self: end;
+  filter: drop-shadow(0 24px 34px rgb(0 0 0 / 28%));
+}
+
+.ms-moment-controller__revision {
+  display: grid;
+  gap: 8px;
+  width: min(100%, 960px);
+  margin: 18px auto 0;
+  padding: 18px clamp(20px, 4vw, 34px);
+  border-left: 3px solid var(--moment-accent);
+  background: rgb(0 0 0 / 23%);
+}
+
+.ms-moment-controller__revision strong {
+  color: var(--moment-accent);
+}
+
+.ms-moment-controller__revision span {
+  color: rgb(245 245 237 / 76%);
+  line-height: 1.45;
+}
+
+@keyframes ms-moment-breathe {
+  0%,
+  100% {
+    transform: scale(0.96);
+    opacity: 0.72;
+  }
+  50% {
+    transform: scale(1.04);
+    opacity: 1;
+  }
+}
+
+@media (max-width: 620px) {
+  .ms-moment-controller {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+
+  .ms-moment-controller__header {
+    min-height: 68px;
+  }
+
+  .ms-moment-controller__header > span {
+    max-width: 17ch;
+  }
+
+  .ms-moment-controller__moment {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .ms-moment-controller__event-flag {
+    width: 132px;
+    justify-self: start;
+  }
+
+  .ms-moment-controller__copy dl {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ms-moment-controller__pulse {
+    animation: none;
+  }
+}

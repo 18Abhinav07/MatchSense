@@ -1,89 +1,50 @@
 import { describe, expect, it } from "vitest";
 
-import type { MatchMemoryRecord } from "./memory-api.js";
-import { matchMemoryView } from "./memory-view.js";
+import type { VerifiedFixtureMemory } from "./memory-api.js";
+import { verifiedMemoryView } from "./memory-view.js";
 
-const memory: MatchMemoryRecord = {
-  createdAt: "2026-07-17T15:00:00.000Z",
-  fanId: "fan-1",
-  fixtureId: "fixture-live",
-  mode: "live",
-  payload: {
+const memory: VerifiedFixtureMemory = {
+  archiveManifestId: "archive-ready",
+  fixture: {
+    archiveManifestId: "archive-ready",
+    archiveStatus: "REPLAY_READY",
     awayTeam: "FRA",
-    decidedBy: "regulation",
-    finalizedAt: "2026-07-17T15:00:00.000Z",
-    fixtureId: "fixture-live",
+    fixtureId: "arg-fra",
     homeTeam: "ARG",
-    keyMoments: [
-      {
-        eventTeam: "FRA",
-        familyId: "red-1",
-        identity: "red-1:5",
-        kind: "card.red",
-        minute: "71'",
-        player: { displayName: "Theo Hernández", id: "theo" },
-        revision: 5,
-        score: { away: 1, home: 2 },
-        status: "confirmed",
-      },
-      {
-        eventTeam: null,
-        familyId: "final-1",
-        identity: "final-1:7",
-        kind: "phase.full_time",
-        minute: "FT",
-        player: null,
-        revision: 7,
-        score: { away: 1, home: 2 },
-        status: "confirmed",
-      },
-    ],
-    kickoffAt: "2026-07-17T12:00:00.000Z",
-    mode: "live",
-    provenance: "live_txline",
-    replay: {
-      available: true,
-      fixtureRoute: "/matches/fixture-live/memory",
-      kind: "canonical_timeline",
-      momentRouteTemplate: "/matches/fixture-live/moments/{identity}",
-      restartable: false,
-      runId: null,
-      templateId: null,
-      templateVersion: null,
-    },
-    revision: 7,
-    schemaVersion: 1,
+    lifecycle: "FINAL",
+    minute: "FT",
+    mode: "recorded",
+    provenance: "recorded_txline_authorised",
     score: { away: 1, home: 2 },
-    sourceLabel: "TXLINE · DEVNET SOURCE",
-    stats: {
-      away: { corners: 3, redCards: 1, yellowCards: 2 },
-      home: { corners: 7, redCards: 0, yellowCards: 1 },
-    },
-    summary: "Argentina won a tense final.",
   },
-  revision: 7,
+  timeline: [
+    {
+      createdAt: "2026-07-18T15:00:00.000Z",
+      eventId: "goal-1",
+      eventType: "moment.created",
+      moment: {
+        celebratesGoal: true,
+        eventTeam: "ARG",
+        id: "goal-1",
+        identity: "goal-1:2",
+        kind: "goal",
+        minute: "81'",
+        revision: 2,
+        score: { away: 1, home: 2 },
+        status: "confirmed",
+      },
+      sequence: 14,
+    },
+  ],
 };
 
-describe("Match Memory UI view model", () => {
-  it("maps durable final truth and canonical event kinds into the Memory UI", () => {
-    const view = matchMemoryView(memory);
-
-    expect(view.snapshot).toMatchObject({
-      fixtureId: "fixture-live",
-      minute: "FT",
-      phase: "full_time",
-      revision: 7,
-      score: { away: 1, home: 2 },
+describe("verified Match Memory view model", () => {
+  it("uses only verified final facts and canonical Moments", () => {
+    expect(verifiedMemoryView(memory)).toEqual({
+      archiveManifestId: "archive-ready",
+      fixture: memory.fixture,
+      moments: [memory.timeline[0]?.moment],
+      summary: "ARG 2—1 FRA · final archive verified",
     });
-    expect(view.moments).toMatchObject([
-      { kind: "red_card", playerName: "Theo Hernández" },
-      { eventTeam: "ARG", kind: "full_time" },
-    ]);
-    expect(view.stats).toEqual([
-      { away: 1, home: 2, label: "Goals" },
-      { away: 3, home: 1, label: "Cards" },
-      { away: 3, home: 7, label: "Corners" },
-    ]);
-    expect(view.summary).toBe("Argentina won a tense final.");
   });
 });

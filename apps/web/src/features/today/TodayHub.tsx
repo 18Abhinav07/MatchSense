@@ -12,6 +12,7 @@ export interface TodayHubProps {
   favoriteTeam: string | null;
   fixtures: readonly LiveSnapshot[];
   onOpenFixture(fixtureId: string): void;
+  onOpenReplays?: (() => void) | undefined;
   state: TodayHubState;
 }
 
@@ -69,6 +70,7 @@ export function TodayHub({
   favoriteTeam,
   fixtures,
   onOpenFixture,
+  onOpenReplays,
   state,
 }: TodayHubProps) {
   const buckets = {
@@ -91,7 +93,14 @@ export function TodayHub({
         <a aria-label="MatchSense home" href="/">
           Match<span>Sense</span>
         </a>
-        <span>World Cup match desk</span>
+        <div>
+          <span>World Cup match desk</span>
+          {onOpenReplays ? (
+            <button onClick={onOpenReplays} type="button">
+              Recorded replays
+            </button>
+          ) : null}
+        </div>
       </header>
       <section className="ms-today-hero">
         <div>

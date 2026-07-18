@@ -1,246 +1,136 @@
+import {
+  normalizeFixture,
+  normalizeMoment,
+  type ProductApi,
+} from "./live-api.js";
+import type { LiveMoment, LiveSnapshot } from "./product-state.js";
+
 type JsonObject = Record<string, unknown>;
 
-export interface MatchMemoryMomentRecord {
-  eventTeam: string | null;
-  familyId: string;
-  identity: string;
-  kind: string;
-  minute: string;
-  player: { displayName: string | null; id: string } | null;
-  revision: number;
-  score: { away: number; home: number };
-  status: string;
-}
-
-export interface MatchMemoryReplayRecord {
-  available: boolean;
-  fixtureRoute: string;
-  kind: "canonical_timeline" | "experience";
-  momentRouteTemplate: string;
-  restartable: boolean;
-  runId: string | null;
-  templateId: string | null;
-  templateVersion: number | null;
-}
-
-export interface MatchMemoryRecord {
+export interface VerifiedMemoryTimelineEvent {
   createdAt: string;
-  fanId: string;
-  fixtureId: string;
-  mode: "demo" | "live";
-  payload: {
-    awayTeam: string;
-    decidedBy: string | null;
-    finalizedAt: string;
-    fixtureId: string;
-    homeTeam: string;
-    keyMoments: MatchMemoryMomentRecord[];
-    kickoffAt: string;
-    mode: "demo" | "live";
-    provenance: "live_txline" | "synthetic_txline_shaped";
-    replay: MatchMemoryReplayRecord;
-    revision: number;
-    schemaVersion: 1;
-    score: { away: number; home: number };
-    sourceLabel: string;
-    stats: unknown;
-    summary: string;
-  };
-  revision: number;
+  eventId: string;
+  eventType: string;
+  moment: LiveMoment | null;
+  sequence: number;
 }
 
-function object(value: unknown): JsonObject | null {
+export interface VerifiedFixtureMemory {
+  archiveManifestId: string;
+  fixture: LiveSnapshot & {
+    archiveManifestId: string;
+    archiveStatus: "REPLAY_READY";
+    score: { away: number; home: number };
+  };
+  timeline: readonly VerifiedMemoryTimelineEvent[];
+}
+
+export interface MemoryApi {
+  fetchFixtureMemory(
+    fixtureId: string,
+    signal?: AbortSignal,
+  ): Promise<VerifiedFixtureMemory>;
+  fetchHistory(signal?: AbortSignal): Promise<readonly LiveSnapshot[]>;
+}
+
+function record(value: unknown): JsonObject | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonObject)
     : null;
 }
 
-function string(value: unknown) {
-  return typeof value === "string" && value.length > 0 ? value : null;
+function text(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-function nullableString(value: unknown) {
-  if (value === null) return null;
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function integer(value: unknown) {
+function integer(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
     ? value
     : null;
 }
 
-function score(value: unknown) {
-  const data = object(value);
-  const home = integer(data?.home);
-  const away = integer(data?.away);
-  return home === null || away === null ? null : { away, home };
+function canonicalPayload(value: unknown): JsonObject | null {
+  const payload = record(value);
+  if (!payload) return null;
+  const nested = record(payload.event);
+  return nested?.payload && record(nested.payload)
+    ? (record(nested.payload) as JsonObject)
+    : payload;
 }
 
-function player(value: unknown): MatchMemoryMomentRecord["player"] | undefined {
-  if (value === null) return null;
-  const data = object(value);
-  const id = string(data?.id);
-  const displayName = nullableString(data?.displayName);
-  if (!data || !id || displayName === undefined) return undefined;
-  return { displayName, id };
-}
-
-function moment(value: unknown): MatchMemoryMomentRecord | null {
-  const data = object(value);
-  const eventTeam = nullableString(data?.eventTeam);
-  const familyId = string(data?.familyId);
-  const identity = string(data?.identity);
-  const kind = string(data?.kind);
-  const minute = string(data?.minute);
-  const parsedPlayer = player(data?.player);
-  const revision = integer(data?.revision);
-  const parsedScore = score(data?.score);
-  const status = string(data?.status);
+function normalizeTimelineEvent(
+  value: unknown,
+  fixture: LiveSnapshot,
+): VerifiedMemoryTimelineEvent | null {
+  const data = record(value);
+  const createdAt = text(data?.createdAt);
+  const eventId = text(data?.eventId);
+  const eventType = text(data?.eventType);
+  const sequence = integer(data?.sequence);
+  const payload = canonicalPayload(data?.payload);
   if (
     !data ||
-    eventTeam === undefined ||
-    !familyId ||
-    !identity ||
-    !kind ||
-    !minute ||
-    parsedPlayer === undefined ||
-    revision === null ||
-    !parsedScore ||
-    !status
-  ) {
-    return null;
-  }
-  return {
-    eventTeam,
-    familyId,
-    identity,
-    kind,
-    minute,
-    player: parsedPlayer,
-    revision,
-    score: parsedScore,
-    status,
-  };
-}
-
-function replay(value: unknown): MatchMemoryReplayRecord | null {
-  const data = object(value);
-  const fixtureRoute = string(data?.fixtureRoute);
-  const kind = data?.kind;
-  const momentRouteTemplate = string(data?.momentRouteTemplate);
-  const runId = nullableString(data?.runId);
-  const templateId = nullableString(data?.templateId);
-  const templateVersion =
-    data?.templateVersion === null
-      ? null
-      : (integer(data?.templateVersion) ?? undefined);
-  if (
-    !data ||
-    typeof data.available !== "boolean" ||
-    !fixtureRoute ||
-    (kind !== "canonical_timeline" && kind !== "experience") ||
-    !momentRouteTemplate ||
-    typeof data.restartable !== "boolean" ||
-    runId === undefined ||
-    templateId === undefined ||
-    templateVersion === undefined
-  ) {
-    return null;
-  }
-  return {
-    available: data.available,
-    fixtureRoute,
-    kind,
-    momentRouteTemplate,
-    restartable: data.restartable,
-    runId,
-    templateId,
-    templateVersion,
-  };
-}
-
-export function normalizeMatchMemory(value: unknown): MatchMemoryRecord | null {
-  const data = object(value);
-  const payload = object(data?.payload);
-  const createdAt = string(data?.createdAt);
-  const fanId = string(data?.fanId);
-  const fixtureId = string(data?.fixtureId);
-  const mode = data?.mode;
-  const revision = integer(data?.revision);
-  const awayTeam = string(payload?.awayTeam);
-  const decidedBy = nullableString(payload?.decidedBy);
-  const finalizedAt = string(payload?.finalizedAt);
-  const payloadFixtureId = string(payload?.fixtureId);
-  const homeTeam = string(payload?.homeTeam);
-  const kickoffAt = string(payload?.kickoffAt);
-  const payloadMode = payload?.mode;
-  const provenance = payload?.provenance;
-  const parsedReplay = replay(payload?.replay);
-  const payloadRevision = integer(payload?.revision);
-  const parsedScore = score(payload?.score);
-  const sourceLabel = string(payload?.sourceLabel);
-  const summary = string(payload?.summary);
-  const rawMoments = payload?.keyMoments;
-  const keyMoments = Array.isArray(rawMoments) ? rawMoments.map(moment) : null;
-  if (
-    !data ||
-    !payload ||
     !createdAt ||
-    !fanId ||
-    !fixtureId ||
-    (mode !== "demo" && mode !== "live") ||
-    revision === null ||
-    !awayTeam ||
-    decidedBy === undefined ||
-    !finalizedAt ||
-    payloadFixtureId !== fixtureId ||
-    !homeTeam ||
-    !keyMoments ||
-    keyMoments.some((item) => item === null) ||
-    !kickoffAt ||
-    payloadMode !== mode ||
-    (provenance !== "live_txline" &&
-      provenance !== "synthetic_txline_shaped") ||
-    !parsedReplay ||
-    payloadRevision !== revision ||
-    payload?.schemaVersion !== 1 ||
-    !parsedScore ||
-    !sourceLabel ||
-    !summary
+    !eventId ||
+    !eventType ||
+    sequence === null ||
+    !payload
   ) {
     return null;
   }
+  const nestedEvent = record(payload.event);
+  const rawMoment = payload.moment ?? nestedEvent?.moment;
   return {
     createdAt,
-    fanId,
-    fixtureId,
-    mode,
-    payload: {
-      awayTeam,
-      decidedBy,
-      finalizedAt,
-      fixtureId: payloadFixtureId,
-      homeTeam,
-      keyMoments: keyMoments as MatchMemoryMomentRecord[],
-      kickoffAt,
-      mode,
-      provenance,
-      replay: parsedReplay,
-      revision: payloadRevision,
-      schemaVersion: 1,
-      score: parsedScore,
-      sourceLabel,
-      stats: payload.stats ?? null,
-      summary,
-    },
-    revision,
+    eventId,
+    eventType,
+    moment:
+      rawMoment === undefined ? null : normalizeMoment(rawMoment, fixture),
+    sequence,
   };
 }
 
-async function getJson(url: string, signal?: AbortSignal) {
-  const response = await fetch(url, {
-    credentials: "same-origin",
+export function normalizeVerifiedFixtureMemory(
+  value: unknown,
+): VerifiedFixtureMemory | null {
+  const root = record(value);
+  const memory = record(root?.memory);
+  const fixture = normalizeFixture(memory?.fixture);
+  if (
+    !memory ||
+    !fixture ||
+    !fixture.archiveManifestId ||
+    fixture.archiveStatus !== "REPLAY_READY" ||
+    (fixture.lifecycle !== "FINAL" && fixture.lifecycle !== "FINAL_REVISED") ||
+    fixture.mode !== "recorded" ||
+    fixture.provenance !== "recorded_txline_authorised" ||
+    !fixture.score ||
+    !Array.isArray(memory.timeline)
+  ) {
+    return null;
+  }
+  const timeline = memory.timeline.map((event) =>
+    normalizeTimelineEvent(event, fixture),
+  );
+  if (timeline.some((event) => event === null)) return null;
+  return {
+    archiveManifestId: fixture.archiveManifestId,
+    fixture: {
+      ...fixture,
+      archiveManifestId: fixture.archiveManifestId,
+      archiveStatus: "REPLAY_READY",
+      score: fixture.score,
+    },
+    timeline: timeline as VerifiedMemoryTimelineEvent[],
+  };
+}
+
+async function getJson(
+  url: string,
+  fetcher: typeof fetch,
+  signal?: AbortSignal,
+) {
+  const response = await fetcher(url, {
     headers: { Accept: "application/json" },
     ...(signal ? { signal } : {}),
   });
@@ -248,25 +138,54 @@ async function getJson(url: string, signal?: AbortSignal) {
   return response.json() as Promise<unknown>;
 }
 
-function invalid(): never {
-  throw new Error("Match Memory data was invalid");
+export function createMemoryApi(
+  options: { fetcher?: typeof fetch | undefined } = {},
+): MemoryApi {
+  const fetcher = options.fetcher ?? fetch;
+  return {
+    fetchFixtureMemory: async (fixtureId, signal) => {
+      const memory = normalizeVerifiedFixtureMemory(
+        await getJson(
+          `/api/v1/fixtures/${encodeURIComponent(fixtureId)}/memory`,
+          fetcher,
+          signal,
+        ),
+      );
+      if (!memory) throw new Error("Verified Match Memory data was invalid");
+      return memory;
+    },
+    fetchHistory: async (signal) => {
+      const root = record(await getJson("/api/v1/history", fetcher, signal));
+      if (!Array.isArray(root?.fixtures)) {
+        throw new Error("Verified history data was invalid");
+      }
+      return root.fixtures.flatMap((entry) => {
+        const fixture = normalizeFixture(entry);
+        return fixture?.archiveStatus === "REPLAY_READY" &&
+          (fixture.lifecycle === "FINAL" ||
+            fixture.lifecycle === "FINAL_REVISED") &&
+          fixture.mode === "recorded" &&
+          fixture.provenance === "recorded_txline_authorised"
+          ? [fixture]
+          : [];
+      });
+    },
+  };
 }
 
-export async function fetchMatchMemories(signal?: AbortSignal) {
-  const root = object(await getJson("/api/v1/memories", signal));
-  if (!Array.isArray(root?.memories)) return invalid();
-  const memories = root.memories.map(normalizeMatchMemory);
-  if (memories.some((item) => item === null)) return invalid();
-  return memories as MatchMemoryRecord[];
-}
-
-export async function fetchMatchMemory(
+export async function fetchVerifiedFixtureMemory(
   fixtureId: string,
   signal?: AbortSignal,
 ) {
-  const root = object(
-    await getJson(`/api/v1/memories/${encodeURIComponent(fixtureId)}`, signal),
-  );
-  const memory = normalizeMatchMemory(root?.memory);
-  return memory ?? invalid();
+  return createMemoryApi().fetchFixtureMemory(fixtureId, signal);
 }
+
+export async function fetchVerifiedHistory(signal?: AbortSignal) {
+  return createMemoryApi().fetchHistory(signal);
+}
+
+/** Kept as a typed seam for surfaces that already inject the fixture client. */
+export type FixtureMemoryProductApi = Pick<
+  ProductApi,
+  "fetchFixture" | "fetchFixtures"
+>;

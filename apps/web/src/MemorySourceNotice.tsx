@@ -1,32 +1,35 @@
-export type MemoryDataSource = "loading" | "local-fallback" | "server";
+export type MemoryDataSource = "loading" | "archive-verified" | "unavailable";
 
 export function MemorySourceNotice({ source }: { source: MemoryDataSource }) {
   if (source === "loading") {
     return (
       <p className="memory-source-notice" data-source="loading" role="status">
-        SYNCING YOUR MATCH MEMORIES…
+        OPENING VERIFIED MATCH MEMORY…
       </p>
     );
   }
-  if (source === "local-fallback") {
+  if (source === "unavailable") {
     return (
       <aside
-        className="memory-source-notice memory-source-notice--fallback"
-        data-source="local-fallback"
+        className="memory-source-notice memory-source-notice--unavailable"
+        data-source="unavailable"
         role="status"
       >
-        <strong>OFFLINE DEVICE FALLBACK</strong>
+        <strong>VERIFIED MEMORY UNAVAILABLE</strong>
         <span>
-          Showing this device&apos;s last saved copy because server memory is
-          unavailable.
+          MatchSense will not replace an unavailable archive with a browser-made
+          memory.
         </span>
       </aside>
     );
   }
   return (
-    <p className="memory-source-notice" data-source="server">
-      <strong>Synced to your fan profile</strong>
-      <span> Final truth and key Moments come from the MatchSense server.</span>
+    <p className="memory-source-notice" data-source="archive-verified">
+      <strong>ARCHIVE VERIFIED</strong>
+      <span>
+        {" "}
+        Final truth and key Moments come from a TxLINE-backed archive.
+      </span>
     </p>
   );
 }

@@ -15,6 +15,7 @@ export interface MatchHubProps {
   favoriteTeam: string | null;
   fixture: LiveSnapshot | null;
   onBack?: (() => void) | undefined;
+  onOpenMoment?: ((identity: string) => void) | undefined;
   state: MatchHubState;
 }
 
@@ -53,6 +54,7 @@ export function MatchHub({
   favoriteTeam,
   fixture,
   onBack,
+  onOpenMoment,
   state,
 }: MatchHubProps) {
   if (state === "loading") {
@@ -93,6 +95,7 @@ export function MatchHub({
   );
   const isLive = status === "LIVE";
   const lastEvent = fixture.lastEvent;
+  const score = fixture.score;
 
   return (
     <main className="ms-match-hub" id="main-content">
@@ -124,12 +127,18 @@ export function MatchHub({
             <b>{home.name}</b>
             <small>{home.code}</small>
           </div>
-          <strong>
-            <span>{fixture.score.home}</span>
-            <i>—</i>
-            <span>{fixture.score.away}</span>
-            <small>{fixture.minute}</small>
-          </strong>
+          {score ? (
+            <strong>
+              <span>{score.home}</span>
+              <i>—</i>
+              <span>{score.away}</span>
+              <small>{fixture.minute}</small>
+            </strong>
+          ) : (
+            <span className="ms-match-hub-score-pending">
+              SCORE NOT PUBLISHED
+            </span>
+          )}
           <div>
             <TeamFlag size="hero" team={away} />
             <b>{away.name}</b>
@@ -194,6 +203,14 @@ export function MatchHub({
               </span>
             </div>
             <em>{lastEvent.status}</em>
+            {onOpenMoment ? (
+              <button
+                onClick={() => onOpenMoment(lastEvent.identity)}
+                type="button"
+              >
+                Open current Moment
+              </button>
+            ) : null}
           </article>
         ) : (
           <p className="ms-match-hub-no-event">

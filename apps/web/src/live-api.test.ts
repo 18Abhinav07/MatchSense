@@ -93,6 +93,71 @@ describe("live product API normalization", () => {
     expect(fixture?.phase).toBeUndefined();
   });
 
+  it("normalizes an archive-qualified durable fixture without inventing a score", () => {
+    const fixture = normalizeFixture({
+      archiveManifestId: "archive-2026-final",
+      fixtureId: "fx-final",
+      lifecycle: "final",
+      mode: "live",
+      projection: {
+        payload: {
+          lastEvent: {
+            eventTeam: "ARG",
+            id: "goal-family",
+            identity: "goal-family:4",
+            kind: "goal",
+            minute: "81'",
+            revision: 4,
+            score: { away: 1, home: 2 },
+            status: "confirmed",
+          },
+          minute: "FT",
+          phase: "full_time",
+          score: { away: 1, home: 2 },
+        },
+        revision: 9,
+        sourceSequence: "1026",
+        updatedAt: "2026-07-18T15:00:00.000Z",
+      },
+      provenance: "live_txline",
+      replayReady: true,
+      scheduledAt: "2026-07-18T12:00:00.000Z",
+      teams: { away: "FRA", home: "ARG" },
+    });
+
+    expect(fixture).toMatchObject({
+      archiveStatus: "REPLAY_READY",
+      awayTeam: "FRA",
+      fixtureId: "fx-final",
+      homeTeam: "ARG",
+      lifecycle: "FINAL",
+      mode: "live",
+      provenance: "live_txline",
+      score: { away: 1, home: 2 },
+    });
+    expect(fixture?.lastEvent?.identity).toBe("goal-family:4");
+  });
+
+  it("keeps a durable scheduled fixture scoreless when no projection exists", () => {
+    const fixture = normalizeFixture({
+      fixtureId: "fx-scheduled",
+      lifecycle: "scheduled",
+      mode: "live",
+      projection: null,
+      provenance: "live_txline",
+      replayReady: false,
+      scheduledAt: "2026-07-19T12:00:00.000Z",
+      teams: { away: "MEX", home: "ARG" },
+    });
+
+    expect(fixture).toMatchObject({
+      awayTeam: "MEX",
+      homeTeam: "ARG",
+      lifecycle: "SCHEDULED",
+      score: null,
+    });
+  });
+
   it("normalizes a canonical SSE Moment without losing its revision identity", () => {
     const payload = parseCanonicalEvent(
       JSON.stringify({
@@ -181,6 +246,75 @@ describe("live product API normalization", () => {
       latest: { identity: "fixture:event:goal-1:4", status: "overturned" },
       requested: { identity: "fixture:event:goal-1:3" },
       snapshot: { score: { away: 0, home: 0 } },
+      superseded: true,
+    });
+  });
+
+  it("parses durable revision envelopes without treating revision metadata as a Moment", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              latest: {
+                createdAt: "2026-07-18T14:20:00.000Z",
+                payload: {
+                  eventTeam: "ARG",
+                  id: "goal-family",
+                  identity: "goal-family:4",
+                  kind: "var.overturned",
+                  minute: "24'",
+                  revision: 4,
+                  score: { away: 0, home: 0 },
+                  status: "overturned",
+                },
+                revision: 4,
+                sourceRecordId: "source-4",
+              },
+              requested: {
+                createdAt: "2026-07-18T14:19:00.000Z",
+                payload: {
+                  eventTeam: "ARG",
+                  id: "goal-family",
+                  identity: "goal-family:3",
+                  kind: "goal",
+                  minute: "23'",
+                  revision: 3,
+                  score: { away: 0, home: 1 },
+                  status: "confirmed",
+                },
+                revision: 3,
+                sourceRecordId: "source-3",
+              },
+              snapshot: {
+                archiveManifestId: "archive-ready",
+                fixtureId: "fixture",
+                lifecycle: "live",
+                mode: "live",
+                projection: {
+                  payload: { minute: "24'", score: { away: 0, home: 0 } },
+                  revision: 4,
+                  sourceSequence: "4",
+                  updatedAt: "2026-07-18T14:20:00.000Z",
+                },
+                provenance: "live_txline",
+                replayReady: false,
+                scheduledAt: "2026-07-18T14:00:00.000Z",
+                teams: { away: "FRA", home: "ARG" },
+              },
+              superseded: true,
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+
+    await expect(
+      fetchMomentResolution("fixture", "goal-family:3"),
+    ).resolves.toMatchObject({
+      latest: { identity: "goal-family:4", status: "overturned" },
+      requested: { identity: "goal-family:3" },
       superseded: true,
     });
   });

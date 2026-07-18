@@ -91,4 +91,19 @@ describe("TodayHub", () => {
     expect(markup).toContain("Match schedule unavailable");
     expect(markup).not.toContain("Argentina");
   });
+
+  it("offers the separate archive-backed replay library when navigation is connected", () => {
+    const markup = renderToStaticMarkup(
+      createElement(TodayHub, {
+        catalog: { teams: [] },
+        favoriteTeam: null,
+        fixtures: [],
+        onOpenFixture: () => undefined,
+        onOpenReplays: () => undefined,
+        state: "ready",
+      }),
+    );
+
+    expect(markup).toContain("Recorded replays");
+  });
 });
