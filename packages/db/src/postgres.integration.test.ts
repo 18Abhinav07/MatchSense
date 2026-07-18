@@ -171,8 +171,8 @@ describe.sequential("real PostgreSQL migration runtime", () => {
     const runtime = trackedDatabase();
 
     await expect(runtime.migrate()).resolves.toEqual({
-      appliedVersions: [1, 2, 3, 4, 5, 6],
-      currentVersion: 6,
+      appliedVersions: [1, 2, 3, 4, 5, 6, 7],
+      currentVersion: 7,
     });
     await expect(runtime.check()).resolves.toEqual({
       databaseReachable: true,
@@ -180,7 +180,7 @@ describe.sequential("real PostgreSQL migration runtime", () => {
     });
     await expect(runtime.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 6,
+      currentVersion: 7,
     });
 
     const schemas = await admin.unsafe<{ schema_name: string }[]>(
@@ -192,7 +192,7 @@ describe.sequential("real PostgreSQL migration runtime", () => {
       "SELECT version, checksum, applied_at FROM public.matchsense_schema_migrations ORDER BY version;",
     );
     expect(schemas).toHaveLength(1);
-    expect(ledger).toHaveLength(6);
+    expect(ledger).toHaveLength(7);
     expect(ledger).toEqual([
       expect.objectContaining({
         checksum: migrationCatalog[0]?.checksum,
@@ -217,6 +217,10 @@ describe.sequential("real PostgreSQL migration runtime", () => {
       expect.objectContaining({
         checksum: migrationCatalog[5]?.checksum,
         version: 6,
+      }),
+      expect.objectContaining({
+        checksum: migrationCatalog[6]?.checksum,
+        version: 7,
       }),
     ]);
     expect(ledger.every(({ applied_at }) => applied_at instanceof Date)).toBe(
@@ -452,8 +456,8 @@ VALUES (
 
     const runtime = trackedDatabase();
     await expect(runtime.migrate()).resolves.toEqual({
-      appliedVersions: [4, 5, 6],
-      currentVersion: 6,
+      appliedVersions: [4, 5, 6, 7],
+      currentVersion: 7,
     });
 
     const rows = await admin.unsafe<

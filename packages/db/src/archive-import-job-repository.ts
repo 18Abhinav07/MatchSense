@@ -23,6 +23,7 @@ export interface ArchiveImportJobInput {
 }
 
 export interface ArchiveImportJob extends ArchiveImportJobInput {
+  archiveManifestHash: string | null;
   archiveManifestId: string | null;
   attemptCount: number;
   availableAt: string;
@@ -73,6 +74,7 @@ export interface FeaturedReplayConfigInput {
 }
 
 export interface FeaturedReplayConfig {
+  archiveManifestHash: string;
   archiveManifestId: string;
   enabled: boolean;
   fixtureId: string;
@@ -81,6 +83,7 @@ export interface FeaturedReplayConfig {
 
 /** A config is readable only while its exact manifest remains replay-ready. */
 export interface FeaturedReplayReady {
+  archiveManifestHash: string;
   archiveManifestId: string;
   fixtureId: string;
   slot: string;
@@ -93,7 +96,7 @@ export interface FeaturedReplayRepository {
 
 const jobColumns = `fixture_id, home_team_id, away_team_id, kickoff_at,
 participant1_is_home, context_hash, reason, state, archive_manifest_id,
-attempt_count, last_error, available_at, claimed_by, claim_expires_at,
+archive_manifest_hash, attempt_count, last_error, available_at, claimed_by, claim_expires_at,
 source_terminal_record_id, created_at, updated_at`;
 
 function requiredString(row: QueryRow, key: string): string {
@@ -160,6 +163,7 @@ function importState(value: string): ArchiveImportJobState {
 
 function parseJob(row: QueryRow): ArchiveImportJob {
   return {
+    archiveManifestHash: nullableString(row, "archive_manifest_hash"),
     archiveManifestId: nullableString(row, "archive_manifest_id"),
     attemptCount: safeInteger(row, "attempt_count"),
     availableAt: timestamp(row, "available_at"),
@@ -244,15 +248,16 @@ ON CONFLICT (fixture_id) DO UPDATE
 SET reason = EXCLUDED.reason,
     state = 'queued',
     archive_manifest_id = NULL,
+    archive_manifest_hash = NULL,
     available_at = clock_timestamp(),
     claimed_by = NULL,
     claim_expires_at = NULL,
     last_error = NULL,
     source_terminal_record_id = EXCLUDED.source_terminal_record_id,
     updated_at = clock_timestamp()
-WHERE matchsense.archive_import_jobs.source_terminal_record_id
+WHERE EXCLUDED.reason = 'live_correction'
+  AND matchsense.archive_import_jobs.source_terminal_record_id
       IS DISTINCT FROM EXCLUDED.source_terminal_record_id
-   OR matchsense.archive_import_jobs.reason IS DISTINCT FROM EXCLUDED.reason
 RETURNING ${jobColumns};`,
           [
             input.fixtureId,
@@ -371,23 +376,26 @@ RETURNING ${jobColumns};`,
       const rows = await client.unsafe(
         `UPDATE matchsense.archive_import_jobs AS job
 SET state = 'replay_ready',
-    archive_manifest_id = $1,
+    archive_manifest_id = archive.id,
+    archive_manifest_hash = archive.delivery_manifest_hash,
     claimed_by = NULL,
     claim_expires_at = NULL,
     last_error = NULL,
     updated_at = clock_timestamp()
+FROM matchsense.archive_manifests AS archive
+JOIN matchsense.rights_grants AS grant ON grant.id = archive.rights_grant_id
 WHERE job.fixture_id = $2
   AND job.state = 'claimed'
   AND job.claimed_by = $3
   AND job.claim_expires_at > clock_timestamp()
-  AND EXISTS (
-    SELECT 1
-    FROM matchsense.archive_manifests AS archive
-    WHERE archive.id = $1
-      AND archive.fixture_id = job.fixture_id
-      AND archive.mode = 'recorded'
-      AND archive.status = 'REPLAY_READY'
-  )
+  AND archive.id = $1
+  AND archive.fixture_id = job.fixture_id
+  AND archive.mode = 'recorded'
+  AND archive.status = 'REPLAY_READY'
+  AND grant.active = true
+  AND grant.revoked_at IS NULL
+  AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())
+  AND grant.scopes @> ARRAY['replay']::text[]
 RETURNING ${jobSelectColumns()};`,
         [input.archiveManifestId, input.fixtureId, input.workerId],
       );
@@ -445,6 +453,7 @@ RETURNING ${jobColumns};`,
 
 function parseFeaturedConfig(row: QueryRow): FeaturedReplayConfig {
   return {
+    archiveManifestHash: requiredString(row, "archive_manifest_hash"),
     archiveManifestId: requiredString(row, "archive_manifest_id"),
     enabled: boolean(row, "enabled"),
     fixtureId: requiredString(row, "fixture_id"),
@@ -470,50 +479,74 @@ export function createFeaturedReplayRepository(
   return {
     configure: async (input) => {
       assertFeaturedInput(input);
-      const rows = await client.unsafe(
-        `INSERT INTO matchsense.featured_replay_configs (
-  slot, fixture_id, archive_manifest_id, enabled
+      return client.begin(async (transaction) => {
+        const rows = await transaction.unsafe(
+          `INSERT INTO matchsense.featured_replay_configs (
+  slot, fixture_id, archive_manifest_id, archive_manifest_hash, enabled
 )
-VALUES ($1, $2, $3, $4)
+SELECT $1, $2, manifest.id, manifest.delivery_manifest_hash, $3
+FROM matchsense.archive_manifests AS manifest
+JOIN matchsense.rights_grants AS grant ON grant.id = manifest.rights_grant_id
+WHERE manifest.id = $4
+  AND manifest.fixture_id = $2
+  AND manifest.mode = 'recorded'
+  AND manifest.status = 'REPLAY_READY'
+  AND grant.active = true
+  AND grant.revoked_at IS NULL
+  AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())
+  AND grant.scopes @> ARRAY['replay']::text[]
 ON CONFLICT (slot) DO UPDATE
 SET fixture_id = EXCLUDED.fixture_id,
     archive_manifest_id = EXCLUDED.archive_manifest_id,
+    archive_manifest_hash = EXCLUDED.archive_manifest_hash,
     enabled = EXCLUDED.enabled,
     updated_at = clock_timestamp()
-RETURNING slot, fixture_id, archive_manifest_id, enabled;`,
-        [
-          input.slot,
-          input.fixtureId,
-          input.archiveManifestId,
-          input.enabled ?? true,
-        ],
-      );
-      if (!rows[0]) {
-        throw new Error("Featured replay configuration returned no row");
-      }
-      return parseFeaturedConfig(rows[0]);
+RETURNING slot, fixture_id, archive_manifest_id, archive_manifest_hash, enabled;`,
+          [
+            input.slot,
+            input.fixtureId,
+            input.enabled ?? true,
+            input.archiveManifestId,
+          ],
+        );
+        if (!rows[0]) {
+          throw new Error(
+            "Featured replay manifest is not current, replay-ready, and authorised",
+          );
+        }
+        return parseFeaturedConfig(rows[0]);
+      });
     },
     ready: async (slot) => {
       assertNonempty(slot, "Featured replay slot");
       const rows = await client.unsafe(
-        `SELECT config.slot, config.fixture_id, config.archive_manifest_id
+        `SELECT config.slot, config.fixture_id, config.archive_manifest_id,
+  config.archive_manifest_hash
 FROM matchsense.featured_replay_configs AS config
 JOIN matchsense.archive_import_jobs AS job
   ON job.fixture_id = config.fixture_id
 JOIN matchsense.archive_manifests AS archive
   ON archive.id = config.archive_manifest_id
+JOIN matchsense.rights_grants AS grant ON grant.id = archive.rights_grant_id
 WHERE config.slot = $1
   AND config.enabled = true
   AND job.state = 'replay_ready'
   AND job.archive_manifest_id = config.archive_manifest_id
+  AND job.archive_manifest_hash = config.archive_manifest_hash
   AND archive.fixture_id = config.fixture_id
   AND archive.mode = 'recorded'
-  AND archive.status = 'REPLAY_READY';`,
+  AND archive.status = 'REPLAY_READY'
+  AND archive.delivery_manifest_hash = config.archive_manifest_hash
+  AND grant.active = true
+  AND grant.revoked_at IS NULL
+  AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())
+  AND grant.scopes @> ARRAY['replay']::text[];`,
         [slot],
       );
       const row = rows[0];
       if (!row) return null;
       return {
+        archiveManifestHash: requiredString(row, "archive_manifest_hash"),
         archiveManifestId: requiredString(row, "archive_manifest_id"),
         fixtureId: requiredString(row, "fixture_id"),
         slot: requiredString(row, "slot"),

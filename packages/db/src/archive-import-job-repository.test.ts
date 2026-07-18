@@ -16,6 +16,7 @@ interface TestClient {
 }
 
 type ArchiveImportJob = {
+  archiveManifestHash: string | null;
   archiveManifestId: string | null;
   attemptCount: number;
   availableAt: string;
@@ -95,6 +96,7 @@ function jobRow(
   overrides: Partial<Record<string, unknown>> = {},
 ): Record<string, unknown> {
   return {
+    archive_manifest_hash: null,
     archive_manifest_id: null,
     attempt_count: 0,
     available_at: "2026-07-18T12:00:00.000Z",
@@ -117,15 +119,16 @@ function jobRow(
 }
 
 describe("archive import job repository", () => {
-  it("enqueues a frozen fixture context exactly once without rewriting it", async () => {
+  it("only requeues a changed terminal when it is an explicit live correction", async () => {
     let insertCount = 0;
     const fake = testClient((query) => {
       if (query.includes("INSERT INTO matchsense.archive_import_jobs")) {
         insertCount += 1;
         if (insertCount === 1) return [jobRow()];
-        if (insertCount === 3) {
+        if (insertCount === 4) {
           return [
             jobRow({
+              archive_manifest_hash: null,
               reason: "live_correction",
               source_terminal_record_id: "delivery-correction-1027",
               state: "queued",
@@ -153,11 +156,29 @@ describe("archive import job repository", () => {
         ...jobInput,
         homeTeamId: "ARG",
         kickoffAt: "2030-01-01T00:00:00.000Z",
+        reason: "live_correction",
       }),
     ).resolves.toMatchObject({
       fixtureId: jobInput.fixtureId,
       homeTeamId: jobInput.homeTeamId,
       kickoffAt: jobInput.kickoffAt,
+      reason: jobInput.reason,
+      sourceTerminalRecordId: jobInput.sourceTerminalRecordId,
+    });
+    await expect(
+      jobs?.enqueue({
+        ...jobInput,
+        homeTeamId: "ARG",
+        kickoffAt: "2030-01-01T00:00:00.000Z",
+        reason: "live_terminal",
+        sourceTerminalRecordId: "new-terminal-without-correction",
+      }),
+    ).resolves.toMatchObject({
+      fixtureId: jobInput.fixtureId,
+      homeTeamId: jobInput.homeTeamId,
+      kickoffAt: jobInput.kickoffAt,
+      reason: jobInput.reason,
+      sourceTerminalRecordId: jobInput.sourceTerminalRecordId,
     });
     await expect(
       jobs?.enqueue({
@@ -185,6 +206,13 @@ describe("archive import job repository", () => {
     expect(conflictUpdate).not.toContain("away_team_id = EXCLUDED");
     expect(conflictUpdate).not.toContain("kickoff_at = EXCLUDED");
     expect(conflictUpdate).not.toContain("context_hash = EXCLUDED");
+    expect(conflictUpdate).toContain("EXCLUDED.reason = 'live_correction'");
+    expect(conflictUpdate).toContain(
+      "IS DISTINCT FROM EXCLUDED.source_terminal_record_id",
+    );
+    expect(conflictUpdate).not.toContain(
+      "reason IS DISTINCT FROM EXCLUDED.reason",
+    );
   });
 
   it("claims only due queued work with a lease and SKIP LOCKED", async () => {
@@ -246,6 +274,7 @@ describe("archive import job repository", () => {
       if (query.includes("state = 'replay_ready'")) {
         return [
           jobRow({
+            archive_manifest_hash: "1".repeat(64),
             archive_manifest_id: "manifest-18237038",
             state: "replay_ready",
           }),
@@ -307,6 +336,20 @@ describe("archive import job repository", () => {
         );
       }
     }
+    const replayReady = fake.queries.find(({ query }) =>
+      query.includes("state = 'replay_ready'"),
+    );
+    expect(replayReady?.query).toContain(
+      "archive_manifest_hash = archive.delivery_manifest_hash",
+    );
+    expect(replayReady?.query).toContain(
+      "JOIN matchsense.rights_grants AS grant",
+    );
+    expect(replayReady?.query).toContain("grant.active = true");
+    expect(replayReady?.query).toContain("grant.revoked_at IS NULL");
+    expect(replayReady?.query).toContain(
+      "grant.scopes @> ARRAY['replay']::text[]",
+    );
   });
 });
 
@@ -317,6 +360,7 @@ describe("featured replay repository", () => {
       if (query.includes("INSERT INTO matchsense.featured_replay_configs")) {
         return [
           {
+            archive_manifest_hash: "1".repeat(64),
             archive_manifest_id: "manifest-18237038",
             enabled: true,
             fixture_id: jobInput.fixtureId,
@@ -327,6 +371,7 @@ describe("featured replay repository", () => {
       if (query.includes("FROM matchsense.featured_replay_configs") && ready) {
         return [
           {
+            archive_manifest_hash: "1".repeat(64),
             archive_manifest_id: "manifest-18237038",
             fixture_id: jobInput.fixtureId,
             slot: "primary",
@@ -343,10 +388,14 @@ describe("featured replay repository", () => {
         fixtureId: jobInput.fixtureId,
         slot: "primary",
       }),
-    ).resolves.toMatchObject({ slot: "primary" });
+    ).resolves.toMatchObject({
+      archiveManifestHash: "1".repeat(64),
+      slot: "primary",
+    });
     await expect(featured?.ready("primary")).resolves.toBeNull();
     ready = true;
     await expect(featured?.ready("primary")).resolves.toMatchObject({
+      archiveManifestHash: "1".repeat(64),
       archiveManifestId: "manifest-18237038",
       fixtureId: jobInput.fixtureId,
     });
@@ -358,6 +407,59 @@ describe("featured replay repository", () => {
     expect(readiness?.query).toContain("job.state = 'replay_ready'");
     expect(readiness?.query).toContain(
       "job.archive_manifest_id = config.archive_manifest_id",
+    );
+    expect(readiness?.query).toContain(
+      "job.archive_manifest_hash = config.archive_manifest_hash",
+    );
+    expect(readiness?.query).toContain(
+      "archive.delivery_manifest_hash = config.archive_manifest_hash",
+    );
+    expect(readiness?.query).toContain(
+      "JOIN matchsense.rights_grants AS grant",
+    );
+    expect(readiness?.query).toContain("grant.active = true");
+    expect(readiness?.query).toContain("grant.revoked_at IS NULL");
+    expect(readiness?.query).toContain(
+      "(grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())",
+    );
+    expect(readiness?.query).toContain(
+      "grant.scopes @> ARRAY['replay']::text[]",
+    );
+  });
+
+  it("rejects an unverified, mismatched, or unauthorised manifest before changing a featured slot", async () => {
+    const fake = testClient((query) =>
+      query.includes("INSERT INTO matchsense.featured_replay_configs")
+        ? []
+        : [],
+    );
+    const featured = db.createFeaturedReplayRepository?.(fake.client);
+
+    await expect(
+      featured?.configure({
+        archiveManifestId: "manifest-not-authorised",
+        fixtureId: jobInput.fixtureId,
+        slot: "primary",
+      }),
+    ).rejects.toThrow(
+      "Featured replay manifest is not current, replay-ready, and authorised",
+    );
+    const configure = fake.queries[0];
+    expect(configure?.query).toContain(
+      "INSERT INTO matchsense.featured_replay_configs",
+    );
+    expect(configure?.query).toContain("SELECT");
+    expect(configure?.query).toContain("manifest.id = $4");
+    expect(configure?.query).toContain("manifest.fixture_id = $2");
+    expect(configure?.query).toContain("manifest.mode = 'recorded'");
+    expect(configure?.query).toContain("manifest.status = 'REPLAY_READY'");
+    expect(configure?.query).toContain("grant.active = true");
+    expect(configure?.query).toContain("grant.revoked_at IS NULL");
+    expect(configure?.query).toContain(
+      "(grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())",
+    );
+    expect(configure?.query).toContain(
+      "grant.scopes @> ARRAY['replay']::text[]",
     );
   });
 });

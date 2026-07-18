@@ -50,7 +50,7 @@ const prefixCatalog = [
 
 describe("migration catalog and planning", () => {
   it("publishes a deterministic schema-only baseline migration", () => {
-    expect(db.migrationCatalog).toHaveLength(6);
+    expect(db.migrationCatalog).toHaveLength(7);
 
     const migration = db.migrationCatalog?.[0];
     expect(migration).toMatchObject({
@@ -214,7 +214,7 @@ describe("migration catalog and planning", () => {
   it("retires synthetic public modes and adds the authorised archive/job foundation in v4", () => {
     const migration = db.migrationCatalog?.[3];
 
-    expect(db.migrationCatalog).toHaveLength(6);
+    expect(db.migrationCatalog).toHaveLength(7);
     expect(migration).toMatchObject({
       description:
         "retire synthetic public modes and add authorised archive jobs",
@@ -318,7 +318,7 @@ describe("migration catalog and planning", () => {
   it("adds durable archive-import leases and manifest-pinned featured replay readiness in v6", () => {
     const migration = db.migrationCatalog?.[5];
 
-    expect(db.migrationCatalog).toHaveLength(6);
+    expect(db.migrationCatalog).toHaveLength(7);
     expect(migration).toMatchObject({
       description:
         "create durable archive import jobs and featured replay readiness",
@@ -351,6 +351,29 @@ describe("migration catalog and planning", () => {
     );
     expect(migration?.sql).toContain("archive_manifest_id text NOT NULL");
     expect(migration?.sql).toContain("featured_replay_configs_manifest_fk");
+  });
+
+  it("pins replay jobs and featured slots to the verified archive content hash in v7", () => {
+    const migration = db.migrationCatalog?.[6];
+
+    expect(migration).toMatchObject({
+      description: "pin replay readiness to verified archive manifest content",
+      version: 7,
+    });
+    expect(migration?.checksum).toBe(
+      createHash("sha256")
+        .update(migration?.sql ?? "")
+        .digest("hex"),
+    );
+    expect(migration?.sql).toContain("ADD COLUMN archive_manifest_hash text");
+    expect(migration?.sql).toContain("delivery_manifest_hash");
+    expect(migration?.sql).toContain(
+      "DROP CONSTRAINT IF EXISTS archive_import_jobs_replay_ready_manifest",
+    );
+    expect(migration?.sql).toContain("archive_manifest_hash IS NOT NULL");
+    expect(migration?.sql).toContain(
+      "ALTER COLUMN archive_manifest_hash SET NOT NULL",
+    );
   });
 
   it("orders pending migrations and reports a repeat run as current", () => {

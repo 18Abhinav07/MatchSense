@@ -904,6 +904,45 @@ CREATE INDEX featured_replay_configs_enabled_idx
   ON matchsense.featured_replay_configs (slot ASC)
   WHERE enabled;`.trim(),
   ),
+  defineMigration(
+    7,
+    "pin replay readiness to verified archive manifest content",
+    `ALTER TABLE matchsense.archive_import_jobs
+  ADD COLUMN archive_manifest_hash text
+    CHECK (archive_manifest_hash IS NULL OR length(archive_manifest_hash) = 64);
+
+UPDATE matchsense.archive_import_jobs AS job
+SET archive_manifest_hash = archive.delivery_manifest_hash,
+    updated_at = clock_timestamp()
+FROM matchsense.archive_manifests AS archive
+WHERE job.state = 'replay_ready'
+  AND job.archive_manifest_id = archive.id;
+
+ALTER TABLE matchsense.archive_import_jobs
+  DROP CONSTRAINT IF EXISTS archive_import_jobs_replay_ready_manifest;
+ALTER TABLE matchsense.archive_import_jobs
+  ADD CONSTRAINT archive_import_jobs_replay_ready_manifest
+    CHECK (
+      (state = 'replay_ready') = (
+        archive_manifest_id IS NOT NULL AND archive_manifest_hash IS NOT NULL
+      )
+    );
+
+ALTER TABLE matchsense.featured_replay_configs
+  ADD COLUMN archive_manifest_hash text;
+
+UPDATE matchsense.featured_replay_configs AS config
+SET archive_manifest_hash = archive.delivery_manifest_hash,
+    updated_at = clock_timestamp()
+FROM matchsense.archive_manifests AS archive
+WHERE config.archive_manifest_id = archive.id;
+
+ALTER TABLE matchsense.featured_replay_configs
+  ALTER COLUMN archive_manifest_hash SET NOT NULL;
+ALTER TABLE matchsense.featured_replay_configs
+  ADD CONSTRAINT featured_replay_configs_manifest_hash_check
+    CHECK (length(archive_manifest_hash) = 64);`.trim(),
+  ),
 ]);
 
 export function planMigrations(
