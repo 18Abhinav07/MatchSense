@@ -28,6 +28,8 @@ export { createArchiveRepository } from "./archive-repositories.js";
 export type {
   ArchiveManifest,
   ArchiveManifestStatus,
+  ArchiveFixtureKey,
+  ArchiveInvalidationInput,
   ArchiveMode,
   ArchiveProvenance,
   ArchiveRepository,
@@ -46,6 +48,7 @@ export type {
   CommentaryJobStatus,
   CompletedCommentaryJob,
   FailedCommentaryJob,
+  SupersedeCommentaryJob,
 } from "./commentary-job-repository.js";
 export {
   createCommentaryArtifactRepository,

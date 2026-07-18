@@ -45,16 +45,19 @@ export interface FailedCommentaryJob {
   workerId: string;
 }
 
+export interface SupersedeCommentaryJob {
+  familyId: string;
+  fixtureId: string;
+  mode: ArchiveMode;
+  revision: number;
+}
+
 export interface CommentaryJobRepository {
   claim(workerId: string, now: Date): Promise<CommentaryJob | null>;
   complete(input: CompletedCommentaryJob): Promise<void>;
   enqueue(input: CommentaryJobInput): Promise<CommentaryJob>;
   fail(input: FailedCommentaryJob): Promise<void>;
-  supersede(
-    fixtureId: string,
-    familyId: string,
-    revision: number,
-  ): Promise<void>;
+  supersede(input: SupersedeCommentaryJob): Promise<void>;
 }
 
 const jobColumns = `id, mode, fixture_id, family_id, moment_revision, language,
@@ -325,10 +328,10 @@ RETURNING id;`,
       if (!rows[0])
         throw new Error("Commentary job is not claimed by this worker");
     },
-    supersede: async (fixtureId, familyId, revision) => {
-      assertNonempty(fixtureId, "Fixture id");
-      assertNonempty(familyId, "Moment family id");
-      if (!Number.isSafeInteger(revision) || revision < 1) {
+    supersede: async (input) => {
+      assertNonempty(input.fixtureId, "Fixture id");
+      assertNonempty(input.familyId, "Moment family id");
+      if (!Number.isSafeInteger(input.revision) || input.revision < 1) {
         throw new Error("Moment revision must be a positive safe integer");
       }
       await client.unsafe(
@@ -338,9 +341,9 @@ SET status = 'superseded',
     claimed_at = NULL,
     claim_expires_at = NULL,
     updated_at = clock_timestamp()
-WHERE fixture_id = $1 AND family_id = $2 AND moment_revision = $3
+WHERE mode = $1 AND fixture_id = $2 AND family_id = $3 AND moment_revision = $4
   AND status <> 'superseded';`,
-        [fixtureId, familyId, revision],
+        [input.mode, input.fixtureId, input.familyId, input.revision],
       );
     },
   };

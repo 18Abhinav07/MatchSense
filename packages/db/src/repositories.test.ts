@@ -664,34 +664,51 @@ describe("source stream state repository", () => {
 });
 
 describe("commentary artifact repository", () => {
-  it("gets and upserts fixture-scoped MP3 bytes", async () => {
-    const row = {
+  it("keeps independently versioned commentary artifacts for the same Moment", async () => {
+    const legacyRow = {
       bytes: new Uint8Array([1, 2, 3]),
       created_at: "2026-07-17T12:02:00.000Z",
       fixture_id: "fx-1",
       id: "commentary-1",
       language: "en-IN",
       media_type: "audio/mpeg",
-      mode: "demo",
+      mode: "recorded",
       moment_id: "moment-1",
       moment_revision: "1",
+      template_version: "legacy-v1",
       updated_at: "2026-07-17T12:02:00.000Z",
       voice: "kore",
     };
-    const fake = testClient(() => [row]);
+    const factualRow = {
+      ...legacyRow,
+      bytes: new Uint8Array([4, 5, 6]),
+      id: "commentary-factual-v2",
+      template_version: "factual-v2",
+    };
+    const fake = testClient((_query, parameters) =>
+      parameters.at(-1) === "factual-v2" ? [factualRow] : [legacyRow],
+    );
     const repository = db.createCommentaryArtifactRepository?.(fake.client);
     const key = {
       fixtureId: "fx-1",
       language: "en-IN",
-      mode: "demo",
+      mode: "recorded",
       momentId: "moment-1",
       momentRevision: 1,
+      templateVersion: "legacy-v1",
       voice: "kore",
     };
 
     await expect(repository?.get(key)).resolves.toMatchObject({
       bytes: new Uint8Array([1, 2, 3]),
       momentRevision: 1,
+    });
+    await expect(
+      repository?.get({ ...key, templateVersion: "factual-v2" }),
+    ).resolves.toMatchObject({
+      bytes: new Uint8Array([4, 5, 6]),
+      id: "commentary-factual-v2",
+      templateVersion: "factual-v2",
     });
     await expect(
       repository?.upsert({
@@ -701,8 +718,8 @@ describe("commentary artifact repository", () => {
         mediaType: "audio/mpeg",
       }),
     ).resolves.toMatchObject({ id: "commentary-1" });
-    expect(fake.queries[1]?.query).toContain(
-      "ON CONFLICT (mode, fixture_id, moment_id, moment_revision, language, voice)",
+    expect(fake.queries[2]?.query).toContain(
+      "ON CONFLICT (mode, fixture_id, moment_id, moment_revision, language, voice, template_version)",
     );
   });
 });

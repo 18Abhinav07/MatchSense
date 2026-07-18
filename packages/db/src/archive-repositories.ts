@@ -76,6 +76,15 @@ export interface VerifyArchiveInput {
   terminalDeliveryId: string;
 }
 
+export interface ArchiveFixtureKey {
+  fixtureId: string;
+  mode: ArchiveMode;
+}
+
+export interface ArchiveInvalidationInput extends ArchiveFixtureKey {
+  reason: string;
+}
+
 export interface ArchiveManifest {
   createdAt: string;
   deliveryManifestHash: string;
@@ -95,11 +104,11 @@ export interface ArchiveManifest {
 
 export interface ArchiveRepository {
   insertDelivery(input: DurableSourceDelivery): Promise<InsertDeliveryResult>;
-  invalidateArchive(fixtureId: string, reason: string): Promise<void>;
+  invalidateArchive(input: ArchiveInvalidationInput): Promise<void>;
   orderedDeliveries(
-    fixtureId: string,
+    input: ArchiveFixtureKey,
   ): Promise<readonly DurableSourceDelivery[]>;
-  replayReady(fixtureId: string): Promise<ArchiveManifest | null>;
+  replayReady(input: ArchiveFixtureKey): Promise<ArchiveManifest | null>;
   upsertRightsGrant(input: RightsGrantWrite): Promise<RightsGrant>;
   verifyArchive(input: VerifyArchiveInput): Promise<ArchiveManifest>;
 }
@@ -112,6 +121,10 @@ response_hash, rights_grant_id, raw_retention, canonical_eligible`;
 const manifestColumns = `id, mode, fixture_id, status, reducer_version,
 delivery_manifest_hash, projection_hash, terminal_delivery_id, rights_grant_id,
 invalidation_reason, invalidated_at, verified_at, created_at, updated_at`;
+const manifestSelectColumns = manifestColumns
+  .split(",")
+  .map((column) => `manifest.${column.trim()}`)
+  .join(", ");
 
 function requiredString(row: QueryRow, key: string): string {
   const value = row[key];
@@ -188,6 +201,10 @@ function assertSha256(value: string, label: string) {
 
 function assertNonempty(value: string, label: string) {
   if (value.trim().length === 0) throw new Error(`${label} is required`);
+}
+
+function assertArchiveFixtureKey(input: ArchiveFixtureKey) {
+  assertNonempty(input.fixtureId, "Fixture id");
 }
 
 function provenanceFor(mode: ArchiveMode): ArchiveProvenance {
@@ -295,6 +312,21 @@ function deliveryManifestHash(
   return createHash("sha256").update(manifest).digest("hex");
 }
 
+function isAuthoritativeTerminalDelivery(
+  delivery: DurableSourceDelivery,
+): boolean {
+  if (!delivery.canonicalEligible || delivery.payload === null) return false;
+  if (typeof delivery.payload !== "object" || Array.isArray(delivery.payload)) {
+    return false;
+  }
+  const payload = delivery.payload as Record<string, unknown>;
+  return (
+    payload.Action === "game_finalised" &&
+    payload.StatusId === 100 &&
+    payload.Confirmed !== false
+  );
+}
+
 async function orderedFixtureDeliveries(
   executor: SqlExecutor,
   mode: ArchiveMode,
@@ -356,24 +388,20 @@ RETURNING id, reference, scopes, active, raw_retention_until, expires_at,
       assertDelivery(input);
       return client.begin(async (transaction) => {
         const grantRows = await transaction.unsafe(
-          `SELECT active, expires_at, raw_retention_until, revoked_at
+          `SELECT id
 FROM matchsense.rights_grants
 WHERE id = $1
+  AND active = true
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > clock_timestamp())
+  AND (raw_retention_until IS NULL OR raw_retention_until > clock_timestamp())
+  AND scopes @> ARRAY['raw_retention']::text[]
 FOR KEY SHARE;`,
           [input.rightsGrantId],
         );
-        const grant = grantRows[0];
-        if (
-          !grant ||
-          grant.active !== true ||
-          grant.revoked_at !== null ||
-          (grant.expires_at instanceof Date &&
-            grant.expires_at <= new Date()) ||
-          (grant.raw_retention_until instanceof Date &&
-            grant.raw_retention_until <= new Date())
-        ) {
+        if (!grantRows[0]) {
           throw new Error(
-            "Authorised raw retention grant is inactive or expired",
+            "Authorised raw retention grant is inactive, expired, revoked, or missing raw-retention scope",
           );
         }
 
@@ -423,14 +451,14 @@ RETURNING ${sourceDeliveryColumns};`,
             };
       });
     },
-    orderedDeliveries: async (fixtureId) => {
-      assertNonempty(fixtureId, "Fixture id");
+    orderedDeliveries: async (input) => {
+      assertArchiveFixtureKey(input);
       const rows = await client.unsafe(
         `SELECT ${sourceDeliveryColumns}
 FROM matchsense.raw_source_records
-WHERE fixture_id = $1 AND mode IN ('live', 'recorded')
-ORDER BY mode ASC, ordering_key ASC, delivery_key ASC, id ASC;`,
-        [fixtureId],
+WHERE mode = $1 AND fixture_id = $2
+ORDER BY ordering_key ASC, delivery_key ASC, id ASC;`,
+        [input.mode, input.fixtureId],
       );
       return rows.map(parseDelivery);
     },
@@ -443,6 +471,22 @@ ORDER BY mode ASC, ordering_key ASC, delivery_key ASC, id ASC;`,
       assertSha256(input.projectionHash, "Projection hash");
 
       return client.begin(async (transaction) => {
+        const grantRows = await transaction.unsafe(
+          `SELECT id
+FROM matchsense.rights_grants
+WHERE id = $1
+  AND active = true
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > clock_timestamp())
+  AND scopes @> ARRAY['replay']::text[]
+FOR KEY SHARE;`,
+          [input.rightsGrantId],
+        );
+        if (!grantRows[0]) {
+          throw new Error(
+            "Archive replay grant is inactive, expired, revoked, or missing replay scope",
+          );
+        }
         const deliveries = await orderedFixtureDeliveries(
           transaction,
           input.mode,
@@ -462,12 +506,15 @@ ORDER BY mode ASC, ordering_key ASC, delivery_key ASC, id ASC;`,
             "Archive contains delivery without one authorised raw grant",
           );
         }
-        const terminal = deliveries.find(
-          (delivery) => delivery.id === input.terminalDeliveryId,
-        );
-        if (!terminal || !terminal.canonicalEligible) {
+        const terminal = deliveries.at(-1);
+        if (!terminal || terminal.id !== input.terminalDeliveryId) {
           throw new Error(
-            "Archive terminal delivery is not canonical eligible",
+            "Archive terminal delivery must be the final ordered delivery",
+          );
+        }
+        if (!isAuthoritativeTerminalDelivery(terminal)) {
+          throw new Error(
+            "Archive terminal delivery must be confirmed game_finalised with StatusId 100",
           );
         }
 
@@ -534,28 +581,36 @@ FROM unnest(
         return manifest;
       });
     },
-    invalidateArchive: async (fixtureId, reason) => {
-      assertNonempty(fixtureId, "Fixture id");
-      assertNonempty(reason, "Archive invalidation reason");
+    invalidateArchive: async (input) => {
+      assertArchiveFixtureKey(input);
+      assertNonempty(input.reason, "Archive invalidation reason");
       await client.unsafe(
         `UPDATE matchsense.archive_manifests
 SET status = 'REPLAY_INVALIDATED',
-    invalidation_reason = $2,
+    invalidation_reason = $3,
     invalidated_at = clock_timestamp(),
     updated_at = clock_timestamp()
-WHERE fixture_id = $1 AND status = 'REPLAY_READY';`,
-        [fixtureId, reason],
+WHERE mode = $1 AND fixture_id = $2 AND status = 'REPLAY_READY';`,
+        [input.mode, input.fixtureId, input.reason],
       );
     },
-    replayReady: async (fixtureId) => {
-      assertNonempty(fixtureId, "Fixture id");
+    replayReady: async (input) => {
+      assertArchiveFixtureKey(input);
+      if (input.mode !== "recorded") return null;
       const rows = await client.unsafe(
-        `SELECT ${manifestColumns}
-FROM matchsense.archive_manifests
-WHERE fixture_id = $1 AND mode = 'recorded' AND status = 'REPLAY_READY'
-ORDER BY verified_at DESC, id ASC
+        `SELECT ${manifestSelectColumns}
+FROM matchsense.archive_manifests AS manifest
+JOIN matchsense.rights_grants AS grant ON grant.id = manifest.rights_grant_id
+WHERE manifest.mode = $1
+  AND manifest.fixture_id = $2
+  AND manifest.status = 'REPLAY_READY'
+  AND grant.active = true
+  AND grant.revoked_at IS NULL
+  AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())
+  AND grant.scopes @> ARRAY['replay']::text[]
+ORDER BY manifest.verified_at DESC, manifest.id ASC
 LIMIT 1;`,
-        [fixtureId],
+        [input.mode, input.fixtureId],
       );
       return rows[0] ? parseManifest(rows[0]) : null;
     },

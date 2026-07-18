@@ -251,6 +251,37 @@ describe("migration catalog and planning", () => {
     expect(migration?.sql).toContain(
       "source-only delivery cannot create canonical truth",
     );
+    expect(migration?.sql).toContain(
+      "reconciliation delivery cannot create Moment or outbox effects",
+    );
+    expect(migration?.sql).toContain(
+      "TG_TABLE_NAME IN ('moment_revisions', 'outbox')",
+    );
+  });
+
+  it("temporarily suspends immutable raw rows only while backfilling a populated v3 database", () => {
+    const migration = db.migrationCatalog?.[3];
+    const sql = migration?.sql ?? "";
+    const suspend = sql.indexOf(
+      "DROP TRIGGER IF EXISTS raw_source_records_immutable",
+    );
+    const demoRawDelete = sql.indexOf(
+      "DELETE FROM matchsense.raw_source_records WHERE mode = 'demo'",
+    );
+    const legacyBackfill = sql.indexOf(
+      "UPDATE matchsense.raw_source_records\nSET delivery_key = payload_hash",
+    );
+    const restore = sql.lastIndexOf(
+      "CREATE TRIGGER raw_source_records_immutable",
+    );
+
+    expect(suspend).toBeGreaterThanOrEqual(0);
+    expect(suspend).toBeLessThan(demoRawDelete);
+    expect(suspend).toBeLessThan(legacyBackfill);
+    expect(restore).toBeGreaterThan(legacyBackfill);
+    expect(sql).toContain(
+      "BEFORE UPDATE OR DELETE ON matchsense.raw_source_records",
+    );
   });
 
   it("orders pending migrations and reports a repeat run as current", () => {

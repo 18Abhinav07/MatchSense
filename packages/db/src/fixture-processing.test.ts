@@ -206,4 +206,66 @@ describe("atomic fixture envelope processing", () => {
       ),
     ).toBe(false);
   });
+
+  it("rejects reconciliation plans that attempt a Moment or push outbox side effect", async () => {
+    const fake = fakeClient();
+    const repository = createFixtureTruthRepository(fake.client);
+
+    await expect(
+      repository.processSourceEnvelope({
+        derive: () => ({
+          event: {
+            id: "reconcile-event-1",
+            payload: { correction: true },
+            type: "fixture.reconciled",
+          },
+          moment: {
+            id: "reconcile-goal-1",
+            kind: "goal",
+            payload: { shouldNeverExist: true },
+            revision: 1,
+          },
+          outbox: [
+            {
+              id: "reconcile-push-1",
+              idempotencyKey: "reconcile-goal-1:push",
+              payload: { shouldNeverExist: true },
+              topic: "push.candidate",
+            },
+          ],
+          projection: { payload: { corrected: true }, revision: 1 },
+        }),
+        fixtureId: "fixture-1",
+        mode: "live",
+        raw: {
+          canonicalEligible: true,
+          dedupeKey: "txline:reconcile-1",
+          deliveryIntent: "reconcile",
+          id: "raw-reconcile-1",
+          occurredAt: "2026-07-17T12:01:00.000Z",
+          payload: { correction: true },
+          payloadHash: "d".repeat(64),
+          provenance: "live_txline",
+          receivedAt: "2026-07-17T12:01:00.000Z",
+          source: "txline",
+          sourceRecordId: "reconcile-1",
+          sourceSequence: "621",
+        },
+        sourceFence: {
+          fencingToken: 1,
+          holderId: "txline-worker",
+          source: "txline",
+          streamKey: "scores:mainnet",
+        },
+      }),
+    ).rejects.toThrow(
+      "Reconciliation delivery cannot create Moments or outbox effects",
+    );
+
+    expect(
+      fake.queries.some(({ query }) =>
+        /canonical_moments|moment_revisions|fixture_events|outbox/u.test(query),
+      ),
+    ).toBe(false);
+  });
 });

@@ -22,11 +22,7 @@ type CommentaryJobRepository = {
   complete(input: Record<string, unknown>): Promise<void>;
   enqueue(input: Record<string, unknown>): Promise<unknown>;
   fail(input: Record<string, unknown>): Promise<void>;
-  supersede(
-    fixtureId: string,
-    familyId: string,
-    revision: number,
-  ): Promise<void>;
+  supersede(input: Record<string, unknown>): Promise<void>;
 };
 
 type DatabaseModuleContract = {
@@ -181,11 +177,12 @@ describe("commentary job repository", () => {
     ).resolves.toMatchObject({
       id: jobInput.id,
     });
-    await jobs?.supersede(
-      jobInput.fixtureId,
-      jobInput.familyId,
-      jobInput.momentRevision,
-    );
+    await jobs?.supersede({
+      fixtureId: jobInput.fixtureId,
+      mode: jobInput.mode,
+      familyId: jobInput.familyId,
+      revision: jobInput.momentRevision,
+    });
     await jobs?.fail({
       error: "provider timeout",
       jobId: jobInput.id,
@@ -198,6 +195,15 @@ describe("commentary job repository", () => {
     expect(
       fake.queries.some(({ query }) => query.includes("status = 'superseded'")),
     ).toBe(true);
+    const supersede = fake.queries.find(({ query }) =>
+      query.includes("status = 'superseded'"),
+    );
+    expect(supersede?.parameters).toEqual([
+      jobInput.mode,
+      jobInput.fixtureId,
+      jobInput.familyId,
+      jobInput.momentRevision,
+    ]);
     expect(
       fake.queries.some(({ query }) => query.includes("status = 'failed'")),
     ).toBe(true);

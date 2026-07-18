@@ -459,7 +459,13 @@ CREATE INDEX match_memories_fan_latest_idx
   defineMigration(
     4,
     "retire synthetic public modes and add authorised archive jobs",
-    `-- The synthetic Experience/Demo records are not a public product data source.
+    `-- Migration 2 intentionally makes raw source rows immutable. Version 4
+-- needs a one-transaction maintenance window to remove synthetic rows and
+-- annotate legacy rows; the trigger is restored before this migration commits.
+DROP TRIGGER IF EXISTS raw_source_records_immutable
+  ON matchsense.raw_source_records;
+
+-- The synthetic Experience/Demo records are not a public product data source.
 -- They are removed before the product mode constraints are tightened.
 DELETE FROM matchsense.push_deliveries WHERE mode = 'demo';
 DELETE FROM matchsense.commentary_artifacts WHERE mode = 'demo';
@@ -531,6 +537,10 @@ SET delivery_key = payload_hash,
     raw_retention = 'normalised_only',
     canonical_eligible = true
 WHERE delivery_key IS NULL;
+
+CREATE TRIGGER raw_source_records_immutable
+BEFORE UPDATE OR DELETE ON matchsense.raw_source_records
+FOR EACH ROW EXECUTE FUNCTION matchsense.reject_raw_source_record_mutation();
 
 ALTER TABLE matchsense.raw_source_records
   ALTER COLUMN delivery_key SET NOT NULL,
@@ -646,6 +656,17 @@ BEGIN
       AND source_record.canonical_eligible = false
   ) THEN
     RAISE EXCEPTION 'source-only delivery cannot create canonical truth';
+  END IF;
+  IF TG_TABLE_NAME IN ('moment_revisions', 'outbox')
+    AND NEW.source_record_id IS NOT NULL AND EXISTS (
+      SELECT 1
+      FROM matchsense.raw_source_records AS source_record
+      WHERE source_record.mode = NEW.mode
+        AND source_record.fixture_id = NEW.fixture_id
+        AND source_record.id = NEW.source_record_id
+        AND source_record.delivery_intent = 'reconcile'
+    ) THEN
+    RAISE EXCEPTION 'reconciliation delivery cannot create Moment or outbox effects';
   END IF;
   RETURN NEW;
 END;

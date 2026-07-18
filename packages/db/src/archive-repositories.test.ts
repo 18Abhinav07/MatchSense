@@ -17,9 +17,11 @@ interface TestClient {
 
 type ArchiveRepository = {
   insertDelivery(input: Record<string, unknown>): Promise<unknown>;
-  invalidateArchive(fixtureId: string, reason: string): Promise<void>;
-  orderedDeliveries(fixtureId: string): Promise<readonly unknown[]>;
-  replayReady(fixtureId: string): Promise<unknown>;
+  invalidateArchive(input: Record<string, unknown>): Promise<void>;
+  orderedDeliveries(
+    input: Record<string, unknown>,
+  ): Promise<readonly unknown[]>;
+  replayReady(input: Record<string, unknown>): Promise<unknown>;
   verifyArchive(input: Record<string, unknown>): Promise<unknown>;
 };
 
@@ -57,7 +59,12 @@ const terminalDelivery = {
   deliveryKey: "d".repeat(64),
   id: "delivery-final-1026",
   orderingKey: "000000001026",
-  payload: { Action: "game_finalised", FixtureId: fixtureId, StatusId: 100 },
+  payload: {
+    Action: "game_finalised",
+    Confirmed: true,
+    FixtureId: fixtureId,
+    StatusId: 100,
+  },
   payloadHash: "e".repeat(64),
   responseHash: "f".repeat(64),
   sourceRecordId: "final-1026",
@@ -137,12 +144,14 @@ describe("archive repository", () => {
     let insertCount = 0;
     const fake = testClient((query) => {
       if (query.includes("FROM matchsense.rights_grants")) {
+        if (query.includes("ARRAY['replay']")) return [];
         return [
           {
             active: true,
             expires_at: null,
             raw_retention_until: null,
             revoked_at: null,
+            scopes: ["raw_retention", "replay"],
           },
         ];
       }
@@ -179,13 +188,37 @@ describe("archive repository", () => {
     ).toBe(false);
   });
 
-  it("publishes a replay only from an ordered authorised terminal archive and invalidates it on correction", async () => {
+  it("rejects raw archive writes when a grant lacks the raw-retention scope", async () => {
+    const fake = testClient(() => []);
+    const archive = db.createArchiveRepository?.(fake.client);
+
+    await expect(archive?.insertDelivery(sourceOnlyDelivery)).rejects.toThrow(
+      "Authorised raw retention grant is inactive, expired, revoked, or missing raw-retention scope",
+    );
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("INSERT INTO matchsense.raw_source_records"),
+      ),
+    ).toBe(false);
+  });
+
+  it("publishes a replay only from an ordered authorised terminal archive and invalidates it in the same mode", async () => {
     let invalidated = false;
     const fake = testClient((query) => {
       if (query.includes("FROM matchsense.raw_source_records")) {
         return [
           sourceDeliveryRow(sourceOnlyDelivery),
           sourceDeliveryRow(terminalDelivery),
+        ];
+      }
+      if (query.includes("FROM matchsense.rights_grants")) {
+        return [
+          {
+            active: true,
+            expires_at: null,
+            revoked_at: null,
+            scopes: ["raw_retention", "replay"],
+          },
         ];
       }
       if (query.includes("INSERT INTO matchsense.archive_manifests")) {
@@ -213,13 +246,181 @@ describe("archive repository", () => {
         terminalDeliveryId: terminalDelivery.id,
       }),
     ).resolves.toMatchObject({ status: "REPLAY_READY" });
-    await archive?.invalidateArchive(fixtureId, "canonical correction");
-    await expect(archive?.replayReady(fixtureId)).resolves.toBeNull();
+    await archive?.invalidateArchive({
+      fixtureId,
+      mode: "recorded",
+      reason: "canonical correction",
+    });
+    await expect(
+      archive?.replayReady({ fixtureId, mode: "recorded" }),
+    ).resolves.toBeNull();
     expect(
       fake.queries.some(({ query }) => query.includes("ORDER BY ordering_key")),
     ).toBe(true);
     expect(
       fake.queries.some(({ query }) => query.includes("REPLAY_INVALIDATED")),
     ).toBe(true);
+    const invalidate = fake.queries.find(({ query }) =>
+      query.includes("UPDATE matchsense.archive_manifests"),
+    );
+    expect(invalidate?.parameters).toEqual([
+      "recorded",
+      fixtureId,
+      "canonical correction",
+    ]);
+  });
+
+  it("rejects a terminal delivery that is not last in the ordered source stream", async () => {
+    const laterDelivery = {
+      ...sourceOnlyDelivery,
+      deliveryKey: "9".repeat(64),
+      id: "delivery-after-final",
+      orderingKey: "000000001027",
+      payloadHash: "8".repeat(64),
+      responseHash: "7".repeat(64),
+    };
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.rights_grants")) {
+        return [
+          {
+            active: true,
+            expires_at: null,
+            revoked_at: null,
+            scopes: ["raw_retention", "replay"],
+          },
+        ];
+      }
+      if (query.includes("FROM matchsense.raw_source_records")) {
+        return [
+          sourceDeliveryRow(terminalDelivery),
+          sourceDeliveryRow(laterDelivery),
+        ];
+      }
+      return [];
+    });
+    const archive = db.createArchiveRepository?.(fake.client);
+
+    await expect(
+      archive?.verifyArchive({
+        fixtureId,
+        manifestId: "manifest-not-terminal",
+        mode: "recorded",
+        projectionHash: "2".repeat(64),
+        reducerVersion: "txline-reducer-v1",
+        rightsGrantId: "txodds-hackathon-2026",
+        terminalDeliveryId: terminalDelivery.id,
+      }),
+    ).rejects.toThrow(
+      "Archive terminal delivery must be the final ordered delivery",
+    );
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("INSERT INTO matchsense.archive_manifests"),
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    [
+      "explicitly unconfirmed",
+      { ...terminalDelivery.payload, Confirmed: false },
+    ],
+    ["a non-final status", { ...terminalDelivery.payload, StatusId: 99 }],
+  ])(
+    "rejects %s game_finalised data before it can become replay ready",
+    async (_label, payload) => {
+      const fake = testClient((query) => {
+        if (query.includes("FROM matchsense.rights_grants")) {
+          return [{ id: "txodds-hackathon-2026" }];
+        }
+        if (query.includes("FROM matchsense.raw_source_records")) {
+          return [
+            {
+              ...sourceDeliveryRow(terminalDelivery),
+              payload: JSON.stringify(payload),
+            },
+          ];
+        }
+        return [];
+      });
+      const archive = db.createArchiveRepository?.(fake.client);
+
+      await expect(
+        archive?.verifyArchive({
+          fixtureId,
+          manifestId: `manifest-${String(_label)}`,
+          mode: "recorded",
+          projectionHash: "2".repeat(64),
+          reducerVersion: "txline-reducer-v1",
+          rightsGrantId: "txodds-hackathon-2026",
+          terminalDeliveryId: terminalDelivery.id,
+        }),
+      ).rejects.toThrow(
+        "Archive terminal delivery must be confirmed game_finalised with StatusId 100",
+      );
+    },
+  );
+
+  it("requires an active replay scope both while verifying and while reading a ready replay", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.rights_grants")) {
+        if (query.includes("ARRAY['replay']")) return [];
+        return [
+          {
+            active: true,
+            expires_at: null,
+            revoked_at: null,
+            scopes: ["raw_retention"],
+          },
+        ];
+      }
+      if (query.includes("FROM matchsense.raw_source_records")) {
+        return [sourceDeliveryRow(terminalDelivery)];
+      }
+      return [];
+    });
+    const archive = db.createArchiveRepository?.(fake.client);
+
+    await expect(
+      archive?.verifyArchive({
+        fixtureId,
+        manifestId: "manifest-no-replay-right",
+        mode: "recorded",
+        projectionHash: "2".repeat(64),
+        reducerVersion: "txline-reducer-v1",
+        rightsGrantId: "txodds-hackathon-2026",
+        terminalDeliveryId: terminalDelivery.id,
+      }),
+    ).rejects.toThrow(
+      "Archive replay grant is inactive, expired, revoked, or missing replay scope",
+    );
+    await expect(
+      archive?.replayReady({ fixtureId, mode: "recorded" }),
+    ).resolves.toBeNull();
+    const replayQuery = fake.queries.find(({ query }) =>
+      query.includes("FROM matchsense.archive_manifests"),
+    );
+    expect(replayQuery?.query).toContain("grant.active = true");
+    expect(replayQuery?.query).toContain("grant.revoked_at IS NULL");
+    expect(replayQuery?.query).toContain(
+      "grant.scopes @> ARRAY['replay']::text[]",
+    );
+  });
+
+  it("keeps ordered deliveries scoped to one mode and fixture", async () => {
+    const fake = testClient((query) =>
+      query.includes("FROM matchsense.raw_source_records")
+        ? [sourceDeliveryRow(terminalDelivery)]
+        : [],
+    );
+    const archive = db.createArchiveRepository?.(fake.client);
+
+    await expect(
+      archive?.orderedDeliveries({ fixtureId, mode: "recorded" }),
+    ).resolves.toHaveLength(1);
+    expect(fake.queries[0]?.parameters).toEqual(["recorded", fixtureId]);
+    expect(fake.queries[0]?.query).toContain(
+      "WHERE mode = $1 AND fixture_id = $2",
+    );
   });
 });

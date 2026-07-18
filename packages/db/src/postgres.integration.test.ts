@@ -42,13 +42,30 @@ async function resetDatabase() {
   );
 }
 
-const demoFixture = {
+async function seedV3MigrationLedger() {
+  for (const migration of migrationCatalog.slice(0, 3)) {
+    await admin.unsafe(migration.sql);
+  }
+  await admin.unsafe(`CREATE TABLE public.matchsense_schema_migrations (
+  version integer PRIMARY KEY CHECK (version > 0),
+  checksum text NOT NULL CHECK (length(checksum) = 64),
+  applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);`);
+  for (const migration of migrationCatalog.slice(0, 3)) {
+    await admin.unsafe(
+      "INSERT INTO public.matchsense_schema_migrations (version, checksum) VALUES ($1, $2);",
+      [migration.version, migration.checksum],
+    );
+  }
+}
+
+const recordedFixture = {
   awayTeamId: "ESP",
   homeTeamId: "FRA",
   id: "fx-1",
   metadata: { competition: "Integration Final" },
-  mode: "demo" as const,
-  provenance: "synthetic_txline_shaped" as const,
+  mode: "recorded" as const,
+  provenance: "recorded_txline_authorised" as const,
   scheduledAt: "2026-07-17T12:00:00.000Z",
   status: "scheduled",
 };
@@ -70,8 +87,8 @@ function sourceChange(
       type: "moment.created",
     },
     expectedRevision,
-    fixtureId: demoFixture.id,
-    mode: "demo",
+    fixtureId: recordedFixture.id,
+    mode: "recorded",
     moment: {
       id: `moment-${suffix}`,
       kind: "goal",
@@ -90,11 +107,11 @@ function sourceChange(
       revision,
     },
     raw: {
-      dedupeKey: `fixture:${demoFixture.id}:record:${suffix}`,
+      dedupeKey: `fixture:${recordedFixture.id}:record:${suffix}`,
       id: `raw-${suffix}`,
       payload: { action: "goal", revision },
       payloadHash: createHash("sha256").update(suffix).digest("hex"),
-      provenance: "synthetic_txline_shaped",
+      provenance: "recorded_txline_authorised",
       receivedAt: `2026-07-17T12:0${Math.min(revision, 9)}:00.000Z`,
       source: "replay",
       sourceRecordId: null,
@@ -154,8 +171,8 @@ describe.sequential("real PostgreSQL migration runtime", () => {
     const runtime = trackedDatabase();
 
     await expect(runtime.migrate()).resolves.toEqual({
-      appliedVersions: [1, 2, 3],
-      currentVersion: 3,
+      appliedVersions: [1, 2, 3, 4],
+      currentVersion: 4,
     });
     await expect(runtime.check()).resolves.toEqual({
       databaseReachable: true,
@@ -163,7 +180,7 @@ describe.sequential("real PostgreSQL migration runtime", () => {
     });
     await expect(runtime.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 3,
+      currentVersion: 4,
     });
 
     const schemas = await admin.unsafe<{ schema_name: string }[]>(
@@ -175,7 +192,7 @@ describe.sequential("real PostgreSQL migration runtime", () => {
       "SELECT version, checksum, applied_at FROM public.matchsense_schema_migrations ORDER BY version;",
     );
     expect(schemas).toHaveLength(1);
-    expect(ledger).toHaveLength(3);
+    expect(ledger).toHaveLength(4);
     expect(ledger).toEqual([
       expect.objectContaining({
         checksum: migrationCatalog[0]?.checksum,
@@ -189,13 +206,17 @@ describe.sequential("real PostgreSQL migration runtime", () => {
         checksum: migrationCatalog[2]?.checksum,
         version: 3,
       }),
+      expect.objectContaining({
+        checksum: migrationCatalog[3]?.checksum,
+        version: 4,
+      }),
     ]);
     expect(ledger.every(({ applied_at }) => applied_at instanceof Date)).toBe(
       true,
     );
   });
 
-  it("rejects live and synthetic provenance crossover in PostgreSQL", async () => {
+  it("rejects an invalid live/recorded provenance crossover in PostgreSQL", async () => {
     const runtime = trackedDatabase();
     await runtime.migrate();
 
@@ -204,9 +225,74 @@ describe.sequential("real PostgreSQL migration runtime", () => {
         `INSERT INTO matchsense.fixtures (
   mode, id, provenance, home_team_id, away_team_id, scheduled_at, status
 )
-VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_timestamp(), 'scheduled');`,
+VALUES ('live', 'fx-crossed', 'recorded_txline_authorised', 'FRA', 'ESP', clock_timestamp(), 'scheduled');`,
       ),
     ).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("upgrades a populated v3 immutable raw row and restores its immutability in v4", async () => {
+    await seedV3MigrationLedger();
+    await admin.unsafe(`INSERT INTO matchsense.fixtures (
+  mode, id, provenance, home_team_id, away_team_id, scheduled_at, status, metadata
+)
+VALUES (
+  'live', 'legacy-fx-1', 'live_txline', 'FRA', 'ESP',
+  '2026-07-17T12:00:00.000Z', 'final', '{}'::jsonb
+);`);
+    await admin.unsafe(`INSERT INTO matchsense.raw_source_records (
+  mode, id, fixture_id, source, source_record_id, source_sequence,
+  dedupe_key, payload_hash, provenance, payload, received_at, delivery_intent
+)
+VALUES (
+  'live', 'legacy-raw-1', 'legacy-fx-1', 'txline', 'legacy-final', '1026',
+  'legacy:final', repeat('a', 64), 'live_txline',
+  '{"Action":"game_finalised","StatusId":100}'::jsonb,
+  '2026-07-17T14:00:00.000Z', 'realtime'
+);`);
+
+    const runtime = trackedDatabase();
+    await expect(runtime.migrate()).resolves.toEqual({
+      appliedVersions: [4],
+      currentVersion: 4,
+    });
+
+    const rows = await admin.unsafe<
+      {
+        canonical_eligible: boolean;
+        delivery_key: string;
+        ordering_key: string;
+        raw_retention: string;
+        response_hash: string;
+        rights_grant_id: string;
+        source_path: string;
+        stream_key: string;
+      }[]
+    >(`SELECT delivery_key, ordering_key, source_path, stream_key,
+  response_hash, rights_grant_id, raw_retention, canonical_eligible
+FROM matchsense.raw_source_records
+WHERE mode = 'live' AND id = 'legacy-raw-1';`);
+    expect(rows).toEqual([
+      {
+        canonical_eligible: true,
+        delivery_key: "a".repeat(64),
+        ordering_key: "1026",
+        raw_retention: "normalised_only",
+        response_hash: "a".repeat(64),
+        rights_grant_id: "legacy-unverified",
+        source_path: "legacy-unverified",
+        stream_key: "txline",
+      },
+    ]);
+    await expect(
+      admin.unsafe(
+        "UPDATE matchsense.raw_source_records SET payload = '{}'::jsonb WHERE mode = 'live' AND id = 'legacy-raw-1';",
+      ),
+    ).rejects.toMatchObject({ code: "P0001" });
+    await expect(
+      admin.unsafe(
+        "DELETE FROM matchsense.raw_source_records WHERE mode = 'live' AND id = 'legacy-raw-1';",
+      ),
+    ).rejects.toMatchObject({ code: "P0001" });
   });
 
   it("commits schedule raw-first, keeps duplicates inert, and accepts raw-only updates", async () => {
@@ -220,12 +306,12 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
 
     await expect(
       runtime.fixtureTruth.commitFixtureSchedule({
-        fixture: demoFixture,
+        fixture: recordedFixture,
         raw: scheduleRaw,
       }),
     ).resolves.toEqual({
       fixture: expect.objectContaining({
-        id: demoFixture.id,
+        id: recordedFixture.id,
         metadata: { competition: "Integration Final" },
       }),
       kind: "committed",
@@ -233,14 +319,17 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
     await expect(
       runtime.fixtureTruth.commitFixtureSchedule({
         fixture: {
-          ...demoFixture,
+          ...recordedFixture,
           metadata: { competition: "duplicate must not mutate" },
         },
         raw: scheduleRaw,
       }),
     ).resolves.toEqual({ kind: "duplicate" });
     await expect(
-      runtime.fixtureTruth.get({ fixtureId: demoFixture.id, mode: "demo" }),
+      runtime.fixtureTruth.get({
+        fixtureId: recordedFixture.id,
+        mode: "recorded",
+      }),
     ).resolves.toMatchObject({
       metadata: { competition: "Integration Final" },
       status: "scheduled",
@@ -249,7 +338,7 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
     await expect(
       runtime.fixtureTruth.commitFixtureSchedule({
         fixture: {
-          ...demoFixture,
+          ...recordedFixture,
           metadata: { competition: "Integration Final", note: "postponed" },
           scheduledAt: "2026-07-18T12:00:00.000Z",
           status: "postponed",
@@ -264,8 +353,8 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
     ).resolves.toMatchObject({ kind: "committed" });
     await expect(
       runtime.fixtureTruth.commitRawSourceRecord({
-        fixtureId: demoFixture.id,
-        mode: "demo",
+        fixtureId: recordedFixture.id,
+        mode: "recorded",
         raw: {
           ...scheduleRaw,
           dedupeKey: "neutral-update:fx-1:1",
@@ -283,7 +372,10 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
   (SELECT count(*)::integer FROM matchsense.outbox) AS outbox;`);
     expect(counts[0]).toEqual({ moments: 0, outbox: 0, raw: 3 });
     await expect(
-      runtime.fixtureTruth.get({ fixtureId: demoFixture.id, mode: "demo" }),
+      runtime.fixtureTruth.get({
+        fixtureId: recordedFixture.id,
+        mode: "recorded",
+      }),
     ).resolves.toMatchObject({
       metadata: { competition: "Integration Final", note: "postponed" },
       scheduledAt: "2026-07-18T12:00:00.000Z",
@@ -411,7 +503,7 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
     ).resolves.toMatchObject({ fencingToken: newGeneration });
 
     const fixture = {
-      ...demoFixture,
+      ...recordedFixture,
       id: "live-fx-fenced",
       mode: "live" as const,
       provenance: "live_txline" as const,
@@ -494,7 +586,7 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
   it("commits one revision, event, and outbox row for concurrent duplicate source records", async () => {
     const runtime = trackedDatabase();
     await runtime.migrate();
-    await runtime.fixtureTruth.upsert(demoFixture);
+    await runtime.fixtureTruth.upsert(recordedFixture);
     const change = sourceChange();
 
     const results = await Promise.all([
@@ -534,7 +626,7 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
   it("atomically processes and deduplicates a source envelope through the v3 repository path", async () => {
     const runtime = trackedDatabase();
     await runtime.migrate();
-    await runtime.fixtureTruth.upsert(demoFixture);
+    await runtime.fixtureTruth.upsert(recordedFixture);
     const raw = sourceChange({ suffix: "process-envelope" }).raw;
     const derive = vi.fn((current: { revision: number } | null) => {
       const revision = (current?.revision ?? 0) + 1;
@@ -566,8 +658,8 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
     });
     const input = {
       derive,
-      fixtureId: demoFixture.id,
-      mode: "demo" as const,
+      fixtureId: recordedFixture.id,
+      mode: "recorded" as const,
       raw,
     };
 
@@ -602,10 +694,77 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
     });
   });
 
+  it("allows reconciliation truth history but rejects reconciliation Moment and push writes", async () => {
+    const runtime = trackedDatabase();
+    await runtime.migrate();
+    await runtime.fixtureTruth.upsert(recordedFixture);
+    const reconciliationRaw = {
+      ...sourceChange({ suffix: "reconcile-history" }).raw,
+      canonicalEligible: true,
+      deliveryIntent: "reconcile" as const,
+      id: "raw-reconcile-history",
+    };
+
+    await expect(
+      runtime.fixtureTruth.processSourceEnvelope({
+        derive: () => ({
+          event: {
+            id: "event-reconciled-1",
+            payload: { correction: true },
+            type: "fixture.reconciled",
+          },
+          outbox: [],
+          projection: { payload: { correction: true }, revision: 1 },
+        }),
+        fixtureId: recordedFixture.id,
+        mode: "recorded",
+        raw: reconciliationRaw,
+      }),
+    ).resolves.toEqual({ eventSequence: 1, kind: "committed", revision: 1 });
+
+    const [historyCounts] = await admin.unsafe<
+      { events: number; moments: number; outbox: number; projections: number }[]
+    >(`SELECT
+  (SELECT count(*)::integer FROM matchsense.fixture_projections) AS projections,
+  (SELECT count(*)::integer FROM matchsense.fixture_events) AS events,
+  (SELECT count(*)::integer FROM matchsense.canonical_moments) AS moments,
+  (SELECT count(*)::integer FROM matchsense.outbox) AS outbox;`);
+    expect(historyCounts).toEqual({
+      events: 1,
+      moments: 0,
+      outbox: 0,
+      projections: 1,
+    });
+
+    await admin.unsafe(`INSERT INTO matchsense.canonical_moments (
+  mode, fixture_id, id, kind, current_revision
+)
+VALUES ('recorded', 'fx-1', 'direct-reconcile-moment', 'goal', 1);`);
+    await expect(
+      admin.unsafe(`INSERT INTO matchsense.moment_revisions (
+  mode, fixture_id, moment_id, revision, source_record_id, payload
+)
+VALUES (
+  'recorded', 'fx-1', 'direct-reconcile-moment', 1,
+  'raw-reconcile-history', '{"blocked":true}'::jsonb
+);`),
+    ).rejects.toMatchObject({ code: "P0001" });
+    await expect(
+      admin.unsafe(`INSERT INTO matchsense.outbox (
+  mode, id, fixture_id, topic, idempotency_key, payload, source_record_id
+)
+VALUES (
+  'recorded', 'outbox-direct-reconcile', 'fx-1', 'push.candidate',
+  'direct-reconcile:push', '{"blocked":true}'::jsonb,
+  'raw-reconcile-history'
+);`),
+    ).rejects.toMatchObject({ code: "P0001" });
+  });
+
   it("rolls back raw and all derived writes when the atomic commit fails", async () => {
     const runtime = trackedDatabase();
     await runtime.migrate();
-    await runtime.fixtureTruth.upsert(demoFixture);
+    await runtime.fixtureTruth.upsert(recordedFixture);
     const first = sourceChange();
     await runtime.fixtureTruth.commitSourceChange(first);
     const conflicting = sourceChange({
@@ -623,11 +782,11 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
   (SELECT count(*)::integer FROM matchsense.raw_source_records) AS raw,
   (SELECT count(*)::integer FROM matchsense.fixture_events) AS events,
   (SELECT count(*)::integer FROM matchsense.outbox) AS outbox,
-  (SELECT revision::text FROM matchsense.fixture_projections WHERE mode = 'demo' AND fixture_id = 'fx-1') AS revision;`);
+  (SELECT revision::text FROM matchsense.fixture_projections WHERE mode = 'recorded' AND fixture_id = 'fx-1') AS revision;`);
     expect(rows[0]).toEqual({ events: 1, outbox: 1, raw: 1, revision: "1" });
     await expect(
       admin.unsafe(
-        "UPDATE matchsense.raw_source_records SET payload = '{}'::jsonb WHERE mode = 'demo' AND id = 'raw-1';",
+        "UPDATE matchsense.raw_source_records SET payload = '{}'::jsonb WHERE mode = 'recorded' AND id = 'raw-1';",
       ),
     ).rejects.toMatchObject({ code: "P0001" });
   });
@@ -635,15 +794,15 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
   it("replays durable fixture events after a repository restart", async () => {
     const firstRuntime = trackedDatabase();
     await firstRuntime.migrate();
-    await firstRuntime.fixtureTruth.upsert(demoFixture);
+    await firstRuntime.fixtureTruth.upsert(recordedFixture);
     await firstRuntime.fixtureTruth.commitSourceChange(sourceChange());
     await expect(
       firstRuntime.fixtureTruth.getLatestProjection({
-        fixtureId: demoFixture.id,
-        mode: "demo",
+        fixtureId: recordedFixture.id,
+        mode: "recorded",
       }),
     ).resolves.toMatchObject({
-      fixtureId: demoFixture.id,
+      fixtureId: recordedFixture.id,
       revision: 1,
       sourceSequence: "1",
     });
@@ -653,8 +812,8 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
     await expect(
       restarted.fixtureTruth.eventsAfter({
         afterSequence: 0,
-        fixtureId: demoFixture.id,
-        mode: "demo",
+        fixtureId: recordedFixture.id,
+        mode: "recorded",
       }),
     ).resolves.toEqual([
       expect.objectContaining({ eventId: "event-1", sequence: 1 }),
@@ -665,14 +824,14 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
     const firstWorker = trackedDatabase();
     const secondWorker = trackedDatabase();
     await firstWorker.migrate();
-    await firstWorker.fixtureTruth.upsert(demoFixture);
+    await firstWorker.fixtureTruth.upsert(recordedFixture);
     await firstWorker.fixtureTruth.commitSourceChange(sourceChange());
 
     const [expiredClaim] = await firstWorker.outbox.claim({
       claimToken: "fixture-claim-expired",
       limit: 1,
       lockTimeoutMs: 30_000,
-      mode: "demo",
+      mode: "recorded",
       topics: ["moment.created"],
       workerId: "replica-shared-id",
     });
@@ -681,14 +840,14 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
       id: "outbox-1",
     });
     await admin.unsafe(
-      "UPDATE matchsense.outbox SET locked_at = clock_timestamp() - interval '1 minute' WHERE mode = 'demo' AND id = 'outbox-1';",
+      "UPDATE matchsense.outbox SET locked_at = clock_timestamp() - interval '1 minute' WHERE mode = 'recorded' AND id = 'outbox-1';",
     );
 
     const [replacementClaim] = await secondWorker.outbox.claim({
       claimToken: "fixture-claim-replacement",
       limit: 1,
       lockTimeoutMs: 30_000,
-      mode: "demo",
+      mode: "recorded",
       topics: ["moment.created"],
       workerId: "replica-shared-id",
     });
@@ -702,7 +861,7 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
       firstWorker.outbox.complete({
         claimToken: "fixture-claim-expired",
         id: "outbox-1",
-        mode: "demo",
+        mode: "recorded",
         workerId: "replica-shared-id",
       }),
     ).resolves.toBe(false);
@@ -714,7 +873,7 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
         error: "stale worker",
         id: "outbox-1",
         maxAttempts: 3,
-        mode: "demo",
+        mode: "recorded",
         workerId: "replica-shared-id",
       }),
     ).resolves.toEqual({ kind: "not_claimed" });
@@ -722,7 +881,7 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
       secondWorker.outbox.complete({
         claimToken: "fixture-claim-replacement",
         id: "outbox-1",
-        mode: "demo",
+        mode: "recorded",
         workerId: "replica-shared-id",
       }),
     ).resolves.toBe(true);
@@ -735,7 +894,7 @@ VALUES ('live', 'fx-crossed', 'synthetic_txline_shaped', 'FRA', 'ESP', clock_tim
       }[]
     >(`SELECT claim_token, locked_by, processed_at IS NOT NULL AS processed
 FROM matchsense.outbox
-WHERE mode = 'demo' AND id = 'outbox-1';`);
+WHERE mode = 'recorded' AND id = 'outbox-1';`);
     expect(state).toEqual({
       claim_token: null,
       locked_by: null,
@@ -746,15 +905,15 @@ WHERE mode = 'demo' AND id = 'outbox-1';`);
   it("persists commentary bytes and drives receipt, retry, and dead-letter state", async () => {
     const runtime = trackedDatabase();
     await runtime.migrate();
-    await runtime.fixtureTruth.upsert(demoFixture);
+    await runtime.fixtureTruth.upsert(recordedFixture);
     await runtime.fixtureTruth.commitSourceChange(sourceChange());
 
     const artifact = await runtime.commentaryArtifacts.upsert({
       bytes: new Uint8Array([1, 2, 3, 4]),
-      fixtureId: demoFixture.id,
+      fixtureId: recordedFixture.id,
       id: "commentary-1",
       language: "en-IN",
-      mode: "demo",
+      mode: "recorded",
       momentId: "moment-1",
       momentRevision: 1,
       voice: "kore",
@@ -762,9 +921,9 @@ WHERE mode = 'demo' AND id = 'outbox-1';`);
     expect([...artifact.bytes]).toEqual([1, 2, 3, 4]);
     await expect(
       runtime.commentaryArtifacts.get({
-        fixtureId: demoFixture.id,
+        fixtureId: recordedFixture.id,
         language: "en-IN",
-        mode: "demo",
+        mode: "recorded",
         momentId: "moment-1",
         momentRevision: 1,
         voice: "kore",
@@ -775,7 +934,7 @@ WHERE mode = 'demo' AND id = 'outbox-1';`);
       claimToken: "fixture-claim-first",
       limit: 1,
       lockTimeoutMs: 30_000,
-      mode: "demo",
+      mode: "recorded",
       topics: ["moment.created"],
       workerId: "worker-1",
     });
@@ -785,7 +944,7 @@ WHERE mode = 'demo' AND id = 'outbox-1';`);
     });
     const receipt = {
       consumer: "foreground",
-      mode: "demo" as const,
+      mode: "recorded" as const,
       outboxId: "outbox-1",
     };
     await expect(runtime.outbox.recordConsumerReceipt(receipt)).resolves.toBe(
@@ -798,7 +957,7 @@ WHERE mode = 'demo' AND id = 'outbox-1';`);
       runtime.outbox.complete({
         claimToken: "fixture-claim-first",
         id: "outbox-1",
-        mode: "demo",
+        mode: "recorded",
         workerId: "worker-1",
       }),
     ).resolves.toBe(true);
@@ -806,10 +965,10 @@ WHERE mode = 'demo' AND id = 'outbox-1';`);
     await expect(
       runtime.outbox.enqueue({
         availableAt: "2000-01-01T00:00:00.000Z",
-        fixtureId: demoFixture.id,
+        fixtureId: recordedFixture.id,
         id: "outbox-retry",
         idempotencyKey: "retry-once-then-dead",
-        mode: "demo",
+        mode: "recorded",
         payload: { poison: true },
         topic: "moment.created",
       }),
@@ -818,7 +977,7 @@ WHERE mode = 'demo' AND id = 'outbox-1';`);
       claimToken: "fixture-claim-retry-first",
       limit: 1,
       lockTimeoutMs: 30_000,
-      mode: "demo",
+      mode: "recorded",
       topics: ["moment.created"],
       workerId: "worker-1",
     });
@@ -827,11 +986,11 @@ WHERE mode = 'demo' AND id = 'outbox-1';`);
       runtime.outbox.retryOrDeadLetter({
         availableAt: "2000-01-01T00:00:00.000Z",
         claimToken: "fixture-claim-retry-first",
-        deadLetterId: "dead:demo:outbox-retry",
+        deadLetterId: "dead:recorded:outbox-retry",
         error: "first failure",
         id: "outbox-retry",
         maxAttempts: 2,
-        mode: "demo",
+        mode: "recorded",
         workerId: "worker-1",
       }),
     ).resolves.toEqual({ kind: "retry" });
@@ -839,7 +998,7 @@ WHERE mode = 'demo' AND id = 'outbox-1';`);
       claimToken: "fixture-claim-retry-second",
       limit: 1,
       lockTimeoutMs: 30_000,
-      mode: "demo",
+      mode: "recorded",
       topics: ["moment.created"],
       workerId: "worker-1",
     });
@@ -848,11 +1007,11 @@ WHERE mode = 'demo' AND id = 'outbox-1';`);
       runtime.outbox.retryOrDeadLetter({
         availableAt: "2000-01-01T00:00:00.000Z",
         claimToken: "fixture-claim-retry-second",
-        deadLetterId: "dead:demo:outbox-retry",
+        deadLetterId: "dead:recorded:outbox-retry",
         error: "second failure",
         id: "outbox-retry",
         maxAttempts: 2,
-        mode: "demo",
+        mode: "recorded",
         workerId: "worker-1",
       }),
     ).resolves.toEqual({ kind: "dead_letter" });

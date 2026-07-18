@@ -264,6 +264,7 @@ export interface CommentaryArtifactKey {
   mode: PersistenceMode;
   momentId: string;
   momentRevision: number;
+  templateVersion?: string;
   voice: string;
 }
 
@@ -272,6 +273,7 @@ export interface CommentaryArtifactRecord extends CommentaryArtifactKey {
   createdAt: string;
   id: string;
   mediaType: string;
+  templateVersion: string;
   updatedAt: string;
 }
 
@@ -527,6 +529,7 @@ function parseCommentary(row: QueryRow): CommentaryArtifactRecord {
     mode: mode(row),
     momentId: requiredString(row, "moment_id"),
     momentRevision: safeInteger(row.moment_revision, "moment_revision"),
+    templateVersion: requiredString(row, "template_version"),
     updatedAt: timestamp(row, "updated_at"),
     voice: requiredString(row, "voice"),
   };
@@ -797,6 +800,15 @@ WHERE mode = $1 AND fixture_id = $2;`,
         const plan = input.derive(current);
         if (!plan) return { kind: "accepted_no_change" };
 
+        if (
+          input.raw.deliveryIntent === "reconcile" &&
+          (plan.moment !== undefined || plan.outbox.length > 0)
+        ) {
+          throw new Error(
+            "Reconciliation delivery cannot create Moments or outbox effects",
+          );
+        }
+
         const currentRevision = current?.revision ?? 0;
         const nextRevision = currentRevision + 1;
         if (plan.projection.revision !== nextRevision) {
@@ -949,6 +961,11 @@ LIMIT $4;`,
     commitSourceChange: async (input) => {
       assertRawSourceRecord(input.mode, input.raw);
       assertCanonicalEligible(input.raw);
+      if (input.raw.deliveryIntent === "reconcile") {
+        throw new Error(
+          "Reconciliation delivery cannot create Moments or outbox effects",
+        );
+      }
       assertSafeNonNegativeInteger(input.expectedRevision, "expectedRevision");
       const nextRevision = input.expectedRevision + 1;
       if (
@@ -1282,14 +1299,23 @@ export function createCommentaryArtifactRepository(
   client: RepositoryClient,
 ): CommentaryArtifactRepository {
   const columns = `mode, id, fixture_id, moment_id, moment_revision, language,
-voice, media_type, bytes, created_at, updated_at`;
+voice, template_version, media_type, bytes, created_at, updated_at`;
+  const templateVersion = (input: CommentaryArtifactKey) => {
+    const version = input.templateVersion ?? "legacy-v1";
+    if (version.trim().length === 0) {
+      throw new Error("Commentary template version is required");
+    }
+    return version;
+  };
   return {
     get: async (input) => {
+      const version = templateVersion(input);
       const rows = await client.unsafe(
         `SELECT ${columns}
 FROM matchsense.commentary_artifacts
 WHERE mode = $1 AND fixture_id = $2 AND moment_id = $3
-  AND moment_revision = $4 AND language = $5 AND voice = $6;`,
+  AND moment_revision = $4 AND language = $5 AND voice = $6
+  AND template_version = $7;`,
         [
           input.mode,
           input.fixtureId,
@@ -1297,6 +1323,7 @@ WHERE mode = $1 AND fixture_id = $2 AND moment_id = $3
           input.momentRevision,
           input.language,
           input.voice,
+          version,
         ],
       );
       return rows[0] ? parseCommentary(rows[0]) : null;
@@ -1305,12 +1332,14 @@ WHERE mode = $1 AND fixture_id = $2 AND moment_id = $3
       if (input.bytes.byteLength === 0) {
         throw new Error("Commentary artifact bytes cannot be empty");
       }
+      const version = templateVersion(input);
       const rows = await client.unsafe(
         `INSERT INTO matchsense.commentary_artifacts (
-  mode, id, fixture_id, moment_id, moment_revision, language, voice, media_type, bytes
+  mode, id, fixture_id, moment_id, moment_revision, language, voice,
+  template_version, media_type, bytes
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-ON CONFLICT (mode, fixture_id, moment_id, moment_revision, language, voice) DO UPDATE SET
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (mode, fixture_id, moment_id, moment_revision, language, voice, template_version) DO UPDATE SET
   media_type = EXCLUDED.media_type,
   bytes = EXCLUDED.bytes,
   updated_at = clock_timestamp()
@@ -1323,6 +1352,7 @@ RETURNING ${columns};`,
           input.momentRevision,
           input.language,
           input.voice,
+          version,
           input.mediaType ?? "audio/mpeg",
           input.bytes,
         ],
