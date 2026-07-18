@@ -7,6 +7,7 @@ import {
   normalizeCatalog,
   normalizeFixture,
   parseCanonicalEvent,
+  todayFixtureBucket,
 } from "./live-api.js";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -50,6 +51,46 @@ describe("live product API normalization", () => {
     expect(fixtureState(fixture!, Date.parse("2026-07-19T20:00:00.000Z"))).toBe(
       "live",
     );
+  });
+
+  it("does not infer a final result from an old kickoff time", () => {
+    const fixture = normalizeFixture({
+      awayTeam: "FRA",
+      fixtureId: "waiting-for-terminal-fact",
+      homeTeam: "ARG",
+      kickoffAt: "2026-07-18T08:00:00.000Z",
+      minute: "—",
+      phase: "scheduled",
+      score: { away: 0, home: 0 },
+    });
+
+    expect(fixtureState(fixture!, Date.parse("2026-07-18T22:00:00.000Z"))).toBe(
+      "upcoming",
+    );
+  });
+
+  it("does not surface an unqualified fixture in Today buckets", () => {
+    const fixture = normalizeFixture({
+      awayTeam: "FRA",
+      fixtureId: "unqualified",
+      homeTeam: "ARG",
+      minute: "—",
+      phase: "scheduled",
+      score: { away: 0, home: 0 },
+    });
+
+    expect(todayFixtureBucket(fixture!)).toBeNull();
+  });
+
+  it("does not invent a scheduled phase when the API omits one", () => {
+    const fixture = normalizeFixture({
+      awayTeam: "FRA",
+      fixtureId: "phase-missing",
+      homeTeam: "ARG",
+      score: { away: 0, home: 0 },
+    });
+
+    expect(fixture?.phase).toBeUndefined();
   });
 
   it("normalizes a canonical SSE Moment without losing its revision identity", () => {

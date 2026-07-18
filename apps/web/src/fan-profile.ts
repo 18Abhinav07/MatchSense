@@ -14,7 +14,7 @@ export interface FanProfile {
 export interface FanFollow {
   eventPreferences: Record<string, unknown>;
   fixtureId: string;
-  mode: "demo" | "live";
+  mode: "live" | "recorded";
 }
 
 export interface FanBootstrap {
@@ -28,7 +28,7 @@ function normalizeFollow(value: unknown): FanFollow | null {
   const input = record(value);
   const fixtureId = stringOrNull(input?.fixtureId);
   const mode = input?.mode;
-  if (!fixtureId || (mode !== "demo" && mode !== "live")) return null;
+  if (!fixtureId || (mode !== "live" && mode !== "recorded")) return null;
   return {
     eventPreferences: object(input?.eventPreferences),
     fixtureId,
@@ -130,7 +130,6 @@ export function needsProfileCompletion(fan: FanProfile | null, path: string) {
     path.startsWith("/matches/") ||
     path.startsWith("/rooms/") ||
     path === "/rooms" ||
-    path === "/demo" ||
     path === "/history" ||
     path === "/you";
   return deepLink && (!fan || !profileComplete(fan));
@@ -231,7 +230,7 @@ export function createFanProfileApi(
     },
     followFixture: async (
       fixtureId: string,
-      mode: "demo" | "live",
+      mode: "live" | "recorded",
       eventPreferences: Record<string, boolean> = {
         fullTime: true,
         goals: true,
@@ -250,33 +249,6 @@ export function createFanProfileApi(
       if (!response.ok) throw await failure(response);
     },
     getBootstrap,
-    startExperience: async (input: {
-      awayTeam: string;
-      homeTeam: string;
-      idempotencyKey: string;
-    }) => {
-      const response = await fetcher("/api/v1/experience/runs/start", {
-        body: JSON.stringify({
-          awayTeam: input.awayTeam,
-          homeTeam: input.homeTeam,
-        }),
-        credentials: "same-origin",
-        headers: {
-          ...mutationHeaders(),
-          "Idempotency-Key": input.idempotencyKey,
-        },
-        method: "POST",
-      });
-      if (!response.ok) throw await failure(response);
-      const payload = record(await responseJson(response));
-      const run = record(payload?.run);
-      const fixtureId = stringOrNull(run?.fixtureId);
-      const id = stringOrNull(run?.id);
-      if (!fixtureId || !id) {
-        throw new FanProfileError("experience_invalid", 502);
-      }
-      return { fixtureId, id };
-    },
     updateProfile: async (input: FanProfileInput) => {
       const response = await fetcher("/api/v1/profile", {
         body: JSON.stringify(input),

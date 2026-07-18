@@ -2,6 +2,9 @@ import type {
   CanonicalEventPayload,
   CatchupEventPayload,
   CommentaryEventPayload,
+  FixtureArchiveStatus,
+  FixtureFreshness,
+  FixtureLifecycle,
   LiveCommentary,
   LiveMoment,
   LiveSnapshot,
@@ -22,6 +25,12 @@ export interface ProductTeam {
 export interface ProductCatalog {
   teams: ProductTeam[];
   sourceLabel?: string | undefined;
+}
+
+export interface ProductApi {
+  fetchCatalog(signal?: AbortSignal): Promise<ProductCatalog>;
+  fetchFixture(fixtureId: string, signal?: AbortSignal): Promise<LiveSnapshot>;
+  fetchFixtures(signal?: AbortSignal): Promise<readonly LiveSnapshot[]>;
 }
 
 export interface MomentResolution {
@@ -66,6 +75,49 @@ function normalizeScore(value: unknown) {
   };
 }
 
+function normalizeLifecycle(value: unknown): FixtureLifecycle | undefined {
+  const normalized = text(value).toUpperCase().replaceAll(" ", "_");
+  const allowed: readonly FixtureLifecycle[] = [
+    "SCHEDULED",
+    "TRACKING",
+    "LIVE",
+    "TERMINAL_FACT_COMMITTED",
+    "FINAL",
+    "FINAL_REVISED",
+    "RESULT_UNAVAILABLE",
+  ];
+  return allowed.includes(normalized as FixtureLifecycle)
+    ? (normalized as FixtureLifecycle)
+    : undefined;
+}
+
+function normalizeFreshness(value: unknown): FixtureFreshness | undefined {
+  const normalized = text(value).toLowerCase();
+  const allowed: readonly FixtureFreshness[] = [
+    "live",
+    "cached",
+    "stale",
+    "offline",
+  ];
+  return allowed.includes(normalized as FixtureFreshness)
+    ? (normalized as FixtureFreshness)
+    : undefined;
+}
+
+function normalizeArchiveStatus(
+  value: unknown,
+): FixtureArchiveStatus | undefined {
+  const normalized = text(value).toUpperCase().replaceAll("-", "_");
+  const allowed: readonly FixtureArchiveStatus[] = [
+    "PENDING",
+    "REPLAY_READY",
+    "INVALID",
+  ];
+  return allowed.includes(normalized as FixtureArchiveStatus)
+    ? (normalized as FixtureArchiveStatus)
+    : undefined;
+}
+
 export function normalizeMoment(
   value: unknown,
   fixture: Pick<LiveSnapshot, "fixtureId" | "homeTeam" | "score">,
@@ -107,15 +159,20 @@ export function normalizeFixture(value: unknown): LiveSnapshot | null {
   const awayTeam = teamCode(awayValue, "AWAY");
   const score = normalizeScore(item.score);
   const base: LiveSnapshot = {
+    archiveStatus: normalizeArchiveStatus(
+      item.archiveStatus ?? record(item.archive)?.status,
+    ),
     awayTeam,
     awayTeamName: text(item.awayTeamName, teamName(awayValue, awayTeam)),
     competition: text(item.competition ?? item.competitionName) || undefined,
     fixtureId,
+    freshness: normalizeFreshness(item.freshness ?? item.dataFreshness),
     homeTeam,
     homeTeamName: text(item.homeTeamName, teamName(homeValue, homeTeam)),
     kickoffAt: text(item.kickoffAt ?? item.startTime) || undefined,
+    lifecycle: normalizeLifecycle(item.lifecycle),
     minute: text(item.minute ?? item.clock, "—"),
-    phase: text(item.phase ?? item.status, "scheduled").toLowerCase(),
+    phase: text(item.phase ?? item.status).toLowerCase() || undefined,
     provenance: text(item.provenance, "live_txline"),
     revision: Math.max(0, finiteNumber(item.revision, 0)),
     score,
@@ -168,8 +225,12 @@ export function fallbackTeam(code: TeamCode, name?: string): ProductTeam {
   };
 }
 
-async function fetchJson(url: string, signal?: AbortSignal) {
-  const response = await fetch(url, {
+async function fetchJson(
+  url: string,
+  fetcher: typeof fetch,
+  signal?: AbortSignal,
+) {
+  const response = await fetcher(url, {
     headers: { Accept: "application/json" },
     ...(signal ? { signal } : {}),
   });
@@ -177,33 +238,50 @@ async function fetchJson(url: string, signal?: AbortSignal) {
   return response.json() as Promise<unknown>;
 }
 
+export function createProductApi(
+  options: { fetcher?: typeof fetch | undefined } = {},
+): ProductApi {
+  const fetcher = options.fetcher ?? fetch;
+  return {
+    fetchCatalog: async (signal) =>
+      normalizeCatalog(await fetchJson("/api/v1/catalog", fetcher, signal)),
+    fetchFixture: async (fixtureId, signal) => {
+      const fixture = normalizeFixture(
+        await fetchJson(
+          `/api/v1/fixtures/${encodeURIComponent(fixtureId)}`,
+          fetcher,
+          signal,
+        ),
+      );
+      if (!fixture) throw new Error("Fixture data was invalid");
+      return fixture;
+    },
+    fetchFixtures: async (signal) => {
+      const payload = await fetchJson("/api/v1/fixtures", fetcher, signal);
+      const root = record(payload);
+      const source = Array.isArray(payload)
+        ? payload
+        : Array.isArray(root?.fixtures)
+          ? root.fixtures
+          : [];
+      return source.flatMap((value) => {
+        const fixture = normalizeFixture(value);
+        return fixture ? [fixture] : [];
+      });
+    },
+  };
+}
+
 export async function fetchCatalog(signal?: AbortSignal) {
-  return normalizeCatalog(await fetchJson("/api/v1/catalog", signal));
+  return createProductApi().fetchCatalog(signal);
 }
 
 export async function fetchFixtures(signal?: AbortSignal) {
-  const payload = await fetchJson("/api/v1/fixtures", signal);
-  const root = record(payload);
-  const source = Array.isArray(payload)
-    ? payload
-    : Array.isArray(root?.fixtures)
-      ? root.fixtures
-      : [];
-  return source.flatMap((value) => {
-    const fixture = normalizeFixture(value);
-    return fixture ? [fixture] : [];
-  });
+  return createProductApi().fetchFixtures(signal);
 }
 
 export async function fetchFixture(fixtureId: string, signal?: AbortSignal) {
-  const fixture = normalizeFixture(
-    await fetchJson(
-      `/api/v1/fixtures/${encodeURIComponent(fixtureId)}`,
-      signal,
-    ),
-  );
-  if (!fixture) throw new Error("Fixture data was invalid");
-  return fixture;
+  return createProductApi().fetchFixture(fixtureId, signal);
 }
 
 export async function fetchMomentResolution(
@@ -214,6 +292,7 @@ export async function fetchMomentResolution(
   const payload = record(
     await fetchJson(
       `/api/v1/fixtures/${encodeURIComponent(fixtureId)}/moments/${encodeURIComponent(momentIdentity)}`,
+      fetch,
       signal,
     ),
   );
@@ -308,7 +387,16 @@ export function parseCatchupEvent(value: string): CatchupEventPayload | null {
   };
 }
 
-export function fixtureState(snapshot: LiveSnapshot, now = Date.now()) {
+export function fixtureState(snapshot: LiveSnapshot, _now = Date.now()) {
+  void _now;
+  if (
+    snapshot.lifecycle === "FINAL" ||
+    snapshot.lifecycle === "FINAL_REVISED" ||
+    snapshot.lifecycle === "TERMINAL_FACT_COMMITTED"
+  ) {
+    return "final";
+  }
+  if (snapshot.lifecycle === "LIVE") return "live";
   const phase = (snapshot.phase ?? "").toLowerCase();
   if (/final|finished|full_time|game_finalised/u.test(phase)) return "final";
   if (
@@ -317,13 +405,34 @@ export function fixtureState(snapshot: LiveSnapshot, now = Date.now()) {
   ) {
     return "live";
   }
-  const kickoff = snapshot.kickoffAt
-    ? Date.parse(snapshot.kickoffAt)
-    : Number.NaN;
-  if (Number.isFinite(kickoff) && kickoff < now - 4 * 60 * 60 * 1_000) {
-    return "final";
-  }
   return "upcoming";
+}
+
+export type TodayFixtureBucket = "live" | "upcoming" | "verified_final";
+
+export function todayFixtureBucket(
+  snapshot: LiveSnapshot,
+): TodayFixtureBucket | null {
+  if (
+    snapshot.lifecycle === "RESULT_UNAVAILABLE" ||
+    snapshot.lifecycle === "TERMINAL_FACT_COMMITTED"
+  ) {
+    return null;
+  }
+  if (
+    (snapshot.lifecycle === "FINAL" ||
+      snapshot.lifecycle === "FINAL_REVISED") &&
+    snapshot.archiveStatus === "REPLAY_READY"
+  ) {
+    return "verified_final";
+  }
+  if (snapshot.lifecycle === "LIVE" && snapshot.freshness === "live") {
+    return "live";
+  }
+  if (snapshot.lifecycle === "SCHEDULED" || snapshot.lifecycle === "TRACKING") {
+    return "upcoming";
+  }
+  return null;
 }
 
 export function eventLabel(moment: LiveMoment) {

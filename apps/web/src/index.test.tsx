@@ -5,61 +5,77 @@ import { describe, expect, it } from "vitest";
 import * as shell from "./index";
 import type { AppProps } from "./App.js";
 
+const catalog = {
+  teams: [
+    {
+      code: "ARG",
+      name: "Argentina",
+      primary: "#78bde9",
+      secondary: "#ffffff",
+    },
+  ],
+};
+
+const profile = {
+  avatarVariant: "arg-pulse",
+  createdAt: "2026-07-18T00:00:00.000Z",
+  deletedAt: null,
+  favoriteTeam: "ARG",
+  handle: "matchfan",
+  handleNormalized: "matchfan",
+  id: "fan-42",
+  preferences: {},
+  profile: {},
+  updatedAt: "2026-07-18T00:00:00.000Z",
+};
+
 describe("MatchSense web product", () => {
-  it("opens an ordinary first launch with the skippable MatchSense intro", () => {
+  it("opens a white-on-green MatchSense intro before asking for permission", () => {
     expect("App" in shell).toBe(true);
-
-    const App = (
-      "App" in shell ? shell.App : () => null
-    ) as FunctionComponent<AppProps>;
-    const markup = renderToStaticMarkup(
-      createElement(App, { initialFavoriteTeam: null, initialPath: "/" }),
-    );
-
-    expect(markup).toContain("<main");
-    expect(markup).toContain("MatchSense");
-    expect(markup).toContain("EVERY MATCH HAS A PULSE.");
-    expect(markup).toContain("Skip intro");
-    expect(markup).not.toContain("Who do you support?");
-    expect(markup).not.toContain("SIMULATION · TXLINE-SHAPED DATA");
-    expect(markup).not.toContain("DEMO MODE");
-  });
-
-  it("renders a deep-linked match before asking an incomplete fan to finish their card", () => {
     const App = shell.App as FunctionComponent<AppProps>;
     const markup = renderToStaticMarkup(
       createElement(App, {
-        initialFavoriteTeam: null,
-        initialPath: "/matches/experience-match/live",
+        initialCatalog: catalog,
+        initialPath: "/",
+        initialProfile: null,
       }),
     );
 
-    expect(markup).toContain("CONNECTING TO MATCH");
-    expect(markup).toContain("Finish your fan card");
-    expect(markup).not.toContain("EVERY MATCH HAS A PULSE.");
-  });
-
-  it("serves a first-class You profile with team identity and preferences", () => {
-    const App = shell.App as FunctionComponent<AppProps>;
-    const markup = renderToStaticMarkup(
-      createElement(App, { initialFavoriteTeam: "ARG", initialPath: "/you" }),
-    );
-
-    expect(markup).toContain("This is your MatchSense.");
-    expect(markup).toContain("Save profile");
-    expect(markup).toContain("ms-team-flag");
-    expect(markup).toContain("Delete profile");
-  });
-
-  it("does not expose the retired demo route in the public product shell", () => {
-    const App = shell.App as FunctionComponent<AppProps>;
-    const markup = renderToStaticMarkup(
-      createElement(App, { initialFavoriteTeam: "BRA", initialPath: "/demo" }),
-    );
-
-    expect(markup).toContain("MatchSense");
-    expect(markup).not.toContain("JUDGED DEMO · REAL PRODUCT FLOW");
+    expect(markup).toContain("Every match has a pulse.");
+    expect(markup).toContain("Skip intro");
+    expect(markup).not.toContain("SIMULATION");
     expect(markup).not.toContain("DEMO MODE");
+  });
+
+  it("renders a profile surface from the saved supporter identity", () => {
+    const App = shell.App as FunctionComponent<AppProps>;
+    const markup = renderToStaticMarkup(
+      createElement(App, {
+        initialCatalog: catalog,
+        initialFixtures: [],
+        initialPath: "/you",
+        initialProfile: profile,
+      }),
+    );
+
+    expect(markup).toContain("SUPPORTER PROFILE");
+    expect(markup).toContain("fan-42");
+    expect(markup).toContain("Argentina flag");
+  });
+
+  it("does not expose the retired demo route", () => {
+    const App = shell.App as FunctionComponent<AppProps>;
+    const markup = renderToStaticMarkup(
+      createElement(App, {
+        initialCatalog: catalog,
+        initialFixtures: [],
+        initialPath: "/demo",
+        initialProfile: profile,
+      }),
+    );
+
+    expect(markup).toContain("YOUR MATCH DAY");
+    expect(markup).not.toContain("JUDGED DEMO");
     expect(markup).not.toContain("Open Demo Mode");
   });
 });

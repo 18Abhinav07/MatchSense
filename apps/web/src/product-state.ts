@@ -1,7 +1,22 @@
 export type TeamCode = string;
 
+export type FixtureLifecycle =
+  | "SCHEDULED"
+  | "TRACKING"
+  | "LIVE"
+  | "TERMINAL_FACT_COMMITTED"
+  | "FINAL"
+  | "FINAL_REVISED"
+  | "RESULT_UNAVAILABLE";
+
+export type FixtureFreshness = "live" | "cached" | "stale" | "offline";
+
+export type FixtureArchiveStatus = "PENDING" | "REPLAY_READY" | "INVALID";
+
 export interface LiveSnapshot {
+  archiveStatus?: FixtureArchiveStatus | undefined;
   fixtureId: string;
+  freshness?: FixtureFreshness | undefined;
   kickoffAt?: string | undefined;
   homeTeam: TeamCode;
   awayTeam: TeamCode;
@@ -17,6 +32,7 @@ export interface LiveSnapshot {
   revision?: number | undefined;
   updatedAt?: string | undefined;
   lastEvent?: LiveMoment | null | undefined;
+  lifecycle?: FixtureLifecycle | undefined;
 }
 
 export interface LiveMoment {
@@ -35,9 +51,13 @@ export interface LiveMoment {
 }
 
 export interface CanonicalEventPayload {
+  /** Reconciled events belong in history but must never replay as new cinema. */
+  deliveryIntent?: "realtime" | "reconcile" | undefined;
   event: "moment.created" | "moment.revised";
   id: string;
   moment: LiveMoment;
+  /** The durable stream sequence; a gap requires a server resync. */
+  sequence?: number | undefined;
   snapshot: LiveSnapshot;
 }
 
@@ -65,8 +85,8 @@ export interface CatchupEventPayload {
 }
 
 export interface LiveViewState {
-  dataMode: "simulation" | "txline";
-  snapshot: LiveSnapshot;
+  dataMode: "unavailable" | "live" | "recorded";
+  snapshot: LiveSnapshot | null;
   currentRevision: number;
   timeline: LiveMoment[];
   pendingMoment: LiveMoment | null;
@@ -75,10 +95,13 @@ export interface LiveViewState {
   lastEventId: string | null;
   commentaryByMoment: Record<string, LiveCommentary>;
   catchup: { fromEventId: string; moments: LiveMoment[] } | null;
+  /** True only when a durable sequence gap prevented safe local application. */
+  resetRequired: boolean;
+  lastAppliedSequence: number | null;
 }
 
 export type LiveViewAction =
-  | { type: "snapshot"; snapshot: LiveSnapshot }
+  | { type: "snapshot"; snapshot: LiveSnapshot; sequence?: number | undefined }
   | { type: "canonical_event"; payload: CanonicalEventPayload }
   | { type: "commentary_ready"; payload: CommentaryEventPayload }
   | { type: "catchup_ready"; payload: CatchupEventPayload }
@@ -92,25 +115,29 @@ export type LiveViewAction =
 
 export function createInitialLiveState(): LiveViewState {
   return {
-    dataMode: "simulation",
+    dataMode: "unavailable",
     currentRevision: 0,
     commentaryByMoment: {},
     catchup: null,
     lastEventId: null,
     openMoment: null,
     pendingMoment: null,
-    snapshot: {
-      awayTeam: "FRA",
-      fixtureId: "arg-fra-demo",
-      homeTeam: "ARG",
-      minute: "—",
-      provenance: "synthetic_txline_shaped",
-      score: { away: 0, home: 0 },
-      sourceLabel: "MATCH DATA CONNECTING",
-    },
+    snapshot: null,
     timeline: [],
     transportHealth: "connecting",
+    resetRequired: false,
+    lastAppliedSequence: null,
   };
+}
+
+function dataModeFor(snapshot: LiveSnapshot): LiveViewState["dataMode"] {
+  if (snapshot.provenance === "live_txline") return "live";
+  if (snapshot.provenance === "recorded_txline_authorised") return "recorded";
+  return "unavailable";
+}
+
+function isContiguous(current: number | null, incoming: number | undefined) {
+  return incoming === undefined || current === null || incoming === current + 1;
 }
 
 export function liveViewReducer(
@@ -123,14 +150,23 @@ export function liveViewReducer(
     return {
       ...state,
       currentRevision: snapshotRevision,
-      dataMode:
-        action.snapshot.provenance === "live_txline" ? "txline" : "simulation",
+      dataMode: dataModeFor(action.snapshot),
+      lastAppliedSequence: action.sequence ?? state.lastAppliedSequence,
+      resetRequired: false,
       snapshot: action.snapshot,
       transportHealth: "reconciled",
     };
   }
   if (action.type === "canonical_event") {
     if (state.lastEventId === action.payload.id) return state;
+    if (!isContiguous(state.lastAppliedSequence, action.payload.sequence)) {
+      return {
+        ...state,
+        pendingMoment: null,
+        resetRequired: true,
+        transportHealth: "stale",
+      };
+    }
     const priorIndex = state.timeline.findIndex(
       (moment) =>
         moment.identity === action.payload.moment.identity ||
@@ -142,16 +178,19 @@ export function liveViewReducer(
         : state.timeline.map((moment, index) =>
             index === priorIndex ? action.payload.moment : moment,
           );
+    const canOpenMoment =
+      action.payload.deliveryIntent === "realtime" &&
+      action.payload.moment.status === "confirmed" &&
+      action.payload.snapshot.freshness === "live";
     return {
       ...state,
       currentRevision: action.payload.moment.revision,
-      dataMode:
-        action.payload.snapshot.provenance === "live_txline"
-          ? "txline"
-          : "simulation",
+      dataMode: dataModeFor(action.payload.snapshot),
+      lastAppliedSequence: action.payload.sequence ?? state.lastAppliedSequence,
       lastEventId: action.payload.id,
       openMoment: null,
-      pendingMoment: action.payload.moment,
+      pendingMoment: canOpenMoment ? action.payload.moment : null,
+      resetRequired: false,
       snapshot: action.payload.snapshot,
       timeline,
       transportHealth: "reconciled",
@@ -178,6 +217,7 @@ export function liveViewReducer(
       currentRevision:
         action.payload.snapshot.revision ?? state.currentRevision,
       lastEventId: action.payload.id,
+      dataMode: dataModeFor(action.payload.snapshot),
       snapshot: action.payload.snapshot,
       timeline: [...missed].reverse().concat(state.timeline),
       transportHealth: "reconciled",

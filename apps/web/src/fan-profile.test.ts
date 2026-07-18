@@ -21,7 +21,7 @@ describe("fan profile client", () => {
       true,
     );
     expect(needsProfileCompletion(fan, "/rooms/join/finals-night")).toBe(true);
-    expect(needsProfileCompletion(fan, "/demo")).toBe(true);
+    expect(needsProfileCompletion(fan, "/demo")).toBe(false);
     expect(
       needsProfileCompletion(
         {
@@ -34,6 +34,14 @@ describe("fan profile client", () => {
       ),
     ).toBe(false);
     expect(needsProfileCompletion(null, "/")).toBe(false);
+  });
+
+  it("does not expose the retired synthetic Experience launcher from the profile client", () => {
+    const api = createFanProfileApi({
+      fetcher: vi.fn<typeof fetch>(),
+    });
+
+    expect("startExperience" in api).toBe(false);
   });
 
   it("creates one guest session when bootstrap reports no session", async () => {
