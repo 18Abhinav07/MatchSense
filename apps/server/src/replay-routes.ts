@@ -10,11 +10,14 @@ const fixtureId = z
   .min(1)
   .max(120)
   .regex(/^[A-Za-z0-9_:%-]+$/u);
-const createBody = z.object({ fixtureId }).strict();
+const createBody = z
+  .object({ fixtureId, mode: z.literal("recorded").optional() })
+  .strict();
 
 export interface RecordedReplaySession {
   archiveManifestId: string;
   fixtureId: string;
+  fixtureMode: "recorded";
   id: string;
   mode: "recorded";
   replaySeq: 0;
@@ -28,33 +31,26 @@ function base64Url(value: string) {
   return Buffer.from(value).toString("base64url");
 }
 
-function parseSessionId(
-  value: string,
-): { archiveManifestId: string; fixtureId: string } | null {
+function parseSessionId(value: string): {
+  archiveManifestId: string;
+  fixtureId: string;
+  fixtureMode: "recorded";
+} | null {
   if (!value.startsWith("recorded_")) return null;
   try {
-    const parsed: unknown = JSON.parse(
-      Buffer.from(value.slice("recorded_".length), "base64url").toString(
-        "utf8",
-      ),
-    );
-    if (
-      !parsed ||
-      typeof parsed !== "object" ||
-      typeof (parsed as { fixtureId?: unknown }).fixtureId !== "string" ||
-      typeof (parsed as { archiveManifestId?: unknown }).archiveManifestId !==
-        "string"
-    ) {
-      return null;
-    }
+    const segments = value.slice("recorded_".length).split(".");
+    if (segments.length !== 2 || !segments[0] || !segments[1]) return null;
     const fixture = fixtureId.safeParse(
-      (parsed as { fixtureId: string }).fixtureId,
+      Buffer.from(segments[0], "base64url").toString("utf8"),
     );
-    const manifestId = (parsed as { archiveManifestId: string })
-      .archiveManifestId;
+    const manifestId = Buffer.from(segments[1], "base64url").toString("utf8");
     if (!fixture.success || !/^[A-Za-z0-9_:%-]{1,160}$/u.test(manifestId))
       return null;
-    return { archiveManifestId: manifestId, fixtureId: fixture.data };
+    return {
+      archiveManifestId: manifestId,
+      fixtureId: fixture.data,
+      fixtureMode: "recorded",
+    };
   } catch {
     return null;
   }
@@ -63,16 +59,13 @@ function parseSessionId(
 export function recordedReplaySession(
   replay: ReplayReadyFixture,
 ): RecordedReplaySession {
-  const id = `recorded_${base64Url(
-    JSON.stringify({
-      archiveManifestId: replay.archiveManifestId,
-      fixtureId: replay.fixture.fixtureId,
-      v: 1,
-    }),
+  const id = `recorded_${base64Url(replay.fixture.fixtureId)}.${base64Url(
+    replay.archiveManifestId,
   )}`;
   return {
     archiveManifestId: replay.archiveManifestId,
     fixtureId: replay.fixture.fixtureId,
+    fixtureMode: "recorded",
     id,
     mode: "recorded",
     replaySeq: 0,
@@ -85,7 +78,10 @@ async function resolveSession(
 ): Promise<RecordedReplaySession | null> {
   const parsed = parseSessionId(sessionId);
   if (!parsed) return null;
-  const replay = await reads.getReplayReady(parsed.fixtureId);
+  const replay = await reads.getReplayReady({
+    fixtureId: parsed.fixtureId,
+    mode: parsed.fixtureMode,
+  });
   if (!replay || replay.archiveManifestId !== parsed.archiveManifestId)
     return null;
   return recordedReplaySession(replay);
@@ -116,7 +112,10 @@ export function registerReplayRoutes(
     const body = createBody.safeParse(request.body);
     if (!body.success)
       return reply.code(400).send({ error: "replay_request_invalid" });
-    const replay = await dependencies.reads.getReplayReady(body.data.fixtureId);
+    const replay = await dependencies.reads.getReplayReady({
+      fixtureId: body.data.fixtureId,
+      mode: "recorded",
+    });
     return replay
       ? reply
           .code(201)
@@ -152,6 +151,7 @@ export function registerReplayRoutes(
     const feed = await dependencies.reads.readFixtureFeed({
       afterSequence: after,
       fixtureId: session.fixtureId,
+      mode: session.fixtureMode,
     });
     if (!feed) return reply.code(404).send({ error: "replay_not_ready" });
     return reply.header("Cache-Control", "no-store").send({
@@ -179,6 +179,7 @@ export function registerReplayRoutes(
     const feed = await dependencies.reads.readFixtureFeed({
       afterSequence: after,
       fixtureId: session.fixtureId,
+      mode: session.fixtureMode,
     });
     if (!feed) return reply.code(404).send({ error: "replay_not_ready" });
     reply.hijack();

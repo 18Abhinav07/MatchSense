@@ -123,6 +123,7 @@ export async function createFixtureStreamSession(
     const feed = await options.reads.readFixtureFeed({
       afterSequence: initial ? options.afterSequence : lastSentSequence,
       fixtureId: options.fixtureId,
+      mode: "live",
     });
     if (!feed) return false;
 
@@ -173,7 +174,10 @@ export function registerFixtureStreamRoutes(
     if (!/^[A-Za-z0-9_:%-]{1,120}$/u.test(fixtureId)) {
       return reply.code(400).send({ error: "fixture_request_invalid" });
     }
-    const fixture = await dependencies.reads.getFixture(fixtureId);
+    const fixture = await dependencies.reads.getFixture({
+      fixtureId,
+      mode: "live",
+    });
     if (!fixture) return reply.code(404).send({ error: "fixture_not_found" });
 
     const header = request.headers["last-event-id"];

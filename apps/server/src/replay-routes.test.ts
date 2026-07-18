@@ -14,14 +14,14 @@ const fixture: FixtureReadSnapshot = {
   fixtureId: "fx-final",
   lifecycle: "final",
   metadata: {},
-  mode: "live" as const,
+  mode: "recorded" as const,
   projection: {
     payload: { score: { away: 1, home: 2 } },
     revision: 9,
     sourceSequence: null,
     updatedAt: "2026-07-18T15:00:00.000Z",
   },
-  provenance: "live_txline" as const,
+  provenance: "recorded_txline_authorised" as const,
   replayReady: true,
   scheduledAt: "2026-07-18T12:00:00.000Z",
   teams: { away: "FRA", home: "ARG" },
@@ -64,7 +64,10 @@ describe("recorded replay routes", () => {
       mode: "recorded",
       replaySeq: 0,
     });
-    expect(reads.getReplayReady).toHaveBeenCalledWith("fx-final");
+    expect(reads.getReplayReady).toHaveBeenCalledWith({
+      fixtureId: "fx-final",
+      mode: "recorded",
+    });
     await app.close();
   });
 
@@ -79,6 +82,38 @@ describe("recorded replay routes", () => {
     });
 
     expect(response.statusCode).toBe(404);
+    await app.close();
+  });
+
+  it("refuses a live-mode replay request and keeps replay feeds on recorded data", async () => {
+    const reads = repository(true);
+    const app = Fastify();
+    registerReplayRoutes(app, { reads });
+
+    const invalid = await app.inject({
+      method: "POST",
+      payload: { fixtureId: "fx-final", mode: "live" },
+      url: "/api/v1/replay/sessions",
+    });
+    const created = await app.inject({
+      method: "POST",
+      payload: { fixtureId: "fx-final", mode: "recorded" },
+      url: "/api/v1/replay/sessions",
+    });
+    const session = created.json() as { id: string };
+    const timeline = await app.inject({
+      method: "GET",
+      url: `/api/v1/replay/sessions/${encodeURIComponent(session.id)}/timeline`,
+    });
+
+    expect(invalid.statusCode).toBe(400);
+    expect(created.statusCode).toBe(201);
+    expect(timeline.statusCode).toBe(200);
+    expect(reads.readFixtureFeed).toHaveBeenCalledWith({
+      afterSequence: 0,
+      fixtureId: "fx-final",
+      mode: "recorded",
+    });
     await app.close();
   });
 });

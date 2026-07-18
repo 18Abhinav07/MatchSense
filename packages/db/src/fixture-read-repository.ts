@@ -21,6 +21,12 @@ export type FixtureLifecycle =
 
 export type FixtureBucket = "upcoming" | "live" | "final";
 
+/** Every durable read is pinned to its persisted source mode. */
+export interface FixtureReadKey {
+  fixtureId: string;
+  mode: FixtureReadMode;
+}
+
 export interface FixtureReadSnapshot {
   archiveManifestId: string | null;
   bucket: FixtureBucket | null;
@@ -80,23 +86,26 @@ export interface ReplayReadyFixture {
 }
 
 export interface FixtureReadRepository {
-  getFixture(fixtureId: string): Promise<FixtureReadSnapshot | null>;
-  getReplayReady(fixtureId: string): Promise<ReplayReadyFixture | null>;
-  listFixtures(input?: {
+  getFixture(input: FixtureReadKey): Promise<FixtureReadSnapshot | null>;
+  getReplayReady(input: FixtureReadKey): Promise<ReplayReadyFixture | null>;
+  listFixtures(input: {
     bucket?: FixtureBucket | undefined;
     limit?: number | undefined;
+    mode: FixtureReadMode;
   }): Promise<readonly FixtureReadSnapshot[]>;
   readFixtureFeed(input: {
     afterSequence: number | null;
     fixtureId: string;
+    mode: FixtureReadMode;
   }): Promise<FixtureFeed | null>;
   readHistory(input?: {
     limit?: number | undefined;
   }): Promise<readonly FixtureReadSnapshot[]>;
-  readMemory(fixtureId: string): Promise<FixtureMemoryRead | null>;
+  readMemory(input: FixtureReadKey): Promise<FixtureMemoryRead | null>;
   readMoment(input: {
     familyId: string;
     fixtureId: string;
+    mode: FixtureReadMode;
     revision: number;
   }): Promise<FixtureMomentResolution | null>;
 }
@@ -217,6 +226,7 @@ function bucketFor(lifecycleValue: FixtureLifecycle): FixtureBucket | null {
 
 function parseFixture(row: QueryRow): FixtureReadSnapshot {
   const fixtureLifecycle = lifecycle(row);
+  const fixtureMode = mode(row);
   const archiveStatus = nullableString(row, "archive_status");
   const archiveManifestId = nullableString(row, "archive_manifest_id");
   const projection =
@@ -234,10 +244,11 @@ function parseFixture(row: QueryRow): FixtureReadSnapshot {
     fixtureId: string(row, "fixture_id"),
     lifecycle: fixtureLifecycle,
     metadata: object(row.metadata, "metadata"),
-    mode: mode(row),
+    mode: fixtureMode,
     projection,
     provenance: provenance(row),
     replayReady:
+      fixtureMode === "recorded" &&
       fixtureLifecycle === "final" &&
       archiveManifestId !== null &&
       archiveStatus === "REPLAY_READY",
@@ -286,13 +297,52 @@ LEFT JOIN matchsense.archive_manifests AS archive
 ${where}`;
 }
 
+/**
+ * Live rows are only meaningful while the source fixture is in progress or
+ * upcoming. Historical rows become public only after the archive has a still
+ * active replay grant. This prevents an unfinished or revoked archive from
+ * looking like a completed MatchSense Memory.
+ */
+function publicFixtureVisibility() {
+  return `(fixture.mode = 'live' AND fixture.status IN (
+  'discovered', 'scheduled', 'tracking', 'live'
+)) OR (
+  fixture.mode = 'recorded'
+  AND fixture.status = 'final'
+  AND archive.status = 'REPLAY_READY'
+  AND EXISTS (
+    SELECT 1
+    FROM matchsense.rights_grants AS grant
+    WHERE grant.id = archive.rights_grant_id
+      AND grant.active = true
+      AND grant.revoked_at IS NULL
+      AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())
+      AND grant.scopes @> ARRAY['replay']::text[]
+  )
+)`;
+}
+
+function bucketVisibility(bucket: FixtureBucket | undefined) {
+  switch (bucket) {
+    case "upcoming":
+      return "AND fixture.status IN ('discovered', 'scheduled', 'tracking')";
+    case "live":
+      return "AND fixture.status = 'live'";
+    case "final":
+      return "AND fixture.status = 'final'";
+    default:
+      return "";
+  }
+}
+
 async function readFixture(
   executor: SqlExecutor,
-  fixtureId: string,
+  input: FixtureReadKey,
 ): Promise<FixtureReadSnapshot | null> {
   const rows = await executor.unsafe(
-    `${fixtureQuery("WHERE fixture.id = $1 AND fixture.mode = 'live'")};`,
-    [fixtureId],
+    `${fixtureQuery(`WHERE fixture.id = $1 AND fixture.mode = $2
+  AND (${publicFixtureVisibility()})`)};`,
+    [input.fixtureId, input.mode],
   );
   return rows[0] ? parseFixture(rows[0]) : null;
 }
@@ -320,29 +370,25 @@ ORDER BY sequence ASC;`,
 export function createFixtureReadRepository(
   client: RepositoryClient,
 ): FixtureReadRepository {
-  const listFixtures: FixtureReadRepository["listFixtures"] = async (
-    input = {},
-  ) => {
+  const listFixtures: FixtureReadRepository["listFixtures"] = async (input) => {
     const rows = await client.unsafe(
-      `${fixtureQuery("WHERE fixture.mode = 'live'")}
+      `${fixtureQuery(`WHERE fixture.mode = $1
+  AND (${publicFixtureVisibility()})
+  ${bucketVisibility(input.bucket)}`)}
 ORDER BY fixture.scheduled_at DESC, fixture.id ASC
-LIMIT $1;`,
-      [limit(input.limit)],
+LIMIT $2;`,
+      [input.mode, limit(input.limit)],
     );
-    const fixtures = rows
-      .map(parseFixture)
-      .filter((fixture) => fixture.bucket !== null);
-    return input.bucket
-      ? fixtures.filter((fixture) => fixture.bucket === input.bucket)
-      : fixtures;
+    return rows.map(parseFixture).filter((fixture) => fixture.bucket !== null);
   };
 
   return {
-    getFixture: (fixtureId) => readFixture(client, fixtureId),
-    getReplayReady: async (fixtureId) => {
+    getFixture: (input) => readFixture(client, input),
+    getReplayReady: async (input) => {
+      if (input.mode !== "recorded") return null;
       const rows = await client.unsafe(
-        `${fixtureQuery(`WHERE fixture.id = $1
-  AND fixture.mode = 'live'
+        `${fixtureQuery(`WHERE fixture.id = $1 AND fixture.mode = $2
+  AND fixture.mode = 'recorded'
   AND fixture.status = 'final'
   AND archive.status = 'REPLAY_READY'
   AND EXISTS (
@@ -354,7 +400,7 @@ LIMIT $1;`,
       AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())
       AND grant.scopes @> ARRAY['replay']::text[]
   )`)};`,
-        [fixtureId],
+        [input.fixtureId, input.mode],
       );
       const fixture = rows[0] ? parseFixture(rows[0]) : null;
       return fixture?.replayReady && fixture.archiveManifestId
@@ -362,9 +408,12 @@ LIMIT $1;`,
         : null;
     },
     listFixtures,
-    readFixtureFeed: async ({ afterSequence, fixtureId }) =>
+    readFixtureFeed: async ({ afterSequence, fixtureId, mode: fixtureMode }) =>
       client.begin(async (transaction) => {
-        const snapshot = await readFixture(transaction, fixtureId);
+        const snapshot = await readFixture(transaction, {
+          fixtureId,
+          mode: fixtureMode,
+        });
         if (!snapshot) return null;
 
         const waterRows = await transaction.unsafe(
@@ -419,15 +468,22 @@ WHERE mode = $1 AND fixture_id = $2;`,
         };
       }),
     readHistory: async (input = {}) =>
-      listFixtures({ bucket: "final", limit: input.limit }),
-    readMemory: async (fixtureId) => {
-      const snapshot = await readFixture(client, fixtureId);
-      if (!snapshot || snapshot.lifecycle !== "final") return null;
+      listFixtures({ bucket: "final", limit: input.limit, mode: "recorded" }),
+    readMemory: async (input) => {
+      const snapshot = await readFixture(client, input);
+      if (
+        !snapshot ||
+        snapshot.mode !== "recorded" ||
+        snapshot.lifecycle !== "final" ||
+        !snapshot.replayReady
+      ) {
+        return null;
+      }
       const waterRows = await client.unsafe(
         `SELECT COALESCE(MAX(sequence), 0) AS high_water_sequence
 FROM matchsense.fixture_events
 WHERE mode = $1 AND fixture_id = $2;`,
-        [snapshot.mode, fixtureId],
+        [snapshot.mode, input.fixtureId],
       );
       const water = waterRows[0];
       if (!water) throw new Error("Fixture history query returned no row");
@@ -439,17 +495,25 @@ WHERE mode = $1 AND fixture_id = $2;`,
         fixture: snapshot,
         timeline: await readEvents(client, {
           afterSequence: 0,
-          fixtureId,
+          fixtureId: input.fixtureId,
           highWaterSequence,
           mode: snapshot.mode,
         }),
       };
     },
-    readMoment: async ({ familyId, fixtureId, revision }) => {
+    readMoment: async ({
+      familyId,
+      fixtureId,
+      mode: fixtureMode,
+      revision,
+    }) => {
       if (!Number.isSafeInteger(revision) || revision < 1) {
         throw new Error("Moment revision is invalid");
       }
-      const snapshot = await readFixture(client, fixtureId);
+      const snapshot = await readFixture(client, {
+        fixtureId,
+        mode: fixtureMode,
+      });
       if (!snapshot) return null;
       const familyRows = await client.unsafe(
         `SELECT current_revision

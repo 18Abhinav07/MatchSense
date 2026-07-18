@@ -67,18 +67,24 @@ describe("durable fixture SSE", () => {
 
   it("writes a durable snapshot, reset marker, and strictly sequenced events", async () => {
     const writes: string[] = [];
+    const repository = reads();
     const session = await createFixtureStreamSession({
       afterSequence: 3,
       fixtureId: "fx-live",
       heartbeatMs: 60_000,
       pollMs: 60_000,
-      reads: reads(),
+      reads: repository,
       write: (value) => writes.push(value),
     });
 
     expect(writes.join("\n")).toContain("event: snapshot");
     expect(writes.join("\n")).toContain("event: stream.reset");
     expect(writes.join("\n")).toContain("id: fx-live:4");
+    expect(repository.readFixtureFeed).toHaveBeenCalledWith({
+      afterSequence: 3,
+      fixtureId: "fx-live",
+      mode: "live",
+    });
     if (!session) throw new Error("Fixture stream did not open");
     session.close();
   });

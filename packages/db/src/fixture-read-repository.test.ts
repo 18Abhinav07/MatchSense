@@ -54,15 +54,15 @@ function testClient(
 }
 
 describe("fixture read repository", () => {
-  it("derives the final history bucket from stored lifecycle rather than elapsed kickoff time", async () => {
+  it("lists an authorised recorded final by its requested mode rather than hard-coding live", async () => {
     const fake = testClient((query) => {
       if (query.includes("FROM matchsense.fixtures AS fixture")) {
         return [
-          fixtureRow(),
           fixtureRow({
             archive_manifest_id: "archive-final",
             archive_status: "REPLAY_READY",
             fixture_id: "fx-2",
+            fixture_mode: "recorded",
             fixture_status: "final",
             projection_payload: JSON.stringify({
               fixtureId: "fx-2",
@@ -71,6 +71,7 @@ describe("fixture read repository", () => {
             }),
             projection_revision: "8",
             projection_updated_at: "2026-07-11T15:00:00.000Z",
+            provenance: "recorded_txline_authorised",
           }),
         ];
       }
@@ -78,16 +79,21 @@ describe("fixture read repository", () => {
     });
     const repository = createFixtureReadRepository(fake.client);
 
-    await expect(repository.listFixtures({ bucket: "final" })).resolves.toEqual(
-      [
-        expect.objectContaining({
-          bucket: "final",
-          fixtureId: "fx-2",
-          lifecycle: "final",
-          replayReady: true,
-        }),
-      ],
-    );
+    await expect(
+      repository.listFixtures({ bucket: "final", mode: "recorded" }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        bucket: "final",
+        fixtureId: "fx-2",
+        lifecycle: "final",
+        mode: "recorded",
+        replayReady: true,
+      }),
+    ]);
+    expect(fake.queries.at(-1)).toMatchObject({
+      parameters: ["recorded", 100],
+    });
+    expect(fake.queries.at(-1)?.query).toContain("grant.active = true");
   });
 
   it("returns a reset feed when the supplied durable cursor does not exist", async () => {
@@ -122,7 +128,11 @@ describe("fixture read repository", () => {
     const repository = createFixtureReadRepository(fake.client);
 
     await expect(
-      repository.readFixtureFeed({ afterSequence: 3, fixtureId: "fx-1" }),
+      repository.readFixtureFeed({
+        afterSequence: 3,
+        fixtureId: "fx-1",
+        mode: "live",
+      }),
     ).resolves.toMatchObject({
       events: [expect.objectContaining({ sequence: 4 })],
       highWaterSequence: 4,
@@ -166,6 +176,7 @@ describe("fixture read repository", () => {
       repository.readMoment({
         familyId: "goal-family",
         fixtureId: "fx-1",
+        mode: "live",
         revision: 2,
       }),
     ).resolves.toMatchObject({
@@ -175,21 +186,24 @@ describe("fixture read repository", () => {
     });
   });
 
-  it("exposes a replay fixture only from a REPLAY_READY archive manifest", async () => {
+  it("exposes a replay fixture only from an authorised REPLAY_READY recorded archive", async () => {
     const fake = testClient((query, parameters) => {
       if (
         query.includes("archive.status = 'REPLAY_READY'") &&
-        parameters[0] === "fx-final"
+        parameters[0] === "fx-final" &&
+        parameters[1] === "recorded"
       ) {
         return [
           fixtureRow({
             archive_manifest_id: "archive-final",
             archive_status: "REPLAY_READY",
             fixture_id: "fx-final",
+            fixture_mode: "recorded",
             fixture_status: "final",
             projection_payload: JSON.stringify({ fixtureId: "fx-final" }),
             projection_revision: "9",
             projection_updated_at: "2026-07-18T12:00:00.000Z",
+            provenance: "recorded_txline_authorised",
           }),
         ];
       }
@@ -199,10 +213,20 @@ describe("fixture read repository", () => {
       fake.client,
     );
 
-    await expect(repository.getReplayReady("fx-final")).resolves.toMatchObject({
+    await expect(
+      repository.getReplayReady({ fixtureId: "fx-final", mode: "recorded" }),
+    ).resolves.toMatchObject({
       archiveManifestId: "archive-final",
-      fixture: expect.objectContaining({ fixtureId: "fx-final" }),
+      fixture: expect.objectContaining({
+        fixtureId: "fx-final",
+        mode: "recorded",
+      }),
     });
-    await expect(repository.getReplayReady("fx-missing")).resolves.toBeNull();
+    await expect(
+      repository.getReplayReady({ fixtureId: "fx-missing", mode: "recorded" }),
+    ).resolves.toBeNull();
+    await expect(
+      repository.getReplayReady({ fixtureId: "fx-final", mode: "live" }),
+    ).resolves.toBeNull();
   });
 });

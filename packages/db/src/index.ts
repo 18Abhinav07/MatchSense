@@ -136,6 +136,7 @@ export type {
   FixtureMemoryRead,
   FixtureMomentResolution,
   FixtureMomentRevision,
+  FixtureReadKey,
   FixtureReadMode,
   FixtureReadRepository,
   FixtureReadSnapshot,
