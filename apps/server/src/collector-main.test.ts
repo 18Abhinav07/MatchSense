@@ -159,7 +159,7 @@ describe("collector-only runtime", () => {
       parseServerEnv({
         DATABASE_URL: "postgresql://db.example/matchsense",
         ROLE: "worker",
-        TXLINE_API_TOKEN: "collector-only-token",
+        TXLINE_API_TOKEN: "fixture-collector-only-token",
       }),
       {
         databaseRuntime: database as never,
@@ -204,7 +204,7 @@ describe("collector-only runtime", () => {
       parseServerEnv({
         DATABASE_URL: "postgresql://db.example/matchsense",
         ROLE: "worker",
-        TXLINE_API_TOKEN: "collector-only-token",
+        TXLINE_API_TOKEN: "fixture-collector-only-token",
       }),
       {
         databaseRuntime: database as never,
@@ -217,7 +217,7 @@ describe("collector-only runtime", () => {
 
     expect(database.migrate).toHaveBeenCalledOnce();
     expect(txlineClientFactory).toHaveBeenCalledWith({
-      apiToken: "collector-only-token",
+      apiToken: "fixture-collector-only-token",
     });
     expect(sourceLifecycle.start).toHaveBeenCalledOnce();
     expect(commentaryWorker.start).toHaveBeenCalledOnce();

@@ -88,14 +88,14 @@ describe("parseServerEnv", () => {
       parseServerEnv({
         DATABASE_URL: "postgresql://db.example/matchsense",
         ROLE: "api",
-        TXLINE_API_TOKEN: "must-never-be-on-the-api-service",
+        TXLINE_API_TOKEN: "fixture-must-never-be-on-the-api-service",
       }),
     ).toThrow("API role must not receive TxLINE token");
     expect(() =>
       parseServerEnv({
         DATABASE_URL: "postgresql://db.example/matchsense",
         ROLE: "api",
-        VAPID_PRIVATE_KEY: "must-never-be-on-the-api-service",
+        VAPID_PRIVATE_KEY: "fixture-must-never-be-on-the-api-service",
       }),
     ).toThrow("API role must not receive VAPID private key");
   });

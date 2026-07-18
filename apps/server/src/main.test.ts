@@ -83,7 +83,7 @@ describe("server entrypoint", () => {
         environment: {
           DATABASE_URL: "postgresql://db.example/matchsense",
           DATA_RIGHTS_MODE: "txline_hackathon",
-          TXLINE_API_TOKEN: "collector-only-token",
+          TXLINE_API_TOKEN: "fixture-collector-only-token",
         },
         listen: true,
         signalSource: new EventEmitter(),

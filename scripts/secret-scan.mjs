@@ -28,6 +28,10 @@ function isSensitiveIdentifier(identifier) {
     .replace(/^_+|_+$/gu, "")
     .toUpperCase();
 
+  if (normalizedIdentifier === "FENCING_TOKEN") {
+    return false;
+  }
+
   return sensitiveIdentifierPatterns.some((pattern) =>
     pattern.test(normalizedIdentifier),
   );

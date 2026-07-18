@@ -183,6 +183,17 @@ test("allows marked synthetic test literals while still detecting test-file secr
   );
 });
 
+test("does not treat a numeric fencing token as a committed credential", async () => {
+  const scanner = await loadScanner();
+  assert.notEqual(scanner, null, "secret-scan helper must exist");
+
+  assert.deepEqual(
+    scanner.scanCommittedSecrets("fixture.test.ts", "const fencingToken = 3;"),
+    [],
+    "a fencing token is a numeric concurrency guard, not a credential",
+  );
+});
+
 test("scans suffix-env files with environment assignment rules", async () => {
   const scanner = await loadScanner();
   assert.notEqual(scanner, null, "secret-scan helper must exist");

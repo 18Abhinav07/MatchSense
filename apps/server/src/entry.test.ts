@@ -42,7 +42,7 @@ describe("role-selected server entrypoint", () => {
       {
         DATABASE_URL: databaseUrl,
         ROLE: "worker",
-        TXLINE_API_TOKEN: "collector-only-token",
+        TXLINE_API_TOKEN: "fixture-collector-only-token",
       },
       { loadApi, loadCollector },
     );
