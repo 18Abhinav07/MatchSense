@@ -154,6 +154,49 @@ describe("commentary job repository", () => {
     expect(readyUpdate?.parameters[0]).toBe("artifact-canonical-identity");
   });
 
+  it("rejects a completion attempt after its commentary claim has expired", async () => {
+    const audioBytes = new Uint8Array([73, 68, 51, 4]);
+    const audioHash = createHash("sha256").update(audioBytes).digest("hex");
+    const expiredClaim = {
+      ...claimedJobRow,
+      claim_expires_at: "2000-01-01T00:00:00.000Z",
+    };
+    const fake = testClient((query) => {
+      if (
+        query.includes("SELECT") &&
+        query.includes("matchsense.commentary_jobs")
+      ) {
+        return [expiredClaim];
+      }
+      if (query.includes("INSERT INTO matchsense.commentary_artifacts")) {
+        return [{ id: "artifact-canonical-identity" }];
+      }
+      if (query.includes("UPDATE matchsense.commentary_jobs")) {
+        return query.includes("claim_expires_at > clock_timestamp()")
+          ? []
+          : [expiredClaim];
+      }
+      return [];
+    });
+    const jobs = db.createCommentaryJobRepository?.(fake.client);
+
+    await expect(
+      jobs?.complete({
+        artifactId: "artifact-expired-claim",
+        audioBytes,
+        audioHash,
+        jobId: jobInput.id,
+        workerId: "worker-a",
+      }),
+    ).rejects.toThrow("Commentary job claim was lost before completion");
+    const readyUpdate = fake.queries.find(({ query }) =>
+      query.includes("UPDATE matchsense.commentary_jobs"),
+    );
+    expect(readyUpdate?.query).toContain(
+      "claim_expires_at > clock_timestamp()",
+    );
+  });
+
   it("reuses the unique artifact identity and retires superseded revisions", async () => {
     let enqueueCount = 0;
     const fake = testClient((query) => {

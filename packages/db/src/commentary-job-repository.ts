@@ -301,6 +301,7 @@ SET status = 'ready',
     last_error = NULL,
     updated_at = clock_timestamp()
 WHERE id = $3 AND status = 'claimed' AND claimed_by = $4
+  AND claim_expires_at > clock_timestamp()
 RETURNING ${jobColumns};`,
           [persistedArtifactId, input.audioHash, input.jobId, input.workerId],
         );
