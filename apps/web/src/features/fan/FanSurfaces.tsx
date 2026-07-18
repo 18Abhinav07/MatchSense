@@ -318,6 +318,48 @@ function textPreference(
     : fallback;
 }
 
+function DeleteProfileDialog({
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  busy: boolean;
+  onCancel(): void;
+  onConfirm(): void;
+}) {
+  return (
+    <div className="ms-delete-scrim">
+      <section
+        aria-describedby="delete-profile-description"
+        aria-labelledby="delete-profile-title"
+        aria-modal="true"
+        className="ms-delete-dialog"
+        role="dialog"
+      >
+        <p className="kicker">PRIVATE PROFILE</p>
+        <h2 id="delete-profile-title">Delete your profile?</h2>
+        <p id="delete-profile-description">
+          Your supporter identity, preferences, follows, and notification
+          registration will be removed from MatchSense.
+        </p>
+        <div className="ms-delete-dialog-actions">
+          <button disabled={busy} onClick={onCancel} type="button">
+            Cancel
+          </button>
+          <button
+            className="ms-delete-confirm"
+            disabled={busy}
+            onClick={onConfirm}
+            type="button"
+          >
+            {busy ? "Deleting…" : "Delete everything"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export function ProfileSurface({
   api,
   catalog,
@@ -396,10 +438,6 @@ export function ProfileSurface({
   };
 
   const remove = async () => {
-    if (state !== "confirm-delete") {
-      setState("confirm-delete");
-      return;
-    }
     setState("deleting");
     try {
       await api.deleteProfile();
@@ -556,14 +594,10 @@ export function ProfileSurface({
         </button>
         <button
           className="ms-delete-profile"
-          onClick={() => void remove()}
+          onClick={() => setState("confirm-delete")}
           type="button"
         >
-          {state === "confirm-delete"
-            ? "Tap again to delete everything"
-            : state === "deleting"
-              ? "Deleting…"
-              : "Delete profile"}
+          Delete profile
         </button>
         {state === "error" ? (
           <p className="ms-fan-error">
@@ -571,6 +605,13 @@ export function ProfileSurface({
           </p>
         ) : null}
       </div>
+      {state === "confirm-delete" || state === "deleting" ? (
+        <DeleteProfileDialog
+          busy={state === "deleting"}
+          onCancel={() => setState("idle")}
+          onConfirm={() => void remove()}
+        />
+      ) : null}
     </main>
   );
 }

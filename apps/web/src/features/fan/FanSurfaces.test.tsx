@@ -1,4 +1,5 @@
 import { createElement } from "react";
+import { readFile } from "node:fs/promises";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
@@ -38,6 +39,19 @@ const savedArgentinaFan = {
 };
 
 describe("fan identity surfaces", () => {
+  it("uses a centered confirmation dialog instead of inline second-tap deletion", async () => {
+    const source = await readFile(
+      new URL("./FanSurfaces.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain('role="dialog"');
+    expect(source).toContain('aria-modal="true"');
+    expect(source).toContain("Delete everything");
+    expect(source).toContain("Cancel");
+    expect(source).not.toContain("Tap again to delete everything");
+  });
+
   it("asks for a public handle without exposing the immutable fan id", () => {
     const markup = renderToStaticMarkup(
       createElement(HandleStep, {

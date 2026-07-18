@@ -96,7 +96,6 @@ export function TodayHub({
           Match<span>Sense</span>
         </a>
         <div>
-          <span>World Cup match desk</span>
           <button
             aria-label="Your profile"
             onClick={onOpenProfile}

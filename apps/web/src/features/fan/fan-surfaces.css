@@ -186,7 +186,18 @@
 .ms-handle-field {
   display: flex;
   margin-top: 34px;
-  border-bottom: 2px solid #9fec58;
+  padding: 5px 18px;
+  border: 0;
+  border-radius: 18px;
+  background: #131813;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 7%);
+  transition:
+    background-color 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.ms-handle-field:focus-within {
+  background: #181e18;
+  transform: translateY(-1px);
 }
 .ms-handle-field span {
   padding: 18px 8px 18px 0;
@@ -196,6 +207,7 @@
     monospace;
 }
 .ms-handle-field input {
+  min-height: 58px;
   min-width: 0;
   flex: 1;
   color: #f7f4ea;
@@ -344,19 +356,29 @@
 .ms-completion-card select,
 .ms-profile-grid input,
 .ms-profile-grid select {
-  min-height: 48px;
-  padding: 0 14px;
+  width: 100%;
+  min-height: 54px;
+  box-sizing: border-box;
+  padding: 0 16px;
   color: #f7f4ea;
-  border: 1px solid #434b43;
-  border-radius: 2px;
+  border: 1px solid transparent;
+  border-radius: 16px;
   outline: none;
-  background: #0c0f0c;
+  background: #151a15;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 7%);
+  transition:
+    background-color 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 220ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 .ms-completion-card input:focus,
 .ms-completion-card select:focus,
 .ms-profile-grid input:focus,
 .ms-profile-grid select:focus {
-  border-color: #9fec58;
+  border-color: transparent;
+  background: #192019;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 8%),
+    0 0 0 2px rgb(159 236 88 / 42%);
 }
 .ms-fan-error {
   color: #ff8d82;
@@ -458,12 +480,111 @@
 }
 .ms-profile-actions .primary-control {
   width: auto;
+  border-radius: 14px;
 }
 .ms-delete-profile {
-  color: #ef9188;
+  display: inline-flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 22px;
+  color: #fff5f3;
   border: 0;
-  border-bottom: 1px solid #834943;
-  background: transparent;
+  border-radius: 14px;
+  background: #9f3531;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 15%);
+  font-weight: 760;
+  transition:
+    background-color 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 110ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.ms-delete-profile:hover,
+.ms-delete-confirm:hover {
+  background: #b13d38;
+}
+.ms-delete-profile:active,
+.ms-delete-confirm:active,
+.ms-delete-dialog-actions > button:first-child:active {
+  transform: scale(0.98);
+}
+
+.ms-delete-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgb(5 7 5 / 78%);
+  backdrop-filter: blur(18px);
+  animation: msDeleteScrimIn 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.ms-delete-dialog {
+  width: min(100%, 440px);
+  box-sizing: border-box;
+  padding: 30px;
+  color: #f7f4ea;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 24px;
+  background: #151915;
+  box-shadow:
+    0 30px 90px rgb(2 5 3 / 58%),
+    inset 0 1px 0 rgb(255 255 255 / 8%);
+  animation: msDeleteDialogIn 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.ms-delete-dialog h2 {
+  margin: 10px 0 12px;
+  font-size: clamp(30px, 7vw, 42px);
+  line-height: 0.98;
+  letter-spacing: -0.055em;
+}
+.ms-delete-dialog > p:not(.kicker) {
+  margin: 0;
+  color: #b2bbb2;
+  line-height: 1.6;
+}
+.ms-delete-dialog-actions {
+  display: grid;
+  margin-top: 28px;
+  grid-template-columns: 1fr 1.25fr;
+  gap: 10px;
+}
+.ms-delete-dialog-actions button {
+  min-height: 52px;
+  padding: 0 18px;
+  color: #eef2ed;
+  border: 0;
+  border-radius: 14px;
+  background: #292f29;
+  font-weight: 760;
+  transition:
+    background-color 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 110ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.ms-delete-dialog-actions .ms-delete-confirm {
+  color: #fff5f3;
+  background: #9f3531;
+}
+.ms-delete-dialog-actions button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+@keyframes msDeleteScrimIn {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes msDeleteDialogIn {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 @keyframes msPitchEnter {
@@ -505,6 +626,17 @@
   .ms-profile-grid {
     grid-template-columns: 1fr;
   }
+  .ms-profile-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .ms-profile-actions .primary-control,
+  .ms-delete-profile {
+    width: 100%;
+  }
+  .ms-delete-dialog-actions {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -513,5 +645,9 @@
   }
   .ms-profile-toggle i::after {
     transition: none;
+  }
+  .ms-delete-scrim,
+  .ms-delete-dialog {
+    animation: none;
   }
 }

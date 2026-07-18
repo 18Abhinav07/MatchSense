@@ -124,5 +124,6 @@ describe("TodayHub", () => {
 
     expect(markup).toContain("Your profile");
     expect(markup).toContain('aria-label="Your profile"');
+    expect(markup).not.toContain("World Cup match desk");
   });
 });
