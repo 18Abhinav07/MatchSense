@@ -88,6 +88,16 @@ export interface ArchiveInvalidationInput extends ArchiveFixtureKey {
   sourceFence: SourceFence;
 }
 
+/**
+ * A live collector correction uses its already-held live source fence. It
+ * never acquires a second recorded lease, but may only invalidate a public
+ * recorded replay that is currently ready.
+ */
+export interface RecordedReplayInvalidationInput {
+  fixtureId: string;
+  reason: string;
+}
+
 export interface ArchiveManifest {
   createdAt: string;
   deliveryManifestHash: string;
@@ -256,6 +266,27 @@ FOR UPDATE;`,
   return rows[0] !== undefined;
 }
 
+/**
+ * Transaction-local recorded replay invalidation for a caller that already
+ * holds the authoritative live source-frame transaction and fence.
+ */
+export async function invalidateRecordedReplayReadyArchiveInTransaction(
+  transaction: SqlExecutor,
+  input: RecordedReplayInvalidationInput,
+): Promise<void> {
+  assertNonempty(input.fixtureId, "Fixture id");
+  assertNonempty(input.reason, "Archive invalidation reason");
+  await transaction.unsafe(
+    `UPDATE matchsense.archive_manifests
+SET status = 'REPLAY_INVALIDATED',
+    invalidation_reason = $2,
+    invalidated_at = clock_timestamp(),
+    updated_at = clock_timestamp()
+WHERE mode = 'recorded' AND fixture_id = $1 AND status = 'REPLAY_READY';`,
+    [input.fixtureId, input.reason],
+  );
+}
+
 function provenanceFor(mode: ArchiveMode): ArchiveProvenance {
   return mode === "live" ? "live_txline" : "recorded_txline_authorised";
 }
@@ -372,18 +403,80 @@ function deliveryManifestHash(
   return createHash("sha256").update(manifest).digest("hex");
 }
 
+/**
+ * A replay-ready manifest alone is insufficient: its exact content must be
+ * bound to the generation that actually transitioned the import job to ready.
+ */
+function currentRecordedArchiveImportBinding() {
+  return `EXISTS (
+    SELECT 1
+    FROM matchsense.archive_import_jobs AS archive_job
+    JOIN matchsense.archive_import_job_outputs AS archive_output
+      ON archive_output.fixture_id = archive_job.fixture_id
+      AND archive_output.claim_generation = archive_job.claim_generation
+      AND archive_output.archive_manifest_id = archive_job.archive_manifest_id
+      AND archive_output.archive_manifest_hash = archive_job.archive_manifest_hash
+    WHERE archive_job.fixture_id = manifest.fixture_id
+      AND archive_job.state = 'replay_ready'
+      AND archive_job.archive_manifest_id = manifest.id
+      AND archive_job.archive_manifest_hash = manifest.delivery_manifest_hash
+  )`;
+}
+
+function txlinePayloadRecord(payload: unknown): Record<string, unknown> | null {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  const update = Object.hasOwn(record, "Update")
+    ? record.Update
+    : Object.hasOwn(record, "update")
+      ? record.update
+      : undefined;
+  const unwrapped = update ?? record;
+  return typeof unwrapped === "object" &&
+    unwrapped !== null &&
+    !Array.isArray(unwrapped)
+    ? (unwrapped as Record<string, unknown>)
+    : null;
+}
+
+function txlinePayloadField(
+  payload: Record<string, unknown>,
+  ...keys: readonly string[]
+): unknown {
+  for (const key of keys) {
+    if (Object.hasOwn(payload, key)) return payload[key];
+  }
+  return undefined;
+}
+
+function txlineAction(payload: Record<string, unknown>): string | null {
+  const action = txlinePayloadField(payload, "Action", "action");
+  return typeof action === "string" ? action.toLowerCase() : null;
+}
+
+function txlineStatusId(payload: Record<string, unknown>): number | null {
+  const statusId = txlinePayloadField(payload, "StatusId", "statusId");
+  return typeof statusId === "number" && Number.isFinite(statusId)
+    ? statusId
+    : null;
+}
+
 function isAuthoritativeTerminalDelivery(
   delivery: DurableSourceDelivery,
 ): boolean {
-  if (!delivery.canonicalEligible || delivery.payload === null) return false;
-  if (typeof delivery.payload !== "object" || Array.isArray(delivery.payload)) {
-    return false;
-  }
-  const payload = delivery.payload as Record<string, unknown>;
+  if (!delivery.canonicalEligible) return false;
+  const payload = txlinePayloadRecord(delivery.payload);
+  if (!payload) return false;
   return (
-    payload.Action === "game_finalised" &&
-    payload.StatusId === 100 &&
-    payload.Confirmed !== false
+    txlineAction(payload) === "game_finalised" &&
+    txlineStatusId(payload) === 100 &&
+    txlinePayloadField(payload, "Confirmed", "confirmed") !== false
   );
 }
 
@@ -713,6 +806,7 @@ JOIN matchsense.rights_grants AS grant ON grant.id = manifest.rights_grant_id
 WHERE manifest.mode = $1
   AND manifest.fixture_id = $2
   AND manifest.status = 'REPLAY_READY'
+  AND (${currentRecordedArchiveImportBinding()})
   AND grant.active = true
   AND grant.revoked_at IS NULL
   AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())

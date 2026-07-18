@@ -1,3 +1,4 @@
+import { hashArchiveImportSourceContext } from "@matchsense/db";
 import type {
   ArchiveImportJob,
   ArchiveImportJobRepository,
@@ -34,6 +35,9 @@ const recordedLeaseKey = {
 };
 
 const rejectedHistoricalImportMessages = new Set([
+  "Archive import job frozen schedule context is inconsistent",
+  "Archive import job frozen schedule context hash is invalid",
+  "Archive import job is missing frozen schedule context",
   "Historical import requires reconciliation records",
   "Historical record does not match the requested fixture",
   "Historical record did not originate from the TxLINE historical path",
@@ -101,12 +105,38 @@ function isoAt(now: Date, offsetMs: number) {
 }
 
 function frozenFixture(job: ArchiveImportJob): DurableTxlineFixture {
+  const sourceContext = job.sourceContext;
+  if (!sourceContext) {
+    throw new Error("Archive import job is missing frozen schedule context");
+  }
+  if (hashArchiveImportSourceContext(sourceContext) !== job.contextHash) {
+    throw new Error(
+      "Archive import job frozen schedule context hash is invalid",
+    );
+  }
+  const homeTeam = sourceContext.participant1IsHome
+    ? sourceContext.participant1.code
+    : sourceContext.participant2.code;
+  const awayTeam = sourceContext.participant1IsHome
+    ? sourceContext.participant2.code
+    : sourceContext.participant1.code;
+  if (
+    sourceContext.fixtureId !== job.fixtureId ||
+    sourceContext.kickoffAt !== job.kickoffAt ||
+    sourceContext.participant1IsHome !== job.participant1IsHome ||
+    homeTeam !== job.homeTeamId ||
+    awayTeam !== job.awayTeamId
+  ) {
+    throw new Error(
+      "Archive import job frozen schedule context is inconsistent",
+    );
+  }
   return {
-    awayTeam: job.awayTeamId,
-    fixtureId: job.fixtureId,
-    homeTeam: job.homeTeamId,
-    kickoffAt: job.kickoffAt,
-    participant1IsHome: job.participant1IsHome,
+    awayTeam,
+    fixtureId: sourceContext.fixtureId,
+    homeTeam,
+    kickoffAt: sourceContext.kickoffAt,
+    participant1IsHome: sourceContext.participant1IsHome,
   };
 }
 
@@ -242,6 +272,12 @@ export function createArchiveImportRunner(
 
       const job = await options.archiveImportJobs.claim(options.workerId, now);
       if (!job) return { kind: "idle" };
+      let fixture: DurableTxlineFixture;
+      try {
+        fixture = frozenFixture(job);
+      } catch (error) {
+        return settleFailure(job, now, error);
+      }
       const retryAfterShutdown = async () => {
         await retrySafely(job, now, SHUTDOWN_RETRY_ERROR);
         return { fixtureId: job.fixtureId, kind: "retry_wait" } as const;
@@ -375,7 +411,7 @@ export function createArchiveImportRunner(
           }
           if (shutdownRequested()) return retryAfterShutdown();
           imported = await importer.importFixture({
-            fixture: frozenFixture(job),
+            fixture,
             records,
           });
         } catch (error) {

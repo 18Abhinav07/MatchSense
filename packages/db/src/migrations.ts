@@ -1003,6 +1003,21 @@ CREATE INDEX archive_import_job_outputs_manifest_idx
     archive_manifest_id ASC, archive_manifest_hash ASC
   );`.trim(),
   ),
+  defineMigration(
+    9,
+    "freeze TxLINE schedule source context for archive import jobs",
+    `-- Existing jobs cannot be backfilled without inventing provider schedule
+-- facts, so legacy rows remain NULL. All newly enqueued jobs write this once.
+ALTER TABLE matchsense.archive_import_jobs
+  ADD COLUMN source_context jsonb;
+
+ALTER TABLE matchsense.archive_import_jobs
+  ADD CONSTRAINT archive_import_jobs_source_context_object
+    CHECK (
+      source_context IS NULL
+      OR jsonb_typeof(source_context) = 'object'
+    );`.trim(),
+  ),
 ]);
 
 export function planMigrations(

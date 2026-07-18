@@ -24,7 +24,10 @@ export {
   createPostgresMigrationStore,
 } from "./postgres.js";
 export type { ApplicationDatabase, PostgresClient } from "./postgres.js";
-export { createArchiveRepository } from "./archive-repositories.js";
+export {
+  createArchiveRepository,
+  invalidateRecordedReplayReadyArchiveInTransaction,
+} from "./archive-repositories.js";
 export type {
   ArchiveManifest,
   ArchiveManifestStatus,
@@ -38,6 +41,7 @@ export type {
   DurableRawRetention,
   DurableSourceDelivery,
   InsertDeliveryResult,
+  RecordedReplayInvalidationInput,
   RightsGrant,
   RightsGrantWrite,
   VerifyArchiveInput,
@@ -45,6 +49,10 @@ export type {
 export {
   createArchiveImportJobRepository,
   createFeaturedReplayRepository,
+  enqueueArchiveImportJob,
+  enqueueLiveTerminalArchiveImportJob,
+  hashArchiveImportSourceContext,
+  supersedeLiveTerminalArchiveImportJobForCorrection,
 } from "./archive-import-job-repository.js";
 export type {
   ArchiveImportJob,
@@ -52,6 +60,7 @@ export type {
   ArchiveImportJobRepository,
   ArchiveImportJobState,
   ArchiveImportReason,
+  ArchiveImportSourceContext,
   ArchiveImportVerifiedOutput,
   BindVerifiedArchiveOutput,
   ClaimedArchiveImportJob,
@@ -59,8 +68,10 @@ export type {
   FeaturedReplayConfigInput,
   FeaturedReplayReady,
   FeaturedReplayRepository,
+  LiveTerminalArchiveImportJobInput,
   RenewArchiveImportJobClaim,
   RetryArchiveImportJob,
+  SupersedeLiveTerminalArchiveImportJobForCorrectionInput,
   TerminalArchiveImportJob,
 } from "./archive-import-job-repository.js";
 export { createCommentaryJobRepository } from "./commentary-job-repository.js";
@@ -109,6 +120,8 @@ export type {
   ProcessSourceEnvelopeResult,
   QueryRow,
   RawSourceRecordWrite,
+  RecordedArchiveInvalidation,
+  RecordedArchiveInvalidationAction,
   RepositoryClient,
   SourceDeliveryIntent,
   SourceEnvelopeCommitPlan,

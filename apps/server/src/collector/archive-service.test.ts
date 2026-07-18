@@ -156,6 +156,56 @@ describe("durable archive service", () => {
     );
   });
 
+  it("rebuilds and verifies an adapter-wrapped authoritative terminal", async () => {
+    const wrappedFinal = {
+      Action: "goal",
+      Confirmed: false,
+      StatusId: 0,
+      update: {
+        FixtureId: final.FixtureId,
+        Id: final.Id,
+        Participant: final.Participant,
+        Score: final.Score,
+        Seq: final.Seq,
+        Ts: final.Ts,
+        action: "GAME_FINALISED",
+        confirmed: true,
+        statusId: 100,
+      },
+    };
+    const archive: Pick<
+      ArchiveRepository,
+      "orderedDeliveries" | "verifyArchive" | "invalidateArchive"
+    > = {
+      invalidateArchive: vi.fn(async () => ({ kind: "applied" as const })),
+      orderedDeliveries: vi.fn(async () => [
+        delivery("goal-1", "0001", goal),
+        delivery("final-2", "0002", wrappedFinal),
+      ]),
+      verifyArchive: vi.fn(async (input) => ({
+        kind: "verified" as const,
+        manifest: archiveManifest(input.projectionHash),
+      })),
+    };
+    const service = createArchiveService({ archive });
+
+    await expect(
+      service.rebuild({
+        fixture,
+        manifestId: "archive-wrapped-fx-archive",
+        mode: "live",
+        rightsGrantId: "grant-archive",
+        sourceFence: liveFence,
+      }),
+    ).resolves.toMatchObject({
+      status: "REPLAY_READY",
+      terminalDeliveryId: "final-2",
+    });
+    expect(archive.verifyArchive).toHaveBeenCalledWith(
+      expect.objectContaining({ terminalDeliveryId: "final-2" }),
+    );
+  });
+
   it("invalidates a prior archive before rebuilding after a correction", async () => {
     const calls: string[] = [];
     const archive: Pick<

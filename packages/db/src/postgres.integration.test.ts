@@ -15,9 +15,11 @@ import {
 import {
   assertDestructiveIntegrationTarget,
   createPostgresDatabase,
+  hashArchiveImportSourceContext,
   migrationCatalog,
   runDatabaseCli,
   type ApplicationDatabase,
+  type ArchiveImportJobInput,
   type CommitSourceChangeInput,
   type SourceFence,
 } from "./index.js";
@@ -169,6 +171,56 @@ const recordedFixture = {
   status: "scheduled",
 };
 
+function archiveImportJobInput(
+  input: Omit<
+    ArchiveImportJobInput,
+    "contextHash" | "participant1IsHome" | "sourceContext"
+  > & {
+    participant1IsHome?: boolean;
+  },
+): ArchiveImportJobInput {
+  const participant1IsHome = input.participant1IsHome ?? true;
+  const participant1Code = participant1IsHome
+    ? input.homeTeamId
+    : input.awayTeamId;
+  const participant2Code = participant1IsHome
+    ? input.awayTeamId
+    : input.homeTeamId;
+  const sourceContext = {
+    fixtureGroupId: `schedule-group:${input.fixtureId}`,
+    fixtureId: input.fixtureId,
+    gameState: 2,
+    kickoffAt: input.kickoffAt,
+    participant1: {
+      code: participant1Code,
+      id: `provider:${participant1Code}`,
+      name: `Provider ${participant1Code}`,
+    },
+    participant1IsHome,
+    participant2: {
+      code: participant2Code,
+      id: `provider:${participant2Code}`,
+      name: `Provider ${participant2Code}`,
+    },
+    schedule: {
+      competition: "integration",
+      competitionId: "72",
+      responseHash: createHash("sha256")
+        .update(`schedule:${input.fixtureId}:${input.kickoffAt}`)
+        .digest("hex"),
+      source: "txline_world_cup_schedule",
+      sourcePath: "/api/fixtures/snapshot?competitionId=72",
+      sourceTimestampMs: 1_784_403_000_000,
+    },
+  };
+  return {
+    ...input,
+    contextHash: hashArchiveImportSourceContext(sourceContext),
+    participant1IsHome,
+    sourceContext,
+  };
+}
+
 function sourceChange(
   input: {
     expectedRevision?: number;
@@ -292,8 +344,8 @@ describe.sequential("real PostgreSQL migration runtime", () => {
     const runtime = trackedDatabase();
 
     await expect(runtime.migrate()).resolves.toEqual({
-      appliedVersions: [1, 2, 3, 4, 5, 6, 7, 8],
-      currentVersion: 8,
+      appliedVersions: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+      currentVersion: 9,
     });
     await expect(runtime.check()).resolves.toEqual({
       databaseReachable: true,
@@ -301,7 +353,7 @@ describe.sequential("real PostgreSQL migration runtime", () => {
     });
     await expect(runtime.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 8,
+      currentVersion: 9,
     });
 
     const schemas = await admin.unsafe<{ schema_name: string }[]>(
@@ -313,7 +365,7 @@ describe.sequential("real PostgreSQL migration runtime", () => {
       "SELECT version, checksum, applied_at FROM public.matchsense_schema_migrations ORDER BY version;",
     );
     expect(schemas).toHaveLength(1);
-    expect(ledger).toHaveLength(8);
+    expect(ledger).toHaveLength(9);
     expect(ledger).toEqual([
       expect.objectContaining({
         checksum: migrationCatalog[0]?.checksum,
@@ -346,6 +398,10 @@ describe.sequential("real PostgreSQL migration runtime", () => {
       expect.objectContaining({
         checksum: migrationCatalog[7]?.checksum,
         version: 8,
+      }),
+      expect.objectContaining({
+        checksum: migrationCatalog[8]?.checksum,
+        version: 9,
       }),
     ]);
     expect(ledger.every(({ applied_at }) => applied_at instanceof Date)).toBe(
@@ -451,29 +507,31 @@ VALUES ('invalid-team', 'INV', 'Invalid Team', 0, 'recorded', 'other');`,
   it("preserves a frozen archive-import context while leasing, recovering, and retrying work", async () => {
     const runtime = trackedDatabase();
     await runtime.migrate();
-    const queued = await runtime.archiveImportJobs.enqueue({
-      awayTeamId: "ESP",
-      contextHash: "a".repeat(64),
-      fixtureId: "archive-job-fx-1",
-      homeTeamId: "FRA",
-      kickoffAt: "2026-07-18T12:00:00.000Z",
-      participant1IsHome: true,
-      reason: "featured_bootstrap",
-      sourceTerminalRecordId: "terminal-record-1",
-    });
-    const duplicate = await runtime.archiveImportJobs.enqueue({
-      awayTeamId: "ARG",
-      contextHash: "b".repeat(64),
-      fixtureId: queued.fixtureId,
-      homeTeamId: "BRA",
-      kickoffAt: "2030-01-01T00:00:00.000Z",
-      participant1IsHome: false,
-      reason: "featured_bootstrap",
-      sourceTerminalRecordId: "terminal-record-1",
-    });
+    const queued = await runtime.archiveImportJobs.enqueue(
+      archiveImportJobInput({
+        awayTeamId: "ESP",
+        fixtureId: "archive-job-fx-1",
+        homeTeamId: "FRA",
+        kickoffAt: "2026-07-18T12:00:00.000Z",
+        participant1IsHome: true,
+        reason: "featured_bootstrap",
+        sourceTerminalRecordId: "terminal-record-1",
+      }),
+    );
+    const duplicate = await runtime.archiveImportJobs.enqueue(
+      archiveImportJobInput({
+        awayTeamId: "ARG",
+        fixtureId: queued.fixtureId,
+        homeTeamId: "BRA",
+        kickoffAt: "2030-01-01T00:00:00.000Z",
+        participant1IsHome: false,
+        reason: "featured_bootstrap",
+        sourceTerminalRecordId: "terminal-record-1",
+      }),
+    );
     expect(duplicate).toMatchObject({
       awayTeamId: "ESP",
-      contextHash: "a".repeat(64),
+      contextHash: queued.contextHash,
       homeTeamId: "FRA",
       kickoffAt: "2026-07-18T12:00:00.000Z",
       participant1IsHome: true,
@@ -481,19 +539,20 @@ VALUES ('invalid-team', 'INV', 'Invalid Team', 0, 'recorded', 'other');`,
       sourceTerminalRecordId: "terminal-record-1",
       state: "queued",
     });
-    const correction = await runtime.archiveImportJobs.enqueue({
-      awayTeamId: "ARG",
-      contextHash: "b".repeat(64),
-      fixtureId: queued.fixtureId,
-      homeTeamId: "BRA",
-      kickoffAt: "2030-01-01T00:00:00.000Z",
-      participant1IsHome: false,
-      reason: "live_correction",
-      sourceTerminalRecordId: "terminal-record-correction-1",
-    });
+    const correction = await runtime.archiveImportJobs.enqueue(
+      archiveImportJobInput({
+        awayTeamId: "ARG",
+        fixtureId: queued.fixtureId,
+        homeTeamId: "BRA",
+        kickoffAt: "2030-01-01T00:00:00.000Z",
+        participant1IsHome: false,
+        reason: "live_correction",
+        sourceTerminalRecordId: "terminal-record-correction-1",
+      }),
+    );
     expect(correction).toMatchObject({
       awayTeamId: "ESP",
-      contextHash: "a".repeat(64),
+      contextHash: queued.contextHash,
       homeTeamId: "FRA",
       kickoffAt: "2026-07-18T12:00:00.000Z",
       participant1IsHome: true,
@@ -593,8 +652,8 @@ VALUES ('v6-backfill', $1, $2, true);`,
     );
     const runtime = trackedDatabase();
     await expect(runtime.migrate()).resolves.toEqual({
-      appliedVersions: [7, 8],
-      currentVersion: 8,
+      appliedVersions: [7, 8, 9],
+      currentVersion: 9,
     });
     await expect(
       admin.unsafe<
@@ -628,16 +687,17 @@ WHERE job.fixture_id = 'v6-replay-backfill-fx';`),
     const manifestId = "archive-generation-fence-manifest";
     const h1 = "1".repeat(64);
     const h2 = "2".repeat(64);
-    const queued = await runtime.archiveImportJobs.enqueue({
-      awayTeamId: "ESP",
-      contextHash: "c".repeat(64),
-      fixtureId,
-      homeTeamId: "FRA",
-      kickoffAt: "2026-07-18T12:00:00.000Z",
-      participant1IsHome: true,
-      reason: "featured_bootstrap",
-      sourceTerminalRecordId: "source-terminal-h1",
-    });
+    const queued = await runtime.archiveImportJobs.enqueue(
+      archiveImportJobInput({
+        awayTeamId: "ESP",
+        fixtureId,
+        homeTeamId: "FRA",
+        kickoffAt: "2026-07-18T12:00:00.000Z",
+        participant1IsHome: true,
+        reason: "featured_bootstrap",
+        sourceTerminalRecordId: "source-terminal-h1",
+      }),
+    );
     const first = await runtime.archiveImportJobs.claim(
       "archive-worker-a",
       new Date("2100-01-01T00:00:00.000Z"),
@@ -671,16 +731,17 @@ WHERE job.fixture_id = 'v6-replay-backfill-fx';`),
       runtime.featuredReplays.ready("archive-generation-fence"),
     ).resolves.toMatchObject({ archiveManifestHash: h1 });
 
-    const correction = await runtime.archiveImportJobs.enqueue({
-      awayTeamId: "ARG",
-      contextHash: "d".repeat(64),
-      fixtureId: queued.fixtureId,
-      homeTeamId: "BRA",
-      kickoffAt: "2030-01-01T00:00:00.000Z",
-      participant1IsHome: false,
-      reason: "live_correction",
-      sourceTerminalRecordId: "source-terminal-h2",
-    });
+    const correction = await runtime.archiveImportJobs.enqueue(
+      archiveImportJobInput({
+        awayTeamId: "ARG",
+        fixtureId: queued.fixtureId,
+        homeTeamId: "BRA",
+        kickoffAt: "2030-01-01T00:00:00.000Z",
+        participant1IsHome: false,
+        reason: "live_correction",
+        sourceTerminalRecordId: "source-terminal-h2",
+      }),
+    );
     expect(correction).toMatchObject({
       claimGeneration: 1,
       sourceTerminalRecordId: "source-terminal-h2",
@@ -787,16 +848,17 @@ WHERE id = $1;`,
     const manifestHash = "3".repeat(64);
     const grantId = `grant-${fixtureId}`;
     const workerId = "archive-worker-rights";
-    await runtime.archiveImportJobs.enqueue({
-      awayTeamId: "ESP",
-      contextHash: "e".repeat(64),
-      fixtureId,
-      homeTeamId: "FRA",
-      kickoffAt: "2026-07-18T12:00:00.000Z",
-      participant1IsHome: true,
-      reason: "featured_bootstrap",
-      sourceTerminalRecordId: "rights-source-terminal",
-    });
+    await runtime.archiveImportJobs.enqueue(
+      archiveImportJobInput({
+        awayTeamId: "ESP",
+        fixtureId,
+        homeTeamId: "FRA",
+        kickoffAt: "2026-07-18T12:00:00.000Z",
+        participant1IsHome: true,
+        reason: "featured_bootstrap",
+        sourceTerminalRecordId: "rights-source-terminal",
+      }),
+    );
     const first = await runtime.archiveImportJobs.claim(
       workerId,
       new Date("2100-01-01T00:00:00.000Z"),
@@ -993,16 +1055,17 @@ VALUES (
       "DELETE FROM matchsense.archive_import_jobs WHERE fixture_id = $1;",
       [fixtureId],
     );
-    await runtime.archiveImportJobs.enqueue({
-      awayTeamId: "ESP",
-      contextHash: "8".repeat(64),
-      fixtureId,
-      homeTeamId: "FRA",
-      kickoffAt: "2026-07-18T12:00:00.000Z",
-      participant1IsHome: true,
-      reason: "featured_bootstrap",
-      sourceTerminalRecordId: "archive-public-source-h1",
-    });
+    await runtime.archiveImportJobs.enqueue(
+      archiveImportJobInput({
+        awayTeamId: "ESP",
+        fixtureId,
+        homeTeamId: "FRA",
+        kickoffAt: "2026-07-18T12:00:00.000Z",
+        participant1IsHome: true,
+        reason: "featured_bootstrap",
+        sourceTerminalRecordId: "archive-public-source-h1",
+      }),
+    );
     const claimed = await runtime.archiveImportJobs.claim(
       workerId,
       new Date("2100-01-01T00:00:00.000Z"),
@@ -1065,16 +1128,17 @@ WHERE id = $1;`,
       [grantId],
     );
 
-    await runtime.archiveImportJobs.enqueue({
-      awayTeamId: "ARG",
-      contextHash: "9".repeat(64),
-      fixtureId,
-      homeTeamId: "BRA",
-      kickoffAt: "2030-01-01T00:00:00.000Z",
-      participant1IsHome: false,
-      reason: "live_correction",
-      sourceTerminalRecordId: "archive-public-source-h2",
-    });
+    await runtime.archiveImportJobs.enqueue(
+      archiveImportJobInput({
+        awayTeamId: "ARG",
+        fixtureId,
+        homeTeamId: "BRA",
+        kickoffAt: "2030-01-01T00:00:00.000Z",
+        participant1IsHome: false,
+        reason: "live_correction",
+        sourceTerminalRecordId: "archive-public-source-h2",
+      }),
+    );
     await expect(
       runtime.fixtureReads.getReplayReady({ fixtureId, mode: "recorded" }),
     ).resolves.toBeNull();
@@ -1092,16 +1156,17 @@ WHERE id = $1;`,
     const h1 = "4".repeat(64);
     const h2 = "5".repeat(64);
     const workerId = "archive-worker-post-bind";
-    await runtime.archiveImportJobs.enqueue({
-      awayTeamId: "ESP",
-      contextHash: "f".repeat(64),
-      fixtureId,
-      homeTeamId: "FRA",
-      kickoffAt: "2026-07-18T12:00:00.000Z",
-      participant1IsHome: true,
-      reason: "featured_bootstrap",
-      sourceTerminalRecordId: "post-bind-source-terminal",
-    });
+    await runtime.archiveImportJobs.enqueue(
+      archiveImportJobInput({
+        awayTeamId: "ESP",
+        fixtureId,
+        homeTeamId: "FRA",
+        kickoffAt: "2026-07-18T12:00:00.000Z",
+        participant1IsHome: true,
+        reason: "featured_bootstrap",
+        sourceTerminalRecordId: "post-bind-source-terminal",
+      }),
+    );
     const first = await runtime.archiveImportJobs.claim(
       workerId,
       new Date("2100-01-01T00:00:00.000Z"),
@@ -1208,7 +1273,7 @@ WHERE id = $1;`,
     }
   });
 
-  it("resets a populated v7 claimed job before issuing its first fenced v8 claim", async () => {
+  it("resets a populated v7 claimed job, preserves its nullable v9 source context, and issues its first fenced claim", async () => {
     await seedV7MigrationLedger();
     await admin.unsafe(
       `INSERT INTO matchsense.archive_import_jobs (
@@ -1224,8 +1289,8 @@ VALUES (
     );
     const runtime = trackedDatabase();
     await expect(runtime.migrate()).resolves.toEqual({
-      appliedVersions: [8],
-      currentVersion: 8,
+      appliedVersions: [8, 9],
+      currentVersion: 9,
     });
     await expect(
       admin.unsafe<
@@ -1235,8 +1300,10 @@ VALUES (
           claim_started_at: Date | null;
           claimed_by: string | null;
           state: string;
+          source_context: unknown;
         }[]
       >(`SELECT state, claimed_by, claim_expires_at, claim_started_at,
+  source_context,
   claim_generation::text AS claim_generation
 FROM matchsense.archive_import_jobs
 WHERE fixture_id = 'v7-claimed-job-fx';`),
@@ -1247,6 +1314,7 @@ WHERE fixture_id = 'v7-claimed-job-fx';`),
         claim_started_at: null,
         claimed_by: null,
         state: "retry_wait",
+        source_context: null,
       },
     ]);
     await expect(
@@ -1284,8 +1352,8 @@ VALUES (
 
     const runtime = trackedDatabase();
     await expect(runtime.migrate()).resolves.toEqual({
-      appliedVersions: [4, 5, 6, 7, 8],
-      currentVersion: 8,
+      appliedVersions: [4, 5, 6, 7, 8, 9],
+      currentVersion: 9,
     });
 
     const rows = await admin.unsafe<

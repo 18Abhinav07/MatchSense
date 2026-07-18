@@ -50,7 +50,7 @@ const prefixCatalog = [
 
 describe("migration catalog and planning", () => {
   it("publishes a deterministic schema-only baseline migration", () => {
-    expect(db.migrationCatalog).toHaveLength(8);
+    expect(db.migrationCatalog).toHaveLength(9);
 
     const migration = db.migrationCatalog?.[0];
     expect(migration).toMatchObject({
@@ -214,7 +214,7 @@ describe("migration catalog and planning", () => {
   it("retires synthetic public modes and adds the authorised archive/job foundation in v4", () => {
     const migration = db.migrationCatalog?.[3];
 
-    expect(db.migrationCatalog).toHaveLength(8);
+    expect(db.migrationCatalog).toHaveLength(9);
     expect(migration).toMatchObject({
       description:
         "retire synthetic public modes and add authorised archive jobs",
@@ -318,7 +318,7 @@ describe("migration catalog and planning", () => {
   it("adds durable archive-import leases and manifest-pinned featured replay readiness in v6", () => {
     const migration = db.migrationCatalog?.[5];
 
-    expect(db.migrationCatalog).toHaveLength(8);
+    expect(db.migrationCatalog).toHaveLength(9);
     expect(migration).toMatchObject({
       description:
         "create durable archive import jobs and featured replay readiness",
@@ -405,6 +405,29 @@ describe("migration catalog and planning", () => {
       "archive_terminal_delivery_id text NOT NULL",
     );
     expect(migration?.sql).toContain("archive_import_jobs_claim_pair");
+  });
+
+  it("freezes provider schedule context for new archive-import jobs in v9", () => {
+    const migration = db.migrationCatalog?.[8];
+
+    expect(migration).toMatchObject({
+      description:
+        "freeze TxLINE schedule source context for archive import jobs",
+      version: 9,
+    });
+    expect(migration?.checksum).toBe(
+      createHash("sha256")
+        .update(migration?.sql ?? "")
+        .digest("hex"),
+    );
+    expect(migration?.sql).toContain("ADD COLUMN source_context jsonb");
+    expect(migration?.sql).toContain(
+      "archive_import_jobs_source_context_object",
+    );
+    expect(migration?.sql).toContain("jsonb_typeof(source_context) = 'object'");
+    expect(migration?.sql).not.toContain(
+      "UPDATE matchsense.archive_import_jobs",
+    );
   });
 
   it("orders pending migrations and reports a repeat run as current", () => {

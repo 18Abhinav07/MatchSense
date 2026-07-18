@@ -84,8 +84,25 @@ const terminalDelivery = {
   sourceSequence: "1026",
 } as const;
 
+const wrappedTerminalDelivery = {
+  ...terminalDelivery,
+  payload: {
+    Action: "goal",
+    Confirmed: false,
+    StatusId: 0,
+    update: {
+      action: "GAME_FINALISED",
+      confirmed: true,
+      statusId: 100,
+    },
+  },
+} as const;
+
 function sourceDeliveryRow(
-  input: typeof sourceOnlyDelivery | typeof terminalDelivery,
+  input:
+    | typeof sourceOnlyDelivery
+    | typeof terminalDelivery
+    | typeof wrappedTerminalDelivery,
 ) {
   return {
     canonical_eligible: input.canonicalEligible,
@@ -362,6 +379,48 @@ describe("archive repository", () => {
     expect(firstLeaseLock).toBeLessThan(firstManifestMutation);
   });
 
+  it("treats a replay-ready manifest as unavailable without its current replay-ready job/output binding", async () => {
+    const stale = testClient((query) => {
+      if (query.includes("archive_import_jobs AS archive_job")) return [];
+      if (query.includes("FROM matchsense.archive_manifests")) {
+        return [manifestRow("REPLAY_READY")];
+      }
+      return [];
+    });
+    const staleArchive = db.createArchiveRepository?.(stale.client);
+    await expect(
+      staleArchive?.replayReady({ fixtureId, mode: "recorded" }),
+    ).resolves.toBeNull();
+
+    const current = testClient((query) =>
+      query.includes("archive_import_jobs AS archive_job")
+        ? [manifestRow("REPLAY_READY")]
+        : [],
+    );
+    const currentArchive = db.createArchiveRepository?.(current.client);
+    await expect(
+      currentArchive?.replayReady({ fixtureId, mode: "recorded" }),
+    ).resolves.toMatchObject({ id: "manifest-1", status: "REPLAY_READY" });
+
+    const replayQuery = current.queries.find(({ query }) =>
+      query.includes("FROM matchsense.archive_manifests"),
+    );
+    expect(replayQuery?.query).toContain("EXISTS (");
+    expect(replayQuery?.query).toContain(
+      "FROM matchsense.archive_import_jobs AS archive_job",
+    );
+    expect(replayQuery?.query).toContain(
+      "JOIN matchsense.archive_import_job_outputs AS archive_output",
+    );
+    expect(replayQuery?.query).toContain("archive_job.state = 'replay_ready'");
+    expect(replayQuery?.query).toContain(
+      "archive_job.archive_manifest_id = manifest.id",
+    );
+    expect(replayQuery?.query).toContain(
+      "archive_job.archive_manifest_hash = manifest.delivery_manifest_hash",
+    );
+  });
+
   it("rejects a terminal delivery that is not last in the ordered source stream", async () => {
     const laterDelivery = {
       ...sourceOnlyDelivery,
@@ -419,6 +478,13 @@ describe("archive repository", () => {
       { ...terminalDelivery.payload, Confirmed: false },
     ],
     ["a non-final status", { ...terminalDelivery.payload, StatusId: 99 }],
+    [
+      "a malformed wrapper that overrides a valid root final",
+      {
+        ...terminalDelivery.payload,
+        Update: { ...terminalDelivery.payload, Action: "action-amend" },
+      },
+    ],
   ])(
     "rejects %s game_finalised data before it can become replay ready",
     async (_label, payload) => {
@@ -454,6 +520,45 @@ describe("archive repository", () => {
       );
     },
   );
+
+  it("accepts a one-level adapter-wrapped authoritative terminal", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.rights_grants")) {
+        return [
+          {
+            active: true,
+            expires_at: null,
+            revoked_at: null,
+            scopes: ["raw_retention", "replay"],
+          },
+        ];
+      }
+      if (query.includes("FROM matchsense.raw_source_records")) {
+        return [sourceDeliveryRow(wrappedTerminalDelivery)];
+      }
+      if (query.includes("INSERT INTO matchsense.archive_manifests")) {
+        return [manifestRow("REPLAY_READY")];
+      }
+      return [];
+    });
+    const archive = db.createArchiveRepository?.(fake.client);
+
+    await expect(
+      archive?.verifyArchive({
+        fixtureId,
+        manifestId: "manifest-wrapped-terminal",
+        mode: "recorded",
+        projectionHash: "2".repeat(64),
+        reducerVersion: "txline-reducer-v1",
+        rightsGrantId: "txodds-hackathon-2026",
+        sourceFence: recordedFence,
+        terminalDeliveryId: wrappedTerminalDelivery.id,
+      }),
+    ).resolves.toMatchObject({
+      kind: "verified",
+      manifest: { status: "REPLAY_READY" },
+    });
+  });
 
   it("requires an active replay scope both while verifying and while reading a ready replay", async () => {
     const fake = testClient((query) => {

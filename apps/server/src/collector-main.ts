@@ -35,7 +35,7 @@ import {
 import { createArchiveService } from "./collector/archive-service.js";
 import {
   createScheduleSync,
-  durableFixtureFromSchedule,
+  durableCollectorFixtureFromSchedule,
   durableTeamCatalogFromSchedule,
 } from "./collector/schedule-sync.js";
 import { createTxlineCollector } from "./collector/txline-collector.js";
@@ -339,11 +339,10 @@ export function createDurableCollectorLifecycle(input: {
     const fixtures = new Map(
       schedule.map((fixture) => [
         fixture.fixtureId,
-        durableFixtureFromSchedule(fixture),
+        durableCollectorFixtureFromSchedule(fixture),
       ]),
     );
     const collector = createTxlineCollector({
-      archive: createArchiveService({ archive: input.database.archive }),
       fixtureForId: (fixtureId) => fixtures.get(fixtureId) ?? null,
       fixtureTruth: input.database.fixtureTruth,
       rightsGrantId: HACKATHON_RIGHTS_GRANT_ID,

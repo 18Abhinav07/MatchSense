@@ -98,16 +98,51 @@ function ordered(
   );
 }
 
+function txlinePayloadRecord(payload: unknown): Record<string, unknown> | null {
+  if (!isObject(payload)) return null;
+  const update = Object.hasOwn(payload, "Update")
+    ? payload.Update
+    : Object.hasOwn(payload, "update")
+      ? payload.update
+      : undefined;
+  const unwrapped = update ?? payload;
+  return isObject(unwrapped) ? unwrapped : null;
+}
+
+function txlinePayloadField(
+  payload: Record<string, unknown>,
+  ...keys: readonly string[]
+): unknown {
+  for (const key of keys) {
+    if (Object.hasOwn(payload, key)) return payload[key];
+  }
+  return undefined;
+}
+
+function txlineAction(payload: Record<string, unknown>): string | null {
+  const action = txlinePayloadField(payload, "Action", "action");
+  return typeof action === "string" ? action.toLowerCase() : null;
+}
+
+function txlineStatusId(payload: Record<string, unknown>): number | null {
+  const statusId = txlinePayloadField(payload, "StatusId", "statusId");
+  return typeof statusId === "number" && Number.isFinite(statusId)
+    ? statusId
+    : null;
+}
+
 function authoritativeTerminal(
   delivery: DurableSourceDelivery | undefined,
 ): boolean {
-  if (!delivery || !delivery.canonicalEligible || !isObject(delivery.payload)) {
+  if (!delivery || !delivery.canonicalEligible) {
     return false;
   }
+  const payload = txlinePayloadRecord(delivery.payload);
+  if (!payload) return false;
   return (
-    delivery.payload.Action === "game_finalised" &&
-    delivery.payload.StatusId === 100 &&
-    delivery.payload.Confirmed !== false
+    txlineAction(payload) === "game_finalised" &&
+    txlineStatusId(payload) === 100 &&
+    txlinePayloadField(payload, "Confirmed", "confirmed") !== false
   );
 }
 

@@ -1,4 +1,10 @@
-import type { QueryRow, RepositoryClient } from "./repositories.js";
+import { createHash } from "node:crypto";
+
+import type {
+  QueryRow,
+  RepositoryClient,
+  SqlExecutor,
+} from "./repositories.js";
 
 export type ArchiveImportReason =
   "featured_bootstrap" | "live_terminal" | "live_correction";
@@ -11,6 +17,37 @@ export type ArchiveImportJobState =
   | "blocked_rights"
   | "rejected";
 
+/**
+ * Immutable, provider-derived fixture facts used to reproduce one live
+ * terminal as a recorded archive. This is intentionally the schedule context,
+ * never an inferred score payload or a product-facing fixture label.
+ */
+export interface ArchiveImportSourceContext {
+  fixtureGroupId: string;
+  fixtureId: string;
+  gameState: number;
+  kickoffAt: string;
+  participant1: {
+    code: string;
+    id: string;
+    name: string;
+  };
+  participant1IsHome: boolean;
+  participant2: {
+    code: string;
+    id: string;
+    name: string;
+  };
+  schedule: {
+    competition: string;
+    competitionId: string;
+    responseHash: string;
+    source: string;
+    sourcePath: string;
+    sourceTimestampMs: number;
+  };
+}
+
 export interface ArchiveImportJobInput {
   awayTeamId: string;
   contextHash: string;
@@ -19,10 +56,20 @@ export interface ArchiveImportJobInput {
   kickoffAt: string;
   participant1IsHome: boolean;
   reason: ArchiveImportReason;
+  sourceContext: ArchiveImportSourceContext;
   sourceTerminalRecordId: string;
 }
 
-export interface ArchiveImportJob extends ArchiveImportJobInput {
+/** A collector can only request the live-terminal enqueue path. */
+export type LiveTerminalArchiveImportJobInput = Omit<
+  ArchiveImportJobInput,
+  "reason"
+>;
+
+export interface ArchiveImportJob extends Omit<
+  ArchiveImportJobInput,
+  "sourceContext"
+> {
   archiveManifestHash: string | null;
   archiveManifestId: string | null;
   attemptCount: number;
@@ -34,6 +81,8 @@ export interface ArchiveImportJob extends ArchiveImportJobInput {
   createdAt: string;
   lastError: string | null;
   state: ArchiveImportJobState;
+  /** Legacy rows predating migration 9 have no reconstructable schedule context. */
+  sourceContext: ArchiveImportSourceContext | null;
   updatedAt: string;
 }
 
@@ -60,6 +109,16 @@ export interface TerminalArchiveImportJob extends ClaimedArchiveImportJob {
 export interface BindVerifiedArchiveOutput extends ClaimedArchiveImportJob {
   archiveManifestHash: string;
   archiveManifestId: string;
+}
+
+/**
+ * A generic live correction invalidates any non-terminal archive work for its
+ * fixture without inventing a replacement terminal. The caller must already
+ * hold the live collector source-frame transaction and fence.
+ */
+export interface SupersedeLiveTerminalArchiveImportJobForCorrectionInput {
+  fixtureId: string;
+  reason: string;
 }
 
 /** Immutable verification evidence for one concrete archive-import claim. */
@@ -120,7 +179,7 @@ export interface FeaturedReplayRepository {
 }
 
 const jobColumns = `fixture_id, home_team_id, away_team_id, kickoff_at,
-participant1_is_home, context_hash, reason, state, archive_manifest_id,
+participant1_is_home, context_hash, source_context, reason, state, archive_manifest_id,
 archive_manifest_hash, attempt_count, last_error, available_at, claimed_by, claim_expires_at,
 claim_generation, claim_started_at, source_terminal_record_id, created_at, updated_at`;
 
@@ -163,6 +222,115 @@ function safeInteger(row: QueryRow, key: string): number {
     throw new Error(`Database row field ${key} is invalid`);
   }
   return value;
+}
+
+function object(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} is invalid`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function sourceContextString(
+  value: Record<string, unknown>,
+  key: string,
+): string {
+  const field = value[key];
+  if (typeof field !== "string" || field.trim().length === 0) {
+    throw new Error(`Archive import source context ${key} is invalid`);
+  }
+  return field;
+}
+
+function sourceContextSafeInteger(
+  value: Record<string, unknown>,
+  key: string,
+): number {
+  const field = value[key];
+  if (typeof field !== "number" || !Number.isSafeInteger(field) || field < 0) {
+    throw new Error(`Archive import source context ${key} is invalid`);
+  }
+  return field;
+}
+
+function sourceContextBoolean(
+  value: Record<string, unknown>,
+  key: string,
+): boolean {
+  if (typeof value[key] !== "boolean") {
+    throw new Error(`Archive import source context ${key} is invalid`);
+  }
+  return value[key] as boolean;
+}
+
+function parseSourceContext(value: unknown): ArchiveImportSourceContext {
+  const root = object(value, "Archive import source context");
+  const participant1 = object(root.participant1, "Archive import participant1");
+  const participant2 = object(root.participant2, "Archive import participant2");
+  const schedule = object(root.schedule, "Archive import schedule source");
+  const kickoffAt = sourceContextString(root, "kickoffAt");
+  const context = {
+    fixtureGroupId: sourceContextString(root, "fixtureGroupId"),
+    fixtureId: sourceContextString(root, "fixtureId"),
+    gameState: sourceContextSafeInteger(root, "gameState"),
+    kickoffAt,
+    participant1: {
+      code: sourceContextString(participant1, "code"),
+      id: sourceContextString(participant1, "id"),
+      name: sourceContextString(participant1, "name"),
+    },
+    participant1IsHome: sourceContextBoolean(root, "participant1IsHome"),
+    participant2: {
+      code: sourceContextString(participant2, "code"),
+      id: sourceContextString(participant2, "id"),
+      name: sourceContextString(participant2, "name"),
+    },
+    schedule: {
+      competition: sourceContextString(schedule, "competition"),
+      competitionId: sourceContextString(schedule, "competitionId"),
+      responseHash: sourceContextString(schedule, "responseHash"),
+      source: sourceContextString(schedule, "source"),
+      sourcePath: sourceContextString(schedule, "sourcePath"),
+      sourceTimestampMs: sourceContextSafeInteger(
+        schedule,
+        "sourceTimestampMs",
+      ),
+    },
+  };
+  assertTimestamp(context.kickoffAt, "Archive import source context kickoff");
+  assertSha256(
+    context.schedule.responseHash,
+    "Archive import schedule source hash",
+  );
+  return context;
+}
+
+function stableJson(value: unknown): string {
+  if (
+    value === null ||
+    typeof value === "boolean" ||
+    typeof value === "string"
+  ) {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? JSON.stringify(value) : "null";
+  }
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return "null";
+}
+
+export function hashArchiveImportSourceContext(
+  sourceContext: ArchiveImportSourceContext,
+): string {
+  return createHash("sha256").update(stableJson(sourceContext)).digest("hex");
 }
 
 function importReason(value: string): ArchiveImportReason {
@@ -209,6 +377,14 @@ function parseJob(row: QueryRow): ArchiveImportJob {
     lastError: nullableString(row, "last_error"),
     participant1IsHome: boolean(row, "participant1_is_home"),
     reason: importReason(requiredString(row, "reason")),
+    sourceContext:
+      row.source_context === null || row.source_context === undefined
+        ? null
+        : parseSourceContext(
+            typeof row.source_context === "string"
+              ? JSON.parse(row.source_context)
+              : row.source_context,
+          ),
     sourceTerminalRecordId: requiredString(row, "source_terminal_record_id"),
     state: importState(requiredString(row, "state")),
     updatedAt: timestamp(row, "updated_at"),
@@ -262,6 +438,29 @@ function assertJobInput(input: ArchiveImportJobInput): void {
   }
   assertTimestamp(input.kickoffAt, "Kickoff time");
   assertSha256(input.contextHash, "Frozen fixture context hash");
+  const sourceContext = parseSourceContext(input.sourceContext);
+  const expectedHome = sourceContext.participant1IsHome
+    ? sourceContext.participant1.code
+    : sourceContext.participant2.code;
+  const expectedAway = sourceContext.participant1IsHome
+    ? sourceContext.participant2.code
+    : sourceContext.participant1.code;
+  if (
+    sourceContext.fixtureId !== input.fixtureId ||
+    sourceContext.participant1IsHome !== input.participant1IsHome ||
+    sourceContext.kickoffAt !== input.kickoffAt ||
+    expectedHome !== input.homeTeamId ||
+    expectedAway !== input.awayTeamId
+  ) {
+    throw new Error(
+      "Archive import input does not match its frozen schedule context",
+    );
+  }
+  if (hashArchiveImportSourceContext(sourceContext) !== input.contextHash) {
+    throw new Error(
+      "Frozen fixture context hash does not match source context",
+    );
+  }
 }
 
 function assertClaimGeneration(value: number): void {
@@ -297,21 +496,29 @@ function outputSelectColumns(alias = "output"): string {
     .join(", ");
 }
 
-export function createArchiveImportJobRepository(
-  client: RepositoryClient,
-): ArchiveImportJobRepository {
-  return {
-    enqueue: async (input) => {
-      assertJobInput(input);
-      return client.begin(async (transaction) => {
-        const inserted = await transaction.unsafe(
-          `INSERT INTO matchsense.archive_import_jobs (
+type EnqueueMode = "explicit_correction" | "live_terminal";
+
+async function enqueueArchiveImportJobInTransaction(
+  transaction: SqlExecutor,
+  input: ArchiveImportJobInput,
+  mode: EnqueueMode,
+): Promise<ArchiveImportJob> {
+  assertJobInput(input);
+  const correctionReason =
+    mode === "live_terminal" ? "'live_correction'" : "EXCLUDED.reason";
+  const correctionPredicate =
+    mode === "live_terminal"
+      ? `EXCLUDED.reason = 'live_terminal'
+  AND matchsense.archive_import_jobs.reason IN ('live_terminal', 'live_correction')`
+      : "EXCLUDED.reason = 'live_correction'";
+  const inserted = await transaction.unsafe(
+    `INSERT INTO matchsense.archive_import_jobs (
   fixture_id, home_team_id, away_team_id, kickoff_at, participant1_is_home,
-  context_hash, reason, source_terminal_record_id
+  context_hash, source_context, reason, source_terminal_record_id
 )
-VALUES ($1, $2, $3, $4::timestamptz, $5, $6, $7, $8)
+VALUES ($1, $2, $3, $4::timestamptz, $5, $6, $7::jsonb, $8, $9)
 ON CONFLICT (fixture_id) DO UPDATE
-SET reason = EXCLUDED.reason,
+SET reason = ${correctionReason},
     state = 'queued',
     archive_manifest_id = NULL,
     archive_manifest_hash = NULL,
@@ -322,36 +529,105 @@ SET reason = EXCLUDED.reason,
     last_error = NULL,
     source_terminal_record_id = EXCLUDED.source_terminal_record_id,
     updated_at = clock_timestamp()
-WHERE EXCLUDED.reason = 'live_correction'
+WHERE ${correctionPredicate}
   AND matchsense.archive_import_jobs.source_terminal_record_id
       IS DISTINCT FROM EXCLUDED.source_terminal_record_id
 RETURNING ${jobColumns};`,
-          [
-            input.fixtureId,
-            input.homeTeamId,
-            input.awayTeamId,
-            input.kickoffAt,
-            input.participant1IsHome,
-            input.contextHash,
-            input.reason,
-            input.sourceTerminalRecordId,
-          ],
-        );
-        if (inserted[0]) return parseJob(inserted[0]);
+    [
+      input.fixtureId,
+      input.homeTeamId,
+      input.awayTeamId,
+      input.kickoffAt,
+      input.participant1IsHome,
+      input.contextHash,
+      stableJson(input.sourceContext),
+      input.reason,
+      input.sourceTerminalRecordId,
+    ],
+  );
+  if (inserted[0]) return parseJob(inserted[0]);
 
-        const existing = await transaction.unsafe(
-          `SELECT ${jobColumns}
+  const existing = await transaction.unsafe(
+    `SELECT ${jobColumns}
 FROM matchsense.archive_import_jobs
 WHERE fixture_id = $1
 FOR SHARE;`,
-          [input.fixtureId],
-        );
-        if (!existing[0]) {
-          throw new Error("Archive import job enqueue lost its fixture row");
-        }
-        return parseJob(existing[0]);
-      });
-    },
+    [input.fixtureId],
+  );
+  if (!existing[0]) {
+    throw new Error("Archive import job enqueue lost its fixture row");
+  }
+  return parseJob(existing[0]);
+}
+
+/**
+ * Transaction-local enqueue primitive. Callers that already hold a source
+ * frame transaction must use this instead of opening a second transaction.
+ */
+export async function enqueueArchiveImportJob(
+  transaction: SqlExecutor,
+  input: ArchiveImportJobInput,
+): Promise<ArchiveImportJob> {
+  return enqueueArchiveImportJobInTransaction(
+    transaction,
+    input,
+    "explicit_correction",
+  );
+}
+
+/**
+ * A fresh terminal inserts as `live_terminal`; a distinct provider terminal
+ * ID for the same frozen fixture atomically requeues it as `live_correction`.
+ */
+export async function enqueueLiveTerminalArchiveImportJob(
+  transaction: SqlExecutor,
+  input: LiveTerminalArchiveImportJobInput,
+): Promise<ArchiveImportJob> {
+  return enqueueArchiveImportJobInTransaction(
+    transaction,
+    { ...input, reason: "live_terminal" },
+    "live_terminal",
+  );
+}
+
+/**
+ * Makes an existing terminal import unable to publish after a generic live
+ * correction. A later distinct authoritative terminal can still use the
+ * normal live-terminal conflict path to requeue this row as `live_correction`
+ * while preserving its frozen schedule context.
+ */
+export async function supersedeLiveTerminalArchiveImportJobForCorrection(
+  transaction: SqlExecutor,
+  input: SupersedeLiveTerminalArchiveImportJobForCorrectionInput,
+): Promise<void> {
+  assertNonempty(input.fixtureId, "Fixture id");
+  assertNonempty(input.reason, "Archive correction supersession reason");
+  await transaction.unsafe(
+    `UPDATE matchsense.archive_import_jobs
+SET state = 'rejected',
+    archive_manifest_id = NULL,
+    archive_manifest_hash = NULL,
+    claimed_by = NULL,
+    claim_expires_at = NULL,
+    claim_started_at = NULL,
+    claim_generation = claim_generation + 1,
+    last_error = $2,
+    updated_at = clock_timestamp()
+WHERE fixture_id = $1
+  AND reason IN ('live_terminal', 'live_correction')
+  AND state IN ('queued', 'retry_wait', 'claimed');`,
+    [input.fixtureId, input.reason],
+  );
+}
+
+export function createArchiveImportJobRepository(
+  client: RepositoryClient,
+): ArchiveImportJobRepository {
+  return {
+    enqueue: async (input) =>
+      client.begin(async (transaction) =>
+        enqueueArchiveImportJob(transaction, input),
+      ),
     claim: async (workerId, now) => {
       assertNonempty(workerId, "Archive import worker id");
       if (Number.isNaN(now.valueOf())) throw new Error("Claim time is invalid");

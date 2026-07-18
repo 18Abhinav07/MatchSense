@@ -3,7 +3,9 @@ import type { TxlineScheduleFixture } from "@matchsense/txline-adapter";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  archiveImportSourceContextFromSchedule,
   createScheduleSync,
+  durableCollectorFixtureFromSchedule,
   durableFixtureFromSchedule,
   durableTeamCatalogFromSchedule,
 } from "./schedule-sync.js";
@@ -100,6 +102,53 @@ const knownTxlineCountryCodes = [
 ] as const;
 
 describe("durable schedule sync", () => {
+  it("freezes the real TxLINE schedule identity used by a live collector fixture", () => {
+    const frozen = archiveImportSourceContextFromSchedule(scheduleFixture);
+    const collectorFixture =
+      durableCollectorFixtureFromSchedule(scheduleFixture);
+
+    expect(frozen.contextHash).toMatch(/^[a-f0-9]{64}$/u);
+    expect(frozen.sourceContext).toMatchObject({
+      fixtureGroupId: scheduleFixture.fixtureGroupId,
+      fixtureId: scheduleFixture.fixtureId,
+      gameState: scheduleFixture.gameState,
+      kickoffAt: new Date(scheduleFixture.startTimeMs).toISOString(),
+      participant1: {
+        code: "ARG",
+        id: scheduleFixture.participant1.id,
+        name: scheduleFixture.participant1.name,
+      },
+      participant1IsHome: scheduleFixture.participant1IsHome,
+      participant2: {
+        code: "FRA",
+        id: scheduleFixture.participant2.id,
+        name: scheduleFixture.participant2.name,
+      },
+      schedule: {
+        competition: scheduleFixture.competition,
+        competitionId: scheduleFixture.competitionId,
+        source: "txline_world_cup_schedule",
+        sourcePath: "/api/fixtures/snapshot?competitionId=72",
+        sourceTimestampMs: scheduleFixture.sourceTimestampMs,
+      },
+    });
+    expect(frozen.sourceContext.schedule.responseHash).toMatch(
+      /^[a-f0-9]{64}$/u,
+    );
+    expect(collectorFixture.archiveImport).toEqual(frozen);
+    expect(collectorFixture).toMatchObject({
+      fixtureId: scheduleFixture.fixtureId,
+      homeTeam: "ARG",
+      awayTeam: "FRA",
+    });
+    expect(
+      archiveImportSourceContextFromSchedule({
+        ...scheduleFixture,
+        sourceTimestampMs: scheduleFixture.sourceTimestampMs + 1,
+      }).contextHash,
+    ).not.toBe(frozen.contextHash);
+  });
+
   it.each(knownTxlineCountryCodes)(
     "normalizes known TxLINE participant name %s to %s",
     (name, code) => {

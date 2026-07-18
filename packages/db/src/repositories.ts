@@ -1,3 +1,10 @@
+import {
+  enqueueLiveTerminalArchiveImportJob,
+  supersedeLiveTerminalArchiveImportJobForCorrection,
+  type LiveTerminalArchiveImportJobInput,
+} from "./archive-import-job-repository.js";
+import { invalidateRecordedReplayReadyArchiveInTransaction } from "./archive-repositories.js";
+
 export type PersistenceMode = "live" | "recorded" | "demo";
 export type PersistenceProvenance =
   "live_txline" | "recorded_txline_authorised" | "synthetic_txline_shaped";
@@ -168,12 +175,181 @@ export interface ProcessSourceEnvelopeInput {
   sourceFence?: SourceFence;
 }
 
+export type RecordedArchiveInvalidationAction =
+  "action_amend" | "action_discarded" | "score_adjustment" | "var_end";
+
+export interface RecordedArchiveInvalidation {
+  action: RecordedArchiveInvalidationAction;
+}
+
+const recordedArchiveInvalidationActions =
+  new Set<RecordedArchiveInvalidationAction>([
+    "action_amend",
+    "action_discarded",
+    "score_adjustment",
+    "var_end",
+  ]);
+
+function recordedArchiveInvalidationReason(
+  action: RecordedArchiveInvalidationAction,
+): string {
+  return `live_txline_canonical_correction:${action}`;
+}
+
+/**
+ * Mirrors the TxLINE adapter's documented one-level `Update` envelope handling
+ * without taking a dependency on the adapter package from the DB layer.
+ */
+function txlinePayloadRecord(payload: unknown): Record<string, unknown> | null {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
+    return null;
+  }
+  const record = payload as Record<string, unknown>;
+  const update = Object.hasOwn(record, "Update")
+    ? record.Update
+    : Object.hasOwn(record, "update")
+      ? record.update
+      : undefined;
+  const unwrapped = update ?? record;
+  return typeof unwrapped === "object" &&
+    unwrapped !== null &&
+    !Array.isArray(unwrapped)
+    ? (unwrapped as Record<string, unknown>)
+    : null;
+}
+
+function txlinePayloadField(
+  payload: Record<string, unknown>,
+  ...keys: readonly string[]
+): unknown {
+  for (const key of keys) {
+    if (Object.hasOwn(payload, key)) return payload[key];
+  }
+  return undefined;
+}
+
+function txlineActionFromPayload(
+  payload: Record<string, unknown> | null,
+): string | null {
+  const action = payload
+    ? txlinePayloadField(payload, "Action", "action")
+    : undefined;
+  return typeof action === "string" ? action.toLowerCase() : null;
+}
+
+function txlineActionFromRawPayload(payload: unknown): string | null {
+  return txlineActionFromPayload(txlinePayloadRecord(payload));
+}
+
+function txlineIdentifier(value: unknown): string | null {
+  if (typeof value === "string" && value.length > 0) return value;
+  return typeof value === "number" && Number.isSafeInteger(value)
+    ? String(value)
+    : null;
+}
+
+function txlineStatusId(payload: Record<string, unknown>): number | null {
+  const statusId = txlinePayloadField(payload, "StatusId", "statusId");
+  return typeof statusId === "number" && Number.isFinite(statusId)
+    ? statusId
+    : null;
+}
+
+function assertAuthoritativeTerminalArchivePayload(input: {
+  fixtureId: string;
+  raw: RawSourceRecordWrite;
+  sourceTerminalRecordId: string;
+}) {
+  const payload = txlinePayloadRecord(input.raw.payload);
+  if (
+    txlineActionFromPayload(payload) !== "game_finalised" ||
+    !payload ||
+    txlineStatusId(payload) !== 100 ||
+    txlinePayloadField(payload, "Confirmed", "confirmed") === false
+  ) {
+    throw new Error(
+      "Archive import job must be confirmed game_finalised with StatusId 100",
+    );
+  }
+  if (
+    txlineIdentifier(txlinePayloadField(payload, "FixtureId", "fixtureId")) !==
+    input.fixtureId
+  ) {
+    throw new Error(
+      "Archive import job payload fixture must match its collector delivery",
+    );
+  }
+  const payloadSourceRecordId = txlineIdentifier(
+    txlinePayloadField(payload, "Id", "id"),
+  );
+  if (
+    payloadSourceRecordId !== input.sourceTerminalRecordId ||
+    input.raw.sourceRecordId !== input.sourceTerminalRecordId
+  ) {
+    throw new Error(
+      "Archive import job payload id must match its terminal source record",
+    );
+  }
+}
+
+function isOverturnedVarEnd(payload: unknown): boolean {
+  const record = txlinePayloadRecord(payload);
+  if (!record) return false;
+  const data = txlinePayloadField(record, "Data", "data");
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    return false;
+  }
+  const outcome = txlinePayloadField(
+    data as Record<string, unknown>,
+    "Outcome",
+    "outcome",
+  );
+  return (
+    typeof outcome === "string" &&
+    outcome
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/gu, "_") === "overturned"
+  );
+}
+
+function assertRecordedArchiveInvalidation(
+  input: RecordedArchiveInvalidation,
+  raw: RawSourceRecordWrite,
+) {
+  if (!recordedArchiveInvalidationActions.has(input.action)) {
+    throw new Error("Recorded archive invalidation action is invalid");
+  }
+  if (txlineActionFromRawPayload(raw.payload) !== input.action) {
+    throw new Error(
+      "Recorded archive invalidation must match its canonical TxLINE action",
+    );
+  }
+  if (input.action === "var_end" && !isOverturnedVarEnd(raw.payload)) {
+    throw new Error(
+      "Recorded archive invalidation requires an overturned VAR outcome",
+    );
+  }
+}
+
 /**
  * A frame is the atomic durable boundary for a live SSE event. The raw source
  * rows, any derived canonical truth, and the source cursor all either commit
  * together or remain replayable from the previous cursor.
  */
 export interface CollectorFrameDelivery {
+  /**
+   * A provider-terminal instruction created by the TxLINE collector. It is
+   * written only after its raw row and canonical projection commit inside this
+   * same source-frame transaction.
+   */
+  archiveImportJob?: LiveTerminalArchiveImportJobInput | undefined;
+  /** A closed canonical TxLINE correction category for recorded replay state. */
+  recordedArchiveInvalidation?: RecordedArchiveInvalidation | undefined;
   derive?: (
     current: FixtureProjectionRecord | null,
   ) => readonly SourceEnvelopeCommitPlan[];
@@ -1116,6 +1292,61 @@ export function createFixtureTruthRepository(
             "Canonical collector delivery requires a deterministic reducer",
           );
         }
+        if (delivery.archiveImportJob) {
+          if (input.mode !== "live") {
+            throw new Error(
+              "Archive import jobs require a live collector frame",
+            );
+          }
+          if (
+            delivery.raw.canonicalEligible === false ||
+            delivery.raw.deliveryIntent !== "realtime"
+          ) {
+            throw new Error(
+              "Archive import jobs require a realtime canonical delivery",
+            );
+          }
+          if (delivery.archiveImportJob.fixtureId !== delivery.fixtureId) {
+            throw new Error(
+              "Archive import job fixture must match its collector delivery",
+            );
+          }
+          if (
+            !delivery.raw.sourceRecordId ||
+            delivery.raw.sourceRecordId !==
+              delivery.archiveImportJob.sourceTerminalRecordId
+          ) {
+            throw new Error(
+              "Archive import job must use its provider terminal source record id",
+            );
+          }
+          assertAuthoritativeTerminalArchivePayload({
+            fixtureId: delivery.fixtureId,
+            raw: delivery.raw,
+            sourceTerminalRecordId:
+              delivery.archiveImportJob.sourceTerminalRecordId,
+          });
+        }
+        if (delivery.recordedArchiveInvalidation) {
+          if (
+            input.mode !== "live" ||
+            delivery.raw.canonicalEligible === false ||
+            delivery.raw.deliveryIntent !== "realtime"
+          ) {
+            throw new Error(
+              "Recorded archive invalidation requires a realtime canonical live delivery",
+            );
+          }
+          assertRecordedArchiveInvalidation(
+            delivery.recordedArchiveInvalidation,
+            delivery.raw,
+          );
+          if (delivery.archiveImportJob) {
+            throw new Error(
+              "Recorded archive invalidation cannot enqueue archive import work",
+            );
+          }
+        }
       }
       return client.begin(async (transaction) => {
         if (
@@ -1156,14 +1387,38 @@ export function createFixtureTruthRepository(
             deliveries.push({ kind: "accepted_no_change" });
             continue;
           }
-          deliveries.push(
-            await applyCollectorPlans(transaction, {
-              derive: delivery.derive!,
-              fixtureId: delivery.fixtureId,
-              mode: input.mode,
-              raw: delivery.raw,
-            }),
-          );
+          const applied = await applyCollectorPlans(transaction, {
+            derive: delivery.derive!,
+            fixtureId: delivery.fixtureId,
+            mode: input.mode,
+            raw: delivery.raw,
+          });
+          deliveries.push(applied);
+          if (delivery.recordedArchiveInvalidation) {
+            const reason = recordedArchiveInvalidationReason(
+              delivery.recordedArchiveInvalidation.action,
+            );
+            await invalidateRecordedReplayReadyArchiveInTransaction(
+              transaction,
+              {
+                fixtureId: delivery.fixtureId,
+                reason,
+              },
+            );
+            await supersedeLiveTerminalArchiveImportJobForCorrection(
+              transaction,
+              {
+                fixtureId: delivery.fixtureId,
+                reason,
+              },
+            );
+          }
+          if (delivery.archiveImportJob && applied.kind === "committed") {
+            await enqueueLiveTerminalArchiveImportJob(
+              transaction,
+              delivery.archiveImportJob,
+            );
+          }
         }
 
         if (!input.cursor) return { deliveries, kind: "committed" };

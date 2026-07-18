@@ -1,6 +1,9 @@
 import type {
+  ArchiveImportSourceContext,
   FixtureProjectionRecord,
   FixtureTruthRepository,
+  LiveTerminalArchiveImportJobInput,
+  RecordedArchiveInvalidation,
   RawSourceRecordWrite,
   SourceEnvelopeCommitPlan,
   SourceFence,
@@ -23,12 +26,15 @@ import {
   createFixtureSourceEnvelopePlanDeriver,
   restoreFixtureProjection,
 } from "../fixture-processor.js";
-import type { ArchiveService } from "./archive-service.js";
 
-export type CollectorFixtureDefinition = DurableTxlineFixture;
+export interface CollectorFixtureDefinition extends DurableTxlineFixture {
+  archiveImport: {
+    contextHash: string;
+    sourceContext: ArchiveImportSourceContext;
+  };
+}
 
 export interface TxlineCollectorOptions {
-  archive?: ArchiveService | undefined;
   fixtureForId: (fixtureId: string) => CollectorFixtureDefinition | null;
   fixtureTruth: Pick<FixtureTruthRepository, "commitCollectorFrame">;
   rightsGrantId: string;
@@ -42,7 +48,9 @@ export type CollectorIngestResult =
   | { effects: readonly []; kind: "conflict" | "fenced" | "ignored" };
 
 interface PreparedDelivery {
+  archiveImportJob?: LiveTerminalArchiveImportJobInput | undefined;
   fixture: CollectorFixtureDefinition;
+  recordedArchiveInvalidation?: RecordedArchiveInvalidation | undefined;
   raw: RawSourceRecordWrite;
   record: TxlineRawRecord;
   reduction: DurableTxlineReduction;
@@ -137,14 +145,75 @@ function createInitialSnapshot(
   );
 }
 
-function shouldRebuildArchive(reduction: DurableTxlineReduction) {
-  return (
-    reduction.kind === "canonical" &&
-    (reduction.invalidatesArchive ||
-      (reduction.update.action === "game_finalised" &&
-        reduction.update.statusId === 100 &&
-        reduction.update.confirmed !== false))
-  );
+function archiveImportJobFor(input: {
+  fixture: CollectorFixtureDefinition;
+  raw: RawSourceRecordWrite;
+  reduction: DurableTxlineReduction;
+}): LiveTerminalArchiveImportJobInput | null {
+  if (
+    input.raw.canonicalEligible === false ||
+    input.raw.deliveryIntent !== "realtime" ||
+    input.reduction.kind !== "canonical"
+  ) {
+    return null;
+  }
+  const update = input.reduction.update;
+  if (
+    update.action !== "game_finalised" ||
+    update.statusId !== 100 ||
+    update.confirmed === false
+  ) {
+    return null;
+  }
+  const sourceTerminalRecordId = update.actionId ?? update.source.actionId;
+  if (
+    !sourceTerminalRecordId ||
+    input.raw.sourceRecordId !== sourceTerminalRecordId
+  ) {
+    return null;
+  }
+  return {
+    awayTeamId: input.fixture.awayTeam,
+    contextHash: input.fixture.archiveImport.contextHash,
+    fixtureId: input.fixture.fixtureId,
+    homeTeamId: input.fixture.homeTeam,
+    kickoffAt: input.fixture.kickoffAt,
+    participant1IsHome: input.fixture.participant1IsHome,
+    sourceContext: input.fixture.archiveImport.sourceContext,
+    sourceTerminalRecordId,
+  };
+}
+
+function recordedArchiveInvalidationFor(input: {
+  raw: RawSourceRecordWrite;
+  reduction: DurableTxlineReduction;
+}): RecordedArchiveInvalidation | null {
+  if (
+    input.raw.canonicalEligible === false ||
+    input.raw.deliveryIntent !== "realtime" ||
+    input.reduction.kind !== "canonical" ||
+    !input.reduction.invalidatesArchive
+  ) {
+    return null;
+  }
+  switch (input.reduction.update.action) {
+    case "action_amend":
+    case "action_discarded":
+    case "score_adjustment":
+    case "var_end":
+      return { action: input.reduction.update.action };
+    default:
+      throw new Error(
+        "Archive-invalidating TxLINE reduction lacks a closed correction action",
+      );
+  }
+}
+
+function sameRecordedArchiveInvalidation(
+  left: RecordedArchiveInvalidation | null,
+  right: RecordedArchiveInvalidation | null,
+) {
+  return left?.action === right?.action;
 }
 
 /**
@@ -181,7 +250,19 @@ export function createTxlineCollector(options: TxlineCollectorOptions) {
     );
     raw.canonicalEligible = reduction.kind !== "source_only";
 
-    const prepared: PreparedDelivery = { fixture, raw, record, reduction };
+    const archiveImportJob = archiveImportJobFor({ fixture, raw, reduction });
+    const recordedArchiveInvalidation = recordedArchiveInvalidationFor({
+      raw,
+      reduction,
+    });
+    const prepared: PreparedDelivery = {
+      ...(archiveImportJob ? { archiveImportJob } : {}),
+      fixture,
+      ...(recordedArchiveInvalidation ? { recordedArchiveInvalidation } : {}),
+      raw,
+      record,
+      reduction,
+    };
     if (raw.canonicalEligible) {
       prepared.derive = (currentRecord) => {
         const current = currentRecord
@@ -200,48 +281,33 @@ export function createTxlineCollector(options: TxlineCollectorOptions) {
           payload: record.payload,
         });
         prepared.reduction = reduction;
-        return reduction.kind === "canonical"
-          ? createFixtureSourceEnvelopePlanDeriver({
-              deliveryIntent: raw.deliveryIntent ?? "realtime",
-              facts: reduction.facts,
-              fixture,
-              mode: "live",
-            })(currentRecord)
-          : [];
+        const currentInvalidation = recordedArchiveInvalidationFor({
+          raw,
+          reduction,
+        });
+        if (
+          !sameRecordedArchiveInvalidation(
+            recordedArchiveInvalidation,
+            currentInvalidation,
+          )
+        ) {
+          throw new Error(
+            "TxLINE archive invalidation classification changed after projection derivation",
+          );
+        }
+        if (reduction.kind !== "canonical") return [];
+        const plans = createFixtureSourceEnvelopePlanDeriver({
+          deliveryIntent: raw.deliveryIntent ?? "realtime",
+          facts: reduction.facts,
+          fixture,
+          mode: "live",
+        })(currentRecord);
+        return currentInvalidation
+          ? plans.map((plan) => ({ ...plan, outbox: [] }))
+          : plans;
       };
     }
     return prepared;
-  };
-
-  const rebuildArchives = async (prepared: readonly PreparedDelivery[]) => {
-    if (!options.archive) return true;
-    const requests = new Map<
-      string,
-      { correctionObserved: boolean; fixture: CollectorFixtureDefinition }
-    >();
-    for (const delivery of prepared) {
-      if (!shouldRebuildArchive(delivery.reduction)) continue;
-      const previous = requests.get(delivery.fixture.fixtureId);
-      requests.set(delivery.fixture.fixtureId, {
-        correctionObserved:
-          (previous?.correctionObserved ?? false) ||
-          (delivery.reduction.kind === "canonical" &&
-            delivery.reduction.invalidatesArchive),
-        fixture: delivery.fixture,
-      });
-    }
-    for (const [fixtureId, request] of requests) {
-      const archive = await options.archive.rebuild({
-        correctionObserved: request.correctionObserved,
-        fixture: request.fixture,
-        manifestId: `archive:live:${fixtureId}`,
-        mode: "live",
-        rightsGrantId: options.rightsGrantId,
-        sourceFence: options.sourceFence,
-      });
-      if (archive.status === "FENCED") return false;
-    }
-    return true;
   };
 
   const effectsFor = (
@@ -252,6 +318,7 @@ export function createTxlineCollector(options: TxlineCollectorOptions) {
       (delivery, index) =>
         delivery.raw.deliveryIntent === "realtime" &&
         delivery.reduction.kind === "canonical" &&
+        !delivery.reduction.invalidatesArchive &&
         delivery.reduction.facts.length > 0 &&
         deliveries[index]?.kind === "committed" &&
         (deliveries[index]?.eventSequences?.length ?? 0) > 0,
@@ -266,6 +333,14 @@ export function createTxlineCollector(options: TxlineCollectorOptions) {
     const result = await options.fixtureTruth.commitCollectorFrame({
       ...(cursor ? { cursor } : {}),
       deliveries: prepared.map((delivery) => ({
+        ...(delivery.archiveImportJob
+          ? { archiveImportJob: delivery.archiveImportJob }
+          : {}),
+        ...(delivery.recordedArchiveInvalidation
+          ? {
+              recordedArchiveInvalidation: delivery.recordedArchiveInvalidation,
+            }
+          : {}),
         ...(delivery.derive ? { derive: delivery.derive } : {}),
         fixtureId: delivery.fixture.fixtureId,
         raw: delivery.raw,
@@ -275,9 +350,6 @@ export function createTxlineCollector(options: TxlineCollectorOptions) {
     });
     if (result.kind === "fenced") return { effects: [], kind: "fenced" };
     if (result.kind === "conflict") return { effects: [], kind: "conflict" };
-    if (!(await rebuildArchives(prepared))) {
-      return { effects: [], kind: "fenced" };
-    }
     return {
       effects: effectsFor(prepared, result.deliveries),
       kind: "committed",

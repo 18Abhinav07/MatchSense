@@ -1,6 +1,8 @@
+import { hashArchiveImportSourceContext } from "@matchsense/db";
 import type {
   ArchiveImportJob,
   ArchiveImportJobRepository,
+  ArchiveImportSourceContext,
   ArchiveImportVerifiedOutput,
   BindVerifiedArchiveOutput,
   SourceLeaseRecord,
@@ -37,6 +39,32 @@ const expectedFixture: DurableTxlineFixture = {
   homeTeam: "FRA",
   kickoffAt: "2026-07-18T18:00:00.000Z",
   participant1IsHome: true,
+};
+
+const sourceContext: ArchiveImportSourceContext = {
+  fixtureGroupId: "archive-group-1",
+  fixtureId,
+  gameState: 2,
+  kickoffAt: expectedFixture.kickoffAt,
+  participant1: {
+    code: "FRA",
+    id: "provider-france-101",
+    name: "France",
+  },
+  participant1IsHome: true,
+  participant2: {
+    code: "ESP",
+    id: "provider-spain-202",
+    name: "Spain",
+  },
+  schedule: {
+    competition: "World Cup",
+    competitionId: "72",
+    responseHash: "c".repeat(64),
+    source: "txline_world_cup_schedule",
+    sourcePath: "/api/fixtures/snapshot?competitionId=72",
+    sourceTimestampMs: 1_784_403_000_000,
+  },
 };
 
 const historicalRecord: TxlineRawRecord = {
@@ -102,7 +130,7 @@ function job(overrides: Partial<ArchiveImportJob> = {}): ArchiveImportJob {
     claimGeneration: 3,
     claimStartedAt: now.toISOString(),
     claimedBy: workerId,
-    contextHash: "c".repeat(64),
+    contextHash: hashArchiveImportSourceContext(sourceContext),
     createdAt: now.toISOString(),
     fixtureId,
     homeTeamId: expectedFixture.homeTeam,
@@ -110,6 +138,7 @@ function job(overrides: Partial<ArchiveImportJob> = {}): ArchiveImportJob {
     lastError: null,
     participant1IsHome: expectedFixture.participant1IsHome,
     reason: "featured_bootstrap",
+    sourceContext,
     sourceTerminalRecordId: "live-terminal-1026",
     state: "claimed",
     updatedAt: now.toISOString(),
@@ -454,6 +483,70 @@ describe("archive import runner", () => {
       "release",
     ]);
   });
+
+  it("rejects a claimed job without frozen schedule context before opening a recorded lease", async () => {
+    const test = harness({ claim: job({ sourceContext: null }) });
+
+    await expect(test.runner.runOnce(now)).resolves.toEqual({
+      fixtureId,
+      kind: "rejected",
+    });
+
+    expect(test.calls).toEqual(["claim", "rejected"]);
+  });
+
+  it.each([
+    [
+      "a tampered frozen-context hash",
+      job({ contextHash: "f".repeat(64) }),
+      fixtureId,
+    ],
+    [
+      "a source-context payload altered without its matching hash",
+      job({
+        sourceContext: {
+          ...sourceContext,
+          schedule: {
+            ...sourceContext.schedule,
+            sourceTimestampMs: sourceContext.schedule.sourceTimestampMs + 1,
+          },
+        },
+      }),
+      fixtureId,
+    ],
+  ] as const)(
+    "rejects %s before a lease, provider fetch, importer, or publication",
+    async (_name, claim, expectedFixtureId) => {
+      const test = harness({ claim });
+
+      await expect(test.runner.runOnce(now)).resolves.toEqual({
+        fixtureId: expectedFixtureId,
+        kind: "rejected",
+      });
+
+      expect(test.calls).toEqual(["claim", "rejected"]);
+    },
+  );
+
+  it.each([
+    ["fixture id", job({ fixtureId: "another-fixture" })],
+    ["home team code", job({ homeTeamId: "ARG" })],
+    ["away team code", job({ awayTeamId: "ARG" })],
+    ["kickoff", job({ kickoffAt: "2030-01-01T00:00:00.000Z" })],
+    ["participant-one home orientation", job({ participant1IsHome: false })],
+  ] as const)(
+    "rejects a frozen context with an inconsistent scalar %s before side effects",
+    async (_field, claim) => {
+      const test = harness({ claim });
+
+      await expect(test.runner.runOnce(now)).resolves.toEqual({
+        fixtureId: claim.fixtureId,
+        kind: "rejected",
+      });
+
+      expect(test.calls).toEqual(["claim", "rejected"]);
+    },
+  );
 
   it.each([
     ["empty history", { kind: "empty" }],

@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
+import {
+  hashArchiveImportSourceContext,
+  type ArchiveImportSourceContext,
+} from "./index.js";
 import * as databaseModule from "./index.js";
 
 type QueryRow = Record<string, unknown>;
@@ -69,6 +73,14 @@ type DatabaseModuleContract = {
   createArchiveImportJobRepository?: (
     client: TestClient,
   ) => ArchiveImportJobRepository;
+  enqueueLiveTerminalArchiveImportJob?: (
+    transaction: { unsafe: UnsafeQuery },
+    input: Record<string, unknown>,
+  ) => Promise<ArchiveImportJob>;
+  supersedeLiveTerminalArchiveImportJobForCorrection?: (
+    transaction: { unsafe: UnsafeQuery },
+    input: Record<string, unknown>,
+  ) => Promise<void>;
   createFeaturedReplayRepository?: (
     client: TestClient,
   ) => FeaturedReplayRepository;
@@ -99,15 +111,69 @@ function testClient(
   };
 }
 
-const jobInput = {
-  awayTeamId: "ESP",
-  contextHash: "a".repeat(64),
+const sourceContext: ArchiveImportSourceContext = {
+  fixtureGroupId: "fixture-group-18237038",
   fixtureId: "18237038",
-  homeTeamId: "FRA",
+  gameState: 2,
   kickoffAt: "2026-07-18T12:00:00.000Z",
+  participant1: {
+    code: "ALP-provider-101",
+    id: "provider-101",
+    name: "Alpha United",
+  },
   participant1IsHome: true,
+  participant2: {
+    code: "BRV-provider-202",
+    id: "provider-202",
+    name: "Bravo City",
+  },
+  schedule: {
+    competition: "World Cup",
+    competitionId: "72",
+    responseHash: "a".repeat(64),
+    source: "txline_world_cup_schedule",
+    sourcePath: "/api/fixtures/snapshot?competitionId=72",
+    sourceTimestampMs: 1_784_403_000_000,
+  },
+};
+
+const correctionSourceContext: ArchiveImportSourceContext = {
+  ...sourceContext,
+  kickoffAt: "2030-01-01T00:00:00.000Z",
+  participant1: {
+    code: "ARG-provider-303",
+    id: "provider-303",
+    name: "Argentum United",
+  },
+  schedule: {
+    ...sourceContext.schedule,
+    responseHash: "b".repeat(64),
+    sourceTimestampMs: 1_784_403_000_001,
+  },
+};
+
+const jobInput = {
+  awayTeamId: sourceContext.participant2.code,
+  contextHash: hashArchiveImportSourceContext(sourceContext),
+  fixtureId: sourceContext.fixtureId,
+  homeTeamId: sourceContext.participant1.code,
+  kickoffAt: sourceContext.kickoffAt,
+  participant1IsHome: sourceContext.participant1IsHome,
   reason: "featured_bootstrap",
+  sourceContext,
   sourceTerminalRecordId: "delivery-final-1026",
+} as const;
+
+const correctionInput = {
+  awayTeamId: correctionSourceContext.participant2.code,
+  contextHash: hashArchiveImportSourceContext(correctionSourceContext),
+  fixtureId: correctionSourceContext.fixtureId,
+  homeTeamId: correctionSourceContext.participant1.code,
+  kickoffAt: correctionSourceContext.kickoffAt,
+  participant1IsHome: correctionSourceContext.participant1IsHome,
+  reason: "live_correction",
+  sourceContext: correctionSourceContext,
+  sourceTerminalRecordId: "delivery-correction-1027",
 } as const;
 
 function jobRow(
@@ -131,6 +197,7 @@ function jobRow(
     last_error: null,
     participant1_is_home: jobInput.participant1IsHome,
     reason: jobInput.reason,
+    source_context: jobInput.sourceContext,
     source_terminal_record_id: jobInput.sourceTerminalRecordId,
     state: "queued",
     updated_at: "2026-07-18T11:59:00.000Z",
@@ -157,6 +224,188 @@ function outputRow(
 }
 
 describe("archive import job repository", () => {
+  it("atomically promotes a distinct provider terminal to one correction while preserving frozen source context", async () => {
+    let insertCount = 0;
+    const fake = testClient((query) => {
+      if (query.includes("INSERT INTO matchsense.archive_import_jobs")) {
+        insertCount += 1;
+        if (insertCount === 1) {
+          return [
+            jobRow({
+              reason: "live_terminal",
+              source_terminal_record_id: "provider-terminal-1026",
+            }),
+          ];
+        }
+        if (insertCount === 2) {
+          return [
+            jobRow({
+              archive_manifest_hash: null,
+              reason: "live_correction",
+              source_terminal_record_id: "provider-terminal-1027",
+              state: "queued",
+            }),
+          ];
+        }
+        return [];
+      }
+      if (query.includes("SELECT") && query.includes("archive_import_jobs")) {
+        return [
+          jobRow({
+            reason: "live_correction",
+            source_terminal_record_id: "provider-terminal-1027",
+          }),
+        ];
+      }
+      return [];
+    });
+
+    expect(db.enqueueLiveTerminalArchiveImportJob).toBeTypeOf("function");
+    const terminal = {
+      ...jobInput,
+      sourceTerminalRecordId: "provider-terminal-1026",
+    };
+    const { reason: _reason, ...terminalInstruction } = terminal;
+
+    await expect(
+      db.enqueueLiveTerminalArchiveImportJob?.(
+        fake.client,
+        terminalInstruction,
+      ),
+    ).resolves.toMatchObject({
+      reason: "live_terminal",
+      sourceTerminalRecordId: "provider-terminal-1026",
+    });
+    await expect(
+      db.enqueueLiveTerminalArchiveImportJob?.(fake.client, {
+        ...correctionInput,
+        sourceTerminalRecordId: "provider-terminal-1027",
+      }),
+    ).resolves.toMatchObject({
+      contextHash: jobInput.contextHash,
+      homeTeamId: jobInput.homeTeamId,
+      kickoffAt: jobInput.kickoffAt,
+      reason: "live_correction",
+      sourceContext: jobInput.sourceContext,
+      sourceTerminalRecordId: "provider-terminal-1027",
+    });
+    await expect(
+      db.enqueueLiveTerminalArchiveImportJob?.(fake.client, {
+        ...correctionInput,
+        sourceTerminalRecordId: "provider-terminal-1027",
+      }),
+    ).resolves.toMatchObject({
+      reason: "live_correction",
+      sourceTerminalRecordId: "provider-terminal-1027",
+    });
+
+    const insert = fake.queries.find(({ query }) =>
+      query.includes("INSERT INTO matchsense.archive_import_jobs"),
+    );
+    const conflictUpdate = insert?.query.split("DO UPDATE")[1] ?? "";
+    expect(conflictUpdate).toContain("SET reason = 'live_correction'");
+    expect(conflictUpdate).toContain("EXCLUDED.reason = 'live_terminal'");
+    expect(conflictUpdate).toContain(
+      "reason IN ('live_terminal', 'live_correction')",
+    );
+    expect(conflictUpdate).not.toContain("source_context = EXCLUDED");
+    expect(insertCount).toBe(3);
+  });
+
+  it("supersedes an in-flight live terminal claim so its old worker cannot bind or publish before a replacement terminal requeues it", async () => {
+    let superseded = false;
+    const fake = testClient((query) => {
+      if (
+        query.includes("UPDATE matchsense.archive_import_jobs") &&
+        query.includes("SET state = 'rejected'")
+      ) {
+        superseded = true;
+        return [];
+      }
+      if (query.includes("INSERT INTO matchsense.archive_import_job_outputs")) {
+        return [];
+      }
+      if (query.includes("SET state = 'replay_ready'")) return [];
+      if (query.includes("INSERT INTO matchsense.archive_import_jobs")) {
+        return superseded
+          ? [
+              jobRow({
+                archive_manifest_hash: null,
+                archive_manifest_id: null,
+                claim_generation: 6,
+                last_error: null,
+                reason: "live_correction",
+                source_terminal_record_id: "provider-terminal-1028",
+                state: "queued",
+              }),
+            ]
+          : [];
+      }
+      return [];
+    });
+    const jobs = db.createArchiveImportJobRepository?.(fake.client);
+
+    expect(db.supersedeLiveTerminalArchiveImportJobForCorrection).toBeTypeOf(
+      "function",
+    );
+    await expect(
+      db.supersedeLiveTerminalArchiveImportJobForCorrection?.(fake.client, {
+        fixtureId: jobInput.fixtureId,
+        reason: "live_txline_canonical_correction:score_adjustment",
+      }),
+    ).resolves.toBeUndefined();
+
+    const supersede = fake.queries.find(({ query }) =>
+      query.includes("SET state = 'rejected'"),
+    );
+    expect(supersede?.query).toContain(
+      "state IN ('queued', 'retry_wait', 'claimed')",
+    );
+    expect(supersede?.query).toContain(
+      "claim_generation = claim_generation + 1",
+    );
+    expect(supersede?.query).toContain("archive_manifest_id = NULL");
+    expect(supersede?.query).toContain("archive_manifest_hash = NULL");
+    expect(supersede?.parameters).toEqual([
+      jobInput.fixtureId,
+      "live_txline_canonical_correction:score_adjustment",
+    ]);
+
+    await expect(
+      jobs?.bindVerifiedArchiveOutput({
+        archiveManifestHash: "1".repeat(64),
+        archiveManifestId: "manifest-18237038",
+        claimGeneration: 5,
+        fixtureId: jobInput.fixtureId,
+        workerId: "archive-worker-a",
+      }),
+    ).rejects.toThrow(
+      "Archive import job claim or current archive output is invalid",
+    );
+    await expect(
+      jobs?.markReplayReady({
+        claimGeneration: 5,
+        fixtureId: jobInput.fixtureId,
+        workerId: "archive-worker-a",
+      }),
+    ).rejects.toThrow(
+      "Archive import job claim or verified archive output is invalid",
+    );
+
+    await expect(
+      db.enqueueLiveTerminalArchiveImportJob?.(fake.client, {
+        ...jobInput,
+        sourceTerminalRecordId: "provider-terminal-1028",
+      }),
+    ).resolves.toMatchObject({
+      contextHash: jobInput.contextHash,
+      reason: "live_correction",
+      sourceContext: jobInput.sourceContext,
+      sourceTerminalRecordId: "provider-terminal-1028",
+      state: "queued",
+    });
+  });
+
   it("only requeues a changed terminal when it is an explicit live correction", async () => {
     let insertCount = 0;
     const fake = testClient((query) => {
@@ -191,9 +440,7 @@ describe("archive import job repository", () => {
     });
     await expect(
       jobs?.enqueue({
-        ...jobInput,
-        homeTeamId: "ARG",
-        kickoffAt: "2030-01-01T00:00:00.000Z",
+        ...correctionInput,
         reason: "live_correction",
       }),
     ).resolves.toMatchObject({
@@ -205,9 +452,7 @@ describe("archive import job repository", () => {
     });
     await expect(
       jobs?.enqueue({
-        ...jobInput,
-        homeTeamId: "ARG",
-        kickoffAt: "2030-01-01T00:00:00.000Z",
+        ...correctionInput,
         reason: "live_terminal",
         sourceTerminalRecordId: "new-terminal-without-correction",
       }),
@@ -220,9 +465,7 @@ describe("archive import job repository", () => {
     });
     await expect(
       jobs?.enqueue({
-        ...jobInput,
-        homeTeamId: "ARG",
-        kickoffAt: "2030-01-01T00:00:00.000Z",
+        ...correctionInput,
         reason: "live_correction",
         sourceTerminalRecordId: "delivery-correction-1027",
       }),

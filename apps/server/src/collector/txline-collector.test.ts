@@ -1,14 +1,47 @@
-import type { FixtureTruthRepository } from "@matchsense/db";
+import {
+  hashArchiveImportSourceContext,
+  type ArchiveImportSourceContext,
+  type FixtureTruthRepository,
+} from "@matchsense/db";
 import type { TxlineRawRecord } from "@matchsense/txline-adapter";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ArchiveService } from "./archive-service.js";
 import { createTxlineCollector } from "./txline-collector.js";
 
-const fixture = {
-  awayTeam: "ESP",
+const archiveSourceContext: ArchiveImportSourceContext = {
+  fixtureGroupId: "group-1",
   fixtureId: "fx-collector",
-  homeTeam: "FRA",
+  gameState: 2,
+  kickoffAt: "2026-07-18T18:00:00.000Z",
+  participant1: {
+    code: "ALP-provider-101",
+    id: "provider-101",
+    name: "Alpha United",
+  },
+  participant1IsHome: true,
+  participant2: {
+    code: "BRV-provider-202",
+    id: "provider-202",
+    name: "Bravo City",
+  },
+  schedule: {
+    competition: "World Cup",
+    competitionId: "72",
+    responseHash: "a".repeat(64),
+    source: "txline_world_cup_schedule",
+    sourcePath: "/api/fixtures/snapshot?competitionId=72",
+    sourceTimestampMs: 1_784_403_000_000,
+  },
+};
+
+const fixture = {
+  archiveImport: {
+    contextHash: hashArchiveImportSourceContext(archiveSourceContext),
+    sourceContext: archiveSourceContext,
+  },
+  awayTeam: "BRV-provider-202",
+  fixtureId: "fx-collector",
+  homeTeam: "ALP-provider-101",
   kickoffAt: "2026-07-18T18:00:00.000Z",
   participant1IsHome: true,
 };
@@ -57,6 +90,53 @@ function goalPayload() {
 }
 
 describe("durable TxLINE collector", () => {
+  it("attaches one transaction-local archive intent for a realtime authoritative terminal with omitted Confirmed", async () => {
+    const repository: Pick<FixtureTruthRepository, "commitCollectorFrame"> = {
+      commitCollectorFrame: vi.fn(async (input) => {
+        const delivery = input.deliveries[0]!;
+        expect(delivery.archiveImportJob).toEqual({
+          awayTeamId: fixture.awayTeam,
+          contextHash: fixture.archiveImport.contextHash,
+          fixtureId: fixture.fixtureId,
+          homeTeamId: fixture.homeTeam,
+          kickoffAt: fixture.kickoffAt,
+          participant1IsHome: fixture.participant1IsHome,
+          sourceContext: fixture.archiveImport.sourceContext,
+          sourceTerminalRecordId: "provider-terminal-1026",
+        });
+        expect(delivery).not.toHaveProperty("recordedArchiveInvalidation");
+        return {
+          deliveries: [
+            {
+              eventSequences: [1],
+              kind: "committed" as const,
+              revisions: [1],
+            },
+          ],
+          kind: "committed" as const,
+        };
+      }),
+    };
+    const collector = createTxlineCollector({
+      fixtureForId: () => fixture,
+      fixtureTruth: repository,
+      rightsGrantId: "grant-1",
+      sourceFence: fence,
+    });
+
+    await expect(
+      collector.ingest(
+        raw({
+          ...goalPayload(),
+          Action: "game_finalised",
+          Id: "provider-terminal-1026",
+          StatusId: 100,
+          Confirmed: undefined,
+        }),
+      ),
+    ).resolves.toMatchObject({ kind: "committed" });
+  });
+
   it("persists a realtime raw goal before deriving its fan-facing canonical outbox work", async () => {
     const repository: Pick<FixtureTruthRepository, "commitCollectorFrame"> = {
       commitCollectorFrame: vi.fn(async (input) => {
@@ -177,91 +257,134 @@ describe("durable TxLINE collector", () => {
     ).resolves.toBe(true);
   });
 
-  it("passes its held live source fence into archive rebuilds", async () => {
-    const repository: Pick<FixtureTruthRepository, "commitCollectorFrame"> = {
-      commitCollectorFrame: vi.fn(async () => ({
-        deliveries: [
-          {
-            eventSequences: [1],
+  it.each([
+    {
+      action: "action_amend",
+      payload: { ...goalPayload(), Action: "action_amend" },
+    },
+    {
+      action: "action_discarded",
+      payload: { ...goalPayload(), Action: "action_discarded" },
+    },
+    {
+      action: "score_adjustment",
+      payload: { ...goalPayload(), Action: "score_adjustment" },
+    },
+    {
+      action: "var_end",
+      payload: {
+        ...goalPayload(),
+        Action: "var_end",
+        Data: { Outcome: "Overturned", ReviewType: "Goal" },
+      },
+    },
+  ])(
+    "attaches a recorded replay invalidation without an archive job or fan-out for canonical $action",
+    async ({ action, payload }) => {
+      const repository: Pick<FixtureTruthRepository, "commitCollectorFrame"> = {
+        commitCollectorFrame: vi.fn(async (input) => {
+          const delivery = input.deliveries[0]!;
+          expect(delivery.archiveImportJob).toBeUndefined();
+          expect(delivery).toMatchObject({
+            recordedArchiveInvalidation: {
+              action,
+            },
+          });
+          const plans = delivery.derive?.(null) ?? [];
+          expect(plans).not.toHaveLength(0);
+          expect(
+            plans.flatMap(
+              (plan: { outbox: readonly unknown[] }) => plan.outbox,
+            ),
+          ).toEqual([]);
+          return {
+            deliveries: [
+              {
+                eventSequences: [1],
+                kind: "committed" as const,
+                revisions: [1],
+              },
+            ],
             kind: "committed" as const,
-            revisions: [1],
-          },
-        ],
-        kind: "committed" as const,
-      })),
-    };
-    const archive: ArchiveService = {
-      rebuild: vi.fn(async () => ({
-        manifest: null,
-        projectionHash: "a".repeat(64),
-        status: "REPLAY_READY" as const,
-        terminalDeliveryId: "final-2",
-      })),
-    };
-    const collector = createTxlineCollector({
-      archive,
-      fixtureForId: () => fixture,
-      fixtureTruth: repository,
-      rightsGrantId: "grant-1",
-      sourceFence: fence,
-    });
-
-    await expect(
-      collector.ingest(
-        raw({
-          ...goalPayload(),
-          Action: "game_finalised",
-          Id: "final-2",
-          StatusId: 100,
+          };
         }),
-      ),
-    ).resolves.toMatchObject({ kind: "committed" });
-    expect(archive.rebuild).toHaveBeenCalledWith(
-      expect.objectContaining({
-        mode: "live",
+      };
+      const collector = createTxlineCollector({
+        fixtureForId: () => fixture,
+        fixtureTruth: repository,
+        rightsGrantId: "grant-1",
         sourceFence: fence,
-      }),
-    );
-  });
+      });
 
-  it("returns fenced when archive rebuild loses the held live source fence", async () => {
+      await expect(
+        collector.ingest(
+          raw({
+            ...payload,
+            Id: `provider-${action}-1027`,
+          }),
+        ),
+      ).resolves.toEqual({ effects: [], kind: "committed" });
+    },
+  );
+
+  it("attaches no archive job or recorded invalidation for rejected terminals, reconciliation, or source-only records", async () => {
+    const archiveIntents: unknown[] = [];
+    const recordedInvalidations: unknown[] = [];
     const repository: Pick<FixtureTruthRepository, "commitCollectorFrame"> = {
-      commitCollectorFrame: vi.fn(async () => ({
-        deliveries: [
-          {
-            eventSequences: [1],
+      commitCollectorFrame: vi.fn(
+        async (
+          input: Parameters<FixtureTruthRepository["commitCollectorFrame"]>[0],
+        ) => {
+          archiveIntents.push(
+            ...input.deliveries.map((delivery) => delivery.archiveImportJob),
+          );
+          recordedInvalidations.push(
+            ...input.deliveries.map(
+              (delivery) =>
+                (delivery as { recordedArchiveInvalidation?: unknown })
+                  .recordedArchiveInvalidation,
+            ),
+          );
+          return {
+            deliveries: input.deliveries.map(() => ({
+              kind: "accepted_no_change" as const,
+            })),
             kind: "committed" as const,
-            revisions: [1],
-          },
-        ],
-        kind: "committed" as const,
-      })),
-    };
-    const archive: ArchiveService = {
-      rebuild: vi.fn(async () => ({
-        manifest: null,
-        projectionHash: null,
-        status: "FENCED" as never,
-        terminalDeliveryId: null,
-      })),
+          };
+        },
+      ),
     };
     const collector = createTxlineCollector({
-      archive,
       fixtureForId: () => fixture,
       fixtureTruth: repository,
       rightsGrantId: "grant-1",
       sourceFence: fence,
     });
 
-    await expect(
-      collector.ingest(
-        raw({
-          ...goalPayload(),
-          Action: "game_finalised",
-          Id: "final-2",
-          StatusId: 100,
-        }),
+    const terminal = {
+      ...goalPayload(),
+      Action: "game_finalised",
+      Id: "provider-terminal-1026",
+      StatusId: 100,
+    };
+    for (const record of [
+      raw({ ...terminal, Confirmed: false }),
+      raw({ ...terminal, Action: "halftime_finalised" }),
+      raw({ ...terminal, StatusId: 99 }),
+      raw({ ...terminal, Id: undefined }),
+      raw(terminal, "reconciliation"),
+      raw({ ...terminal, Action: "coverage_update" }),
+      raw(
+        { ...goalPayload(), Action: "action_amend", Id: "provider-amend-1027" },
+        "reconciliation",
       ),
-    ).resolves.toEqual({ effects: [], kind: "fenced" });
+    ]) {
+      await expect(collector.ingest(record)).resolves.toEqual({
+        effects: [],
+        kind: "committed",
+      });
+    }
+    expect(archiveIntents).toEqual(Array(7).fill(undefined));
+    expect(recordedInvalidations).toEqual(Array(7).fill(undefined));
   });
 });

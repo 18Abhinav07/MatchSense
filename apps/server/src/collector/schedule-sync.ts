@@ -1,7 +1,16 @@
 import { createHash } from "node:crypto";
 
-import type { FixtureTruthRepository, SourceFence } from "@matchsense/db";
-import type { TxlineScheduleFixture } from "@matchsense/txline-adapter";
+import {
+  hashArchiveImportSourceContext,
+  type ArchiveImportSourceContext,
+  type FixtureTruthRepository,
+  type SourceFence,
+} from "@matchsense/db";
+import type {
+  DurableTxlineFixture,
+  TxlineScheduleFixture,
+} from "@matchsense/txline-adapter";
+import { buildTxlineFixtureSnapshotPath } from "@matchsense/txline-adapter";
 
 export interface ScheduleSyncResult {
   observed: number;
@@ -27,6 +36,20 @@ export interface DurableTeamCatalogEntry {
   name: string;
   participantId: string;
   sourceTimestampMs: number;
+}
+
+export interface ArchiveImportScheduleContext {
+  contextHash: string;
+  sourceContext: ArchiveImportSourceContext;
+}
+
+/**
+ * The live collector carries the exact schedule evidence that created its
+ * durable fixture, so a terminal can freeze it without inspecting a score
+ * payload or inventing provider participant identities later.
+ */
+export interface DurableCollectorFixture extends DurableTxlineFixture {
+  archiveImport: ArchiveImportScheduleContext;
 }
 
 const COUNTRY_CODES = new Map<string, string>(
@@ -128,6 +151,14 @@ function digest(value: unknown) {
   return createHash("sha256").update(stableJson(value)).digest("hex");
 }
 
+function scheduleSourcePath(fixture: TxlineScheduleFixture) {
+  const competitionId = Number(fixture.competitionId);
+  if (!Number.isSafeInteger(competitionId) || competitionId < 0) {
+    throw new Error("TxLINE schedule fixture competition id is invalid");
+  }
+  return buildTxlineFixtureSnapshotPath({ competitionId });
+}
+
 function teamCode(name: string, participantId: string) {
   const known = COUNTRY_CODES.get(name.trim().toLowerCase());
   if (known) return known;
@@ -226,6 +257,50 @@ export function durableFixtureFromSchedule(fixture: TxlineScheduleFixture) {
   };
 }
 
+export function archiveImportSourceContextFromSchedule(
+  fixture: TxlineScheduleFixture,
+): ArchiveImportScheduleContext {
+  const durable = durableFixtureFromSchedule(fixture);
+  const sourceContext: ArchiveImportSourceContext = {
+    fixtureGroupId: fixture.fixtureGroupId,
+    fixtureId: fixture.fixtureId,
+    gameState: fixture.gameState,
+    kickoffAt: durable.kickoffAt,
+    participant1: {
+      code: teamCode(fixture.participant1.name, fixture.participant1.id),
+      id: fixture.participant1.id,
+      name: fixture.participant1.name,
+    },
+    participant1IsHome: fixture.participant1IsHome,
+    participant2: {
+      code: teamCode(fixture.participant2.name, fixture.participant2.id),
+      id: fixture.participant2.id,
+      name: fixture.participant2.name,
+    },
+    schedule: {
+      competition: fixture.competition,
+      competitionId: fixture.competitionId,
+      responseHash: digest(fixture),
+      source: "txline_world_cup_schedule",
+      sourcePath: scheduleSourcePath(fixture),
+      sourceTimestampMs: fixture.sourceTimestampMs,
+    },
+  };
+  return {
+    contextHash: hashArchiveImportSourceContext(sourceContext),
+    sourceContext,
+  };
+}
+
+export function durableCollectorFixtureFromSchedule(
+  fixture: TxlineScheduleFixture,
+): DurableCollectorFixture {
+  return {
+    ...durableFixtureFromSchedule(fixture),
+    archiveImport: archiveImportSourceContextFromSchedule(fixture),
+  };
+}
+
 function fixtureUpsert(fixture: TxlineScheduleFixture) {
   const product = durableFixtureFromSchedule(fixture);
   return {
@@ -260,7 +335,7 @@ function scheduleObservation(
     responseHash: payloadHash,
     rightsGrantId: input.rightsGrantId,
     source: input.sourceFence.source,
-    sourcePath: "/api/fixtures/snapshot?competitionId=72",
+    sourcePath: scheduleSourcePath(fixture),
     observedAt,
   };
 }

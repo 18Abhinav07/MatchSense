@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it, vi } from "vitest";
 
 import * as databaseModule from "./index.js";
@@ -236,6 +238,122 @@ const liveRaw = {
   source: "txline",
   streamKey: "scores:mainnet",
 };
+
+function stableJson(value: unknown): string {
+  if (
+    value === null ||
+    typeof value === "boolean" ||
+    typeof value === "string"
+  ) {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? JSON.stringify(value) : "null";
+  }
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`)
+      .join(",")}}`;
+  }
+  return "null";
+}
+
+const liveTerminalSourceContext = {
+  fixtureGroupId: "group-1",
+  fixtureId: "fx-1",
+  gameState: 2,
+  kickoffAt: "2026-07-18T18:00:00.000Z",
+  participant1: {
+    code: "ALP-provider-101",
+    id: "provider-101",
+    name: "Alpha United",
+  },
+  participant1IsHome: true,
+  participant2: {
+    code: "BRV-provider-202",
+    id: "provider-202",
+    name: "Bravo City",
+  },
+  schedule: {
+    competition: "World Cup",
+    competitionId: "72",
+    responseHash: "d".repeat(64),
+    source: "txline_world_cup_schedule",
+    sourcePath: "/api/fixtures/snapshot?competitionId=72",
+    sourceTimestampMs: 1_784_403_000_000,
+  },
+};
+
+const liveTerminalSourceContextHash = createHash("sha256")
+  .update(stableJson(liveTerminalSourceContext))
+  .digest("hex");
+
+function liveTerminalArchiveImportJob(sourceTerminalRecordId: string) {
+  return {
+    awayTeamId: "BRV-provider-202",
+    contextHash: liveTerminalSourceContextHash,
+    fixtureId: "fx-1",
+    homeTeamId: "ALP-provider-101",
+    kickoffAt: "2026-07-18T18:00:00.000Z",
+    participant1IsHome: true,
+    sourceContext: liveTerminalSourceContext,
+    sourceTerminalRecordId,
+  };
+}
+
+function liveTerminalRaw(sourceTerminalRecordId: string, id: string) {
+  return {
+    ...liveRaw,
+    canonicalEligible: true,
+    deliveryIntent: "realtime" as const,
+    deliveryKey: createHash("sha256").update(id).digest("hex"),
+    id,
+    orderingKey: `terminal:${sourceTerminalRecordId}`,
+    payload: {
+      Action: "game_finalised",
+      FixtureId: "fx-1",
+      Id: sourceTerminalRecordId,
+      StatusId: 100,
+    },
+    rawRetention: "authorised_raw" as const,
+    responseHash: createHash("sha256").update(`response:${id}`).digest("hex"),
+    rightsGrantId: "grant-1",
+    sourcePath: "/api/scores/stream",
+    sourceRecordId: sourceTerminalRecordId,
+    sourceSequence: sourceTerminalRecordId,
+    streamKey: "scores:mainnet",
+  };
+}
+
+function liveCorrectionRaw(
+  action: "action_amend" | "action_discarded" | "score_adjustment",
+  id: string,
+) {
+  const sourceRecordId = `provider-${action}-${id}`;
+  return {
+    ...liveTerminalRaw(sourceRecordId, id),
+    orderingKey: `correction:${sourceRecordId}`,
+    payload: { Action: action, FixtureId: "fx-1", Id: sourceRecordId },
+    sourceSequence: sourceRecordId,
+  };
+}
+
+function canonicalFramePlans(eventId: string) {
+  return () => [
+    {
+      event: {
+        id: eventId,
+        payload: { revision: 1 },
+        type: "fixture.corrected",
+      },
+      outbox: [],
+      projection: { payload: { revision: 1 }, revision: 1 },
+    },
+  ];
+}
 
 describe("fixture truth repository", () => {
   it("upserts, gets, and lists fixtures through typed mode-scoped queries", async () => {
@@ -629,7 +747,7 @@ describe("fixture truth repository", () => {
     expect(fake.queries[0]?.query).toContain("ORDER BY sequence ASC");
   });
 
-  it("commits raw delivery, canonical truth, and its fenced stream cursor in one transaction", async () => {
+  it("commits a wrapped live terminal's raw truth, projection, archive-import job, and fenced cursor in one transaction", async () => {
     const fake = testClient((query) => {
       if (query.includes("FROM matchsense.source_leases")) {
         return [sourceLeaseRow];
@@ -644,6 +762,33 @@ describe("fixture truth repository", () => {
       if (query.includes("FROM matchsense.fixture_projections")) return [];
       if (query.includes("INSERT INTO matchsense.fixture_events")) {
         return [{ sequence: "1" }];
+      }
+      if (query.includes("INSERT INTO matchsense.archive_import_jobs")) {
+        return [
+          {
+            archive_manifest_hash: null,
+            archive_manifest_id: null,
+            attempt_count: 0,
+            available_at: "2026-07-18T18:21:00.000Z",
+            away_team_id: "BRV-provider-202",
+            claim_expires_at: null,
+            claim_generation: 0,
+            claim_started_at: null,
+            claimed_by: null,
+            context_hash: liveTerminalSourceContextHash,
+            created_at: "2026-07-18T18:21:00.000Z",
+            fixture_id: "fx-1",
+            home_team_id: "ALP-provider-101",
+            kickoff_at: "2026-07-18T18:00:00.000Z",
+            last_error: null,
+            participant1_is_home: true,
+            reason: "live_terminal",
+            source_context: liveTerminalSourceContext,
+            source_terminal_record_id: "provider-terminal-1026",
+            state: "queued",
+            updated_at: "2026-07-18T18:21:00.000Z",
+          },
+        ];
       }
       if (query.includes("INSERT INTO matchsense.source_cursors")) {
         return [
@@ -663,10 +808,19 @@ describe("fixture truth repository", () => {
       deliveryKey: "e".repeat(64),
       id: "raw-frame-1",
       orderingKey: "00000000000000000051",
-      payload: { Action: "goal", FixtureId: "fx-1" },
+      payload: {
+        Update: {
+          Action: "GAME_FINAlised",
+          FixtureId: "fx-1",
+          Id: "provider-terminal-1026",
+          StatusId: 100,
+        },
+      },
       rawRetention: "authorised_raw" as const,
       responseHash: "f".repeat(64),
       rightsGrantId: "grant-1",
+      sourceRecordId: "provider-terminal-1026",
+      sourceSequence: "1026",
       sourcePath: "/api/scores/stream",
       streamKey: "scores:mainnet",
     };
@@ -699,6 +853,16 @@ describe("fixture truth repository", () => {
                 projection: { payload: { revision: 1 }, revision: 1 },
               },
             ],
+            archiveImportJob: {
+              awayTeamId: "BRV-provider-202",
+              contextHash: liveTerminalSourceContextHash,
+              fixtureId: "fx-1",
+              homeTeamId: "ALP-provider-101",
+              kickoffAt: "2026-07-18T18:00:00.000Z",
+              participant1IsHome: true,
+              sourceContext: liveTerminalSourceContext,
+              sourceTerminalRecordId: "provider-terminal-1026",
+            },
             fixtureId: "fx-1",
             raw,
           },
@@ -721,12 +885,928 @@ describe("fixture truth repository", () => {
     const projectionIndex = fake.queries.findIndex(({ query }) =>
       query.includes("INSERT INTO matchsense.fixture_projections"),
     );
+    const archiveJobIndex = fake.queries.findIndex(({ query }) =>
+      query.includes("INSERT INTO matchsense.archive_import_jobs"),
+    );
     const cursorIndex = fake.queries.findIndex(({ query }) =>
       query.includes("INSERT INTO matchsense.source_cursors"),
     );
     expect(rawIndex).toBeGreaterThan(-1);
     expect(projectionIndex).toBeGreaterThan(rawIndex);
-    expect(cursorIndex).toBeGreaterThan(projectionIndex);
+    expect(archiveJobIndex).toBeGreaterThan(projectionIndex);
+    expect(cursorIndex).toBeGreaterThan(archiveJobIndex);
+    expect(fake.queries[archiveJobIndex]?.parameters).toContain(
+      "provider-terminal-1026",
+    );
+  });
+
+  it("rejects a terminal archive instruction for another fixture before opening a frame transaction", async () => {
+    const fake = testClient(() => {
+      throw new Error("A malformed frame must not start transaction work");
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const raw = liveTerminalRaw(
+      "provider-terminal-cross-fixture",
+      "raw-cross-fixture",
+    );
+
+    await expect(
+      repository?.commitCollectorFrame({
+        deliveries: [
+          {
+            archiveImportJob: {
+              ...liveTerminalArchiveImportJob(
+                "provider-terminal-cross-fixture",
+              ),
+              fixtureId: "fx-other",
+            },
+            derive: canonicalFramePlans("event-cross-fixture"),
+            fixtureId: "fx-1",
+            raw,
+          },
+        ],
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).rejects.toThrow(
+      "Archive import job fixture must match its collector delivery",
+    );
+    expect(fake.client.begin).not.toHaveBeenCalled();
+    expect(fake.queries).toHaveLength(0);
+  });
+
+  it.each([
+    [
+      "a non-terminal goal",
+      { Action: "goal", StatusId: 100 },
+      "Archive import job must be confirmed game_finalised with StatusId 100",
+    ],
+    [
+      "a non-100 terminal",
+      { Action: "game_finalised", StatusId: 90 },
+      "Archive import job must be confirmed game_finalised with StatusId 100",
+    ],
+    [
+      "an explicitly unconfirmed terminal",
+      { Action: "game_finalised", Confirmed: false, StatusId: 100 },
+      "Archive import job must be confirmed game_finalised with StatusId 100",
+    ],
+    [
+      "a payload fixture for another delivery",
+      {
+        Action: "game_finalised",
+        FixtureId: "fx-other",
+        Id: "provider-terminal-other-fixture",
+        StatusId: 100,
+      },
+      "Archive import job payload fixture must match its collector delivery",
+    ],
+    [
+      "a payload id for another source record",
+      {
+        Action: "game_finalised",
+        FixtureId: "fx-1",
+        Id: "provider-terminal-other-id",
+        StatusId: 100,
+      },
+      "Archive import job payload id must match its terminal source record",
+    ],
+  ])(
+    "rejects a terminal archive instruction with %s before opening a frame transaction",
+    async (_label, payload, expectedError) => {
+      const fake = testClient(() => {
+        throw new Error("A malformed terminal must not start transaction work");
+      });
+      const repository = db.createFixtureTruthRepository?.(fake.client);
+      const sourceTerminalRecordId = `provider-terminal-${_label}`;
+      const raw = {
+        ...liveTerminalRaw(sourceTerminalRecordId, `raw-terminal-${_label}`),
+        payload,
+      };
+
+      await expect(
+        repository?.commitCollectorFrame({
+          deliveries: [
+            {
+              archiveImportJob: liveTerminalArchiveImportJob(
+                sourceTerminalRecordId,
+              ),
+              derive: canonicalFramePlans(`event-terminal-${_label}`),
+              fixtureId: "fx-1",
+              raw,
+            },
+          ],
+          mode: "live",
+          sourceFence: liveSourceFence,
+        }),
+      ).rejects.toThrow(expectedError);
+      expect(fake.client.begin).not.toHaveBeenCalled();
+      expect(fake.queries).toHaveLength(0);
+    },
+  );
+
+  it("accepts a wrapped authoritative terminal with an adapter-compatible numeric fixture id", async () => {
+    const fixtureId = "101";
+    const sourceTerminalRecordId = "provider-terminal-numeric-fixture";
+    const sourceContext = {
+      ...liveTerminalSourceContext,
+      fixtureId,
+    };
+    const contextHash = createHash("sha256")
+      .update(stableJson(sourceContext))
+      .digest("hex");
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [sourceLeaseRow];
+      }
+      if (query.includes("INSERT INTO matchsense.raw_source_records")) {
+        return [{ id: "raw-terminal-numeric-fixture" }];
+      }
+      if (query.includes("SELECT id") && query.includes("FOR UPDATE")) {
+        return [{ id: fixtureId }];
+      }
+      if (query.includes("FROM matchsense.fixture_projections")) return [];
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const raw = {
+      ...liveTerminalRaw(
+        sourceTerminalRecordId,
+        "raw-terminal-numeric-fixture",
+      ),
+      payload: {
+        Update: {
+          Action: "game_finalised",
+          FixtureId: 101,
+          Id: sourceTerminalRecordId,
+          StatusId: 100,
+        },
+      },
+    };
+
+    await expect(
+      repository?.commitCollectorFrame({
+        deliveries: [
+          {
+            archiveImportJob: {
+              ...liveTerminalArchiveImportJob(sourceTerminalRecordId),
+              contextHash,
+              fixtureId,
+              sourceContext,
+            },
+            derive: () => [],
+            fixtureId,
+            raw,
+          },
+        ],
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).resolves.toMatchObject({
+      deliveries: [{ kind: "accepted_no_change" }],
+      kind: "committed",
+    });
+    expect(fake.client.begin).toHaveBeenCalledTimes(1);
+  });
+
+  it("atomically invalidates only a replay-ready recorded archive for a wrapped canonical live correction without enqueueing a job", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [sourceLeaseRow];
+      }
+      if (query.includes("INSERT INTO matchsense.raw_source_records")) {
+        return [{ id: "raw-correction-amend" }];
+      }
+      if (query.includes("SELECT id") && query.includes("FOR UPDATE")) {
+        return [{ id: "fx-1" }];
+      }
+      if (query.includes("FROM matchsense.fixture_projections")) return [];
+      if (query.includes("INSERT INTO matchsense.fixture_events")) {
+        return [{ sequence: "1" }];
+      }
+      if (query.includes("INSERT INTO matchsense.archive_import_jobs")) {
+        throw new Error("A generic correction must not enqueue archive work");
+      }
+      if (query.includes("INSERT INTO matchsense.source_cursors")) {
+        return [{ ...sourceCursorRow, cursor_value: "cursor:53" }];
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const correction = liveCorrectionRaw(
+      "action_amend",
+      "raw-correction-amend",
+    );
+    const raw = {
+      ...correction,
+      payload: { Update: correction.payload },
+    };
+
+    await expect(
+      repository?.commitCollectorFrame({
+        cursor: { expectedCursor: null, nextCursor: "cursor:53" },
+        deliveries: [
+          {
+            derive: canonicalFramePlans("event-correction-amend"),
+            fixtureId: "fx-1",
+            raw,
+            recordedArchiveInvalidation: {
+              action: "action_amend",
+            },
+          },
+        ],
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).resolves.toMatchObject({ kind: "advanced" });
+
+    expect(fake.client.begin).toHaveBeenCalledTimes(1);
+    expect(
+      fake.queries.filter(({ query }) =>
+        query.includes("FROM matchsense.source_leases"),
+      ),
+    ).toHaveLength(1);
+    const invalidations = fake.queries.filter(({ query }) =>
+      query.includes("UPDATE matchsense.archive_manifests"),
+    );
+    expect(invalidations).toHaveLength(1);
+    expect(invalidations[0]?.query).toContain("mode = 'recorded'");
+    expect(invalidations[0]?.query).toContain("status = 'REPLAY_READY'");
+    expect(invalidations[0]?.parameters).toEqual([
+      "fx-1",
+      "live_txline_canonical_correction:action_amend",
+    ]);
+    const supersessions = fake.queries.filter(({ query }) =>
+      query.includes("UPDATE matchsense.archive_import_jobs"),
+    );
+    expect(supersessions).toHaveLength(1);
+    expect(supersessions[0]?.query).toContain("SET state = 'rejected'");
+    expect(supersessions[0]?.query).toContain(
+      "state IN ('queued', 'retry_wait', 'claimed')",
+    );
+    expect(supersessions[0]?.parameters).toEqual([
+      "fx-1",
+      "live_txline_canonical_correction:action_amend",
+    ]);
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("INSERT INTO matchsense.archive_import_jobs"),
+      ),
+    ).toBe(false);
+    const rawIndex = fake.queries.findIndex(({ query }) =>
+      query.includes("INSERT INTO matchsense.raw_source_records"),
+    );
+    const invalidationIndex = fake.queries.findIndex(({ query }) =>
+      query.includes("UPDATE matchsense.archive_manifests"),
+    );
+    const cursorIndex = fake.queries.findIndex(({ query }) =>
+      query.includes("INSERT INTO matchsense.source_cursors"),
+    );
+    const supersessionIndex = fake.queries.findIndex(({ query }) =>
+      query.includes("UPDATE matchsense.archive_import_jobs"),
+    );
+    expect(invalidationIndex).toBeGreaterThan(rawIndex);
+    expect(supersessionIndex).toBeGreaterThan(invalidationIndex);
+    expect(cursorIndex).toBeGreaterThan(supersessionIndex);
+  });
+
+  it("invalidates recorded replay history after an inserted canonical correction even when it yields no projection plans", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [sourceLeaseRow];
+      }
+      if (query.includes("INSERT INTO matchsense.raw_source_records")) {
+        return [{ id: "raw-correction-no-plans" }];
+      }
+      if (query.includes("SELECT id") && query.includes("FOR UPDATE")) {
+        return [{ id: "fx-1" }];
+      }
+      if (query.includes("FROM matchsense.fixture_projections")) return [];
+      if (query.includes("INSERT INTO matchsense.archive_import_jobs")) {
+        throw new Error("A generic correction must not enqueue archive work");
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const raw = liveCorrectionRaw(
+      "action_discarded",
+      "raw-correction-no-plans",
+    );
+
+    await expect(
+      repository?.commitCollectorFrame({
+        deliveries: [
+          {
+            derive: () => [],
+            fixtureId: "fx-1",
+            raw,
+            recordedArchiveInvalidation: {
+              action: "action_discarded",
+            },
+          },
+        ],
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).resolves.toEqual({
+      deliveries: [{ kind: "accepted_no_change" }],
+      kind: "committed",
+    });
+    expect(
+      fake.queries.filter(({ query }) =>
+        query.includes("UPDATE matchsense.archive_manifests"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      fake.queries.filter(({ query }) =>
+        query.includes("UPDATE matchsense.archive_import_jobs"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      fake.queries.some(
+        ({ query }) =>
+          query.includes("INSERT INTO matchsense.fixture_projections") ||
+          query.includes("INSERT INTO matchsense.fixture_events"),
+      ),
+    ).toBe(false);
+  });
+
+  it("rolls a correction frame and its recorded replay invalidation back together", async () => {
+    const attempted: string[] = [];
+    const committed: string[] = [];
+    const client: TestClient = {
+      begin: async <T>(
+        work: (transaction: { unsafe: UnsafeQuery }) => Promise<T>,
+      ) => {
+        const staged: string[] = [];
+        try {
+          const result = await work({
+            unsafe: async (query) => {
+              if (query.includes("FROM matchsense.source_leases")) {
+                return [sourceLeaseRow];
+              }
+              if (query.includes("INSERT INTO matchsense.raw_source_records")) {
+                attempted.push("raw");
+                staged.push("raw");
+                return [{ id: "raw-correction-rollback" }];
+              }
+              if (query.includes("SELECT id") && query.includes("FOR UPDATE")) {
+                return [{ id: "fx-1" }];
+              }
+              if (query.includes("FROM matchsense.fixture_projections")) {
+                return [];
+              }
+              if (
+                query.includes("INSERT INTO matchsense.fixture_projections")
+              ) {
+                attempted.push("projection");
+                staged.push("projection");
+                return [];
+              }
+              if (query.includes("INSERT INTO matchsense.fixture_events")) {
+                attempted.push("event");
+                staged.push("event");
+                return [{ sequence: "1" }];
+              }
+              if (query.includes("UPDATE matchsense.archive_manifests")) {
+                attempted.push("recorded_invalidation");
+                staged.push("recorded_invalidation");
+                return [];
+              }
+              if (query.includes("UPDATE matchsense.archive_import_jobs")) {
+                attempted.push("archive_job_supersession");
+                staged.push("archive_job_supersession");
+                throw new Error("injected archive job supersession failure");
+              }
+              if (query.includes("INSERT INTO matchsense.source_cursors")) {
+                throw new Error(
+                  "Cursor must not advance after recorded invalidation failure",
+                );
+              }
+              return [];
+            },
+          });
+          committed.push(...staged);
+          return result;
+        } catch (error) {
+          throw error;
+        }
+      },
+      end: vi.fn(async () => undefined),
+      unsafe: vi.fn(async () => []),
+    };
+    const repository = db.createFixtureTruthRepository?.(client);
+    const raw = liveCorrectionRaw(
+      "score_adjustment",
+      "raw-correction-rollback",
+    );
+
+    await expect(
+      repository?.commitCollectorFrame({
+        cursor: { expectedCursor: null, nextCursor: "cursor:54" },
+        deliveries: [
+          {
+            derive: canonicalFramePlans("event-correction-rollback"),
+            fixtureId: "fx-1",
+            raw,
+            recordedArchiveInvalidation: {
+              action: "score_adjustment",
+            },
+          },
+        ],
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).rejects.toThrow("injected archive job supersession failure");
+
+    expect(attempted).toEqual([
+      "raw",
+      "projection",
+      "event",
+      "recorded_invalidation",
+      "archive_job_supersession",
+    ]);
+    expect(committed).toEqual([]);
+  });
+
+  it("does not invalidate recorded replay history or enqueue work for duplicate, fenced, or stale-cursor corrections", async () => {
+    const correction = {
+      action: "action_amend" as const,
+    };
+
+    const duplicate = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [sourceLeaseRow];
+      }
+      if (query.includes("INSERT INTO matchsense.raw_source_records")) {
+        return [];
+      }
+      if (
+        query.includes("UPDATE matchsense.archive_manifests") ||
+        query.includes("UPDATE matchsense.archive_import_jobs") ||
+        query.includes("INSERT INTO matchsense.archive_import_jobs")
+      ) {
+        throw new Error("A duplicate correction must not mutate archive state");
+      }
+      return [];
+    });
+    const duplicateRepository = db.createFixtureTruthRepository?.(
+      duplicate.client,
+    );
+    await expect(
+      duplicateRepository?.commitCollectorFrame({
+        deliveries: [
+          {
+            derive: () => {
+              throw new Error("A duplicate correction must not derive plans");
+            },
+            fixtureId: "fx-1",
+            raw: liveCorrectionRaw("action_amend", "raw-duplicate-correction"),
+            recordedArchiveInvalidation: correction,
+          },
+        ],
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).resolves.toEqual({
+      deliveries: [{ kind: "duplicate" }],
+      kind: "committed",
+    });
+
+    const fenced = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) return [];
+      if (
+        query.includes("INSERT INTO matchsense.raw_source_records") ||
+        query.includes("UPDATE matchsense.archive_manifests") ||
+        query.includes("UPDATE matchsense.archive_import_jobs") ||
+        query.includes("INSERT INTO matchsense.archive_import_jobs")
+      ) {
+        throw new Error("A fenced correction must not mutate archive state");
+      }
+      return [];
+    });
+    const fencedRepository = db.createFixtureTruthRepository?.(fenced.client);
+    await expect(
+      fencedRepository?.commitCollectorFrame({
+        deliveries: [
+          {
+            derive: canonicalFramePlans("event-fenced-correction"),
+            fixtureId: "fx-1",
+            raw: liveCorrectionRaw("action_amend", "raw-fenced-correction"),
+            recordedArchiveInvalidation: correction,
+          },
+        ],
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).resolves.toEqual({ kind: "fenced" });
+
+    const staleCursor = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [sourceLeaseRow];
+      }
+      if (query.includes("FROM matchsense.source_cursors")) {
+        return [sourceCursorRow];
+      }
+      if (
+        query.includes("INSERT INTO matchsense.raw_source_records") ||
+        query.includes("UPDATE matchsense.archive_manifests") ||
+        query.includes("UPDATE matchsense.archive_import_jobs") ||
+        query.includes("INSERT INTO matchsense.archive_import_jobs")
+      ) {
+        throw new Error(
+          "A stale cursor correction must not mutate archive state",
+        );
+      }
+      return [];
+    });
+    const staleCursorRepository = db.createFixtureTruthRepository?.(
+      staleCursor.client,
+    );
+    await expect(
+      staleCursorRepository?.commitCollectorFrame({
+        cursor: { expectedCursor: null, nextCursor: "cursor:55" },
+        deliveries: [
+          {
+            derive: canonicalFramePlans("event-stale-cursor-correction"),
+            fixtureId: "fx-1",
+            raw: liveCorrectionRaw(
+              "action_amend",
+              "raw-stale-cursor-correction",
+            ),
+            recordedArchiveInvalidation: correction,
+          },
+        ],
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).resolves.toEqual({
+      currentCursor: "cursor-620",
+      kind: "conflict",
+    });
+
+    for (const fake of [duplicate, fenced, staleCursor]) {
+      expect(
+        fake.queries.some(({ query }) =>
+          query.includes("UPDATE matchsense.archive_manifests"),
+        ),
+      ).toBe(false);
+      expect(
+        fake.queries.some(({ query }) =>
+          query.includes("UPDATE matchsense.archive_import_jobs"),
+        ),
+      ).toBe(false);
+      expect(
+        fake.queries.some(({ query }) =>
+          query.includes("INSERT INTO matchsense.archive_import_jobs"),
+        ),
+      ).toBe(false);
+    }
+  });
+
+  it.each([
+    [
+      "a reconciliation",
+      {
+        ...liveCorrectionRaw("action_discarded", "raw-reconcile-invalidation"),
+        deliveryIntent: "reconcile" as const,
+      },
+      canonicalFramePlans("event-reconcile-invalidation"),
+    ],
+    [
+      "a source-only delivery",
+      {
+        ...liveCorrectionRaw(
+          "action_discarded",
+          "raw-source-only-invalidation",
+        ),
+        canonicalEligible: false,
+      },
+      undefined,
+    ],
+  ])(
+    "rejects a recorded archive invalidation attached to %s before transaction work",
+    async (_label, raw, derive) => {
+      const fake = testClient(() => {
+        throw new Error(
+          "Ineligible invalidation must not start transaction work",
+        );
+      });
+      const repository = db.createFixtureTruthRepository?.(fake.client);
+
+      await expect(
+        repository?.commitCollectorFrame({
+          deliveries: [
+            {
+              ...(derive ? { derive } : {}),
+              fixtureId: "fx-1",
+              raw,
+              recordedArchiveInvalidation: {
+                action: "action_discarded",
+              },
+            },
+          ],
+          mode: "live",
+          sourceFence: liveSourceFence,
+        }),
+      ).rejects.toThrow(
+        "Recorded archive invalidation requires a realtime canonical live delivery",
+      );
+      expect(fake.client.begin).not.toHaveBeenCalled();
+      expect(fake.queries).toHaveLength(0);
+    },
+  );
+
+  it("rejects an arbitrary recorded archive invalidation action before transaction work", async () => {
+    const fake = testClient(() => {
+      throw new Error(
+        "Invalid archive correction must not start transaction work",
+      );
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const raw = liveCorrectionRaw("action_amend", "raw-invalid-invalidation");
+
+    await expect(
+      repository?.commitCollectorFrame({
+        deliveries: [
+          {
+            derive: canonicalFramePlans("event-invalid-invalidation"),
+            fixtureId: "fx-1",
+            raw,
+            recordedArchiveInvalidation: { action: "goal" },
+          },
+        ],
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).rejects.toThrow("Recorded archive invalidation action is invalid");
+    expect(fake.client.begin).not.toHaveBeenCalled();
+    expect(fake.queries).toHaveLength(0);
+  });
+
+  it.each([
+    [
+      "an allowed action that does not match its raw payload",
+      liveCorrectionRaw("action_amend", "raw-mismatched-invalidation"),
+      { action: "score_adjustment" },
+      "Recorded archive invalidation must match its canonical TxLINE action",
+    ],
+    [
+      "a hyphenated action the adapter would classify as unsupported",
+      {
+        ...liveCorrectionRaw("action_amend", "raw-hyphenated-invalidation"),
+        payload: {
+          Action: "action-amend",
+          FixtureId: "fx-1",
+          Id: "provider-action_amend-raw-hyphenated-invalidation",
+        },
+      },
+      { action: "action_amend" },
+      "Recorded archive invalidation must match its canonical TxLINE action",
+    ],
+    [
+      "a VAR end without an overturned outcome",
+      {
+        ...liveTerminalRaw("provider-var-end", "raw-var-end-not-overturned"),
+        orderingKey: "correction:provider-var-end",
+        payload: {
+          Action: "var_end",
+          Data: { Outcome: "confirmed" },
+          FixtureId: "fx-1",
+          Id: "provider-var-end",
+        },
+        sourceSequence: "provider-var-end",
+      },
+      { action: "var_end" },
+      "Recorded archive invalidation requires an overturned VAR outcome",
+    ],
+  ])(
+    "rejects a recorded archive invalidation attached to %s before transaction work",
+    async (_label, raw, recordedArchiveInvalidation, expectedError) => {
+      const fake = testClient(() => {
+        throw new Error(
+          "Invalid archive correction must not start transaction work",
+        );
+      });
+      const repository = db.createFixtureTruthRepository?.(fake.client);
+
+      await expect(
+        repository?.commitCollectorFrame({
+          deliveries: [
+            {
+              derive: canonicalFramePlans(`event-${_label}`),
+              fixtureId: "fx-1",
+              raw,
+              recordedArchiveInvalidation,
+            },
+          ],
+          mode: "live",
+          sourceFence: liveSourceFence,
+        }),
+      ).rejects.toThrow(expectedError);
+      expect(fake.client.begin).not.toHaveBeenCalled();
+      expect(fake.queries).toHaveLength(0);
+    },
+  );
+
+  it("rolls a collector frame back when its transaction-local archive enqueue fails", async () => {
+    const attempted: string[] = [];
+    const committed: string[] = [];
+    const client: TestClient = {
+      begin: async <T>(
+        work: (transaction: { unsafe: UnsafeQuery }) => Promise<T>,
+      ) => {
+        const staged: string[] = [];
+        const result = await work({
+          unsafe: async (query) => {
+            if (query.includes("FROM matchsense.source_leases")) {
+              return [sourceLeaseRow];
+            }
+            if (query.includes("FROM matchsense.source_cursors")) return [];
+            if (query.includes("INSERT INTO matchsense.raw_source_records")) {
+              attempted.push("raw");
+              staged.push("raw");
+              return [{ id: "raw-rollback-terminal" }];
+            }
+            if (query.includes("SELECT id") && query.includes("FOR UPDATE")) {
+              return [{ id: "fx-1" }];
+            }
+            if (query.includes("FROM matchsense.fixture_projections"))
+              return [];
+            if (query.includes("INSERT INTO matchsense.fixture_projections")) {
+              attempted.push("projection");
+              staged.push("projection");
+              return [];
+            }
+            if (query.includes("INSERT INTO matchsense.fixture_events")) {
+              attempted.push("event");
+              staged.push("event");
+              return [{ sequence: "1" }];
+            }
+            if (query.includes("INSERT INTO matchsense.archive_import_jobs")) {
+              attempted.push("archive_job");
+              throw new Error("injected archive enqueue failure");
+            }
+            if (query.includes("INSERT INTO matchsense.source_cursors")) {
+              throw new Error(
+                "Cursor must not advance after archive enqueue failure",
+              );
+            }
+            return [];
+          },
+        });
+        committed.push(...staged);
+        return result;
+      },
+      end: vi.fn(async () => undefined),
+      unsafe: vi.fn(async () => []),
+    };
+    const repository = db.createFixtureTruthRepository?.(client);
+    const raw = {
+      ...liveRaw,
+      canonicalEligible: true,
+      deliveryIntent: "realtime" as const,
+      deliveryKey: "1".repeat(64),
+      id: "raw-rollback-terminal",
+      orderingKey: "00000000000000000052",
+      payload: {
+        Action: "game_finalised",
+        FixtureId: "fx-1",
+        Id: "provider-terminal-rollback",
+        StatusId: 100,
+      },
+      rawRetention: "authorised_raw" as const,
+      responseHash: "2".repeat(64),
+      rightsGrantId: "grant-1",
+      sourcePath: "/api/scores/stream",
+      sourceRecordId: "provider-terminal-rollback",
+      sourceSequence: "1026",
+      streamKey: "scores:mainnet",
+    };
+
+    await expect(
+      repository?.commitCollectorFrame({
+        cursor: { expectedCursor: null, nextCursor: "cursor:52" },
+        deliveries: [
+          {
+            archiveImportJob: {
+              awayTeamId: "BRV-provider-202",
+              contextHash: liveTerminalSourceContextHash,
+              fixtureId: "fx-1",
+              homeTeamId: "ALP-provider-101",
+              kickoffAt: "2026-07-18T18:00:00.000Z",
+              participant1IsHome: true,
+              sourceContext: liveTerminalSourceContext,
+              sourceTerminalRecordId: "provider-terminal-rollback",
+            },
+            derive: () => [
+              {
+                event: {
+                  id: "event-rollback-terminal",
+                  payload: { revision: 1 },
+                  type: "fixture.finalised",
+                },
+                outbox: [],
+                projection: { payload: { revision: 1 }, revision: 1 },
+              },
+            ],
+            fixtureId: "fx-1",
+            raw,
+          },
+        ],
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).rejects.toThrow("injected archive enqueue failure");
+
+    expect(attempted).toEqual(["raw", "projection", "event", "archive_job"]);
+    expect(committed).toEqual([]);
+  });
+
+  it("does not enqueue an archive job for a duplicate live terminal raw record", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [sourceLeaseRow];
+      }
+      if (query.includes("INSERT INTO matchsense.raw_source_records"))
+        return [];
+      if (query.includes("INSERT INTO matchsense.archive_import_jobs")) {
+        throw new Error("Duplicate raw must not enqueue an archive import job");
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const raw = liveTerminalRaw(
+      "provider-terminal-duplicate",
+      "raw-duplicate-terminal",
+    );
+
+    await expect(
+      repository?.commitCollectorFrame({
+        deliveries: [
+          {
+            archiveImportJob: liveTerminalArchiveImportJob(
+              "provider-terminal-duplicate",
+            ),
+            derive: () => {
+              throw new Error("Duplicate raw must not derive a projection");
+            },
+            fixtureId: "fx-1",
+            raw,
+          },
+        ],
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).resolves.toEqual({
+      deliveries: [{ kind: "duplicate" }],
+      kind: "committed",
+    });
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("INSERT INTO matchsense.archive_import_jobs"),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not enqueue an archive job when the live source fence is stale", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("INSERT INTO matchsense.archive_import_jobs")) {
+        throw new Error("Fenced frame must not enqueue an archive import job");
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const raw = liveTerminalRaw(
+      "provider-terminal-fenced",
+      "raw-fenced-terminal",
+    );
+
+    await expect(
+      repository?.commitCollectorFrame({
+        deliveries: [
+          {
+            archiveImportJob: liveTerminalArchiveImportJob(
+              "provider-terminal-fenced",
+            ),
+            derive: () => {
+              throw new Error("Fenced frame must not derive a projection");
+            },
+            fixtureId: "fx-1",
+            raw,
+          },
+        ],
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).resolves.toEqual({ kind: "fenced" });
+    expect(
+      fake.queries.some(
+        ({ query }) =>
+          query.includes("INSERT INTO matchsense.raw_source_records") ||
+          query.includes("INSERT INTO matchsense.archive_import_jobs"),
+      ),
+    ).toBe(false);
   });
 
   it("returns fenced before any recorded raw or projection write when its source lease is lost", async () => {
@@ -962,25 +2042,26 @@ describe("fixture truth repository", () => {
       return [];
     });
     const repository = db.createFixtureTruthRepository?.(fake.client);
-    const raw = {
-      ...liveRaw,
-      canonicalEligible: false,
-      deliveryIntent: "realtime" as const,
-      deliveryKey: "d".repeat(64),
-      id: "raw-stale-frame",
-      orderingKey: "00000000000000000052",
-      payload: { Action: "coverage_update", FixtureId: "fx-1" },
-      rawRetention: "authorised_raw" as const,
-      responseHash: "e".repeat(64),
-      rightsGrantId: "grant-1",
-      sourcePath: "/api/scores/stream",
-      streamKey: "scores:mainnet",
-    };
+    const raw = liveTerminalRaw(
+      "provider-terminal-stale-cursor",
+      "raw-stale-frame",
+    );
 
     await expect(
       repository?.commitCollectorFrame({
         cursor: { expectedCursor: null, nextCursor: "cursor:52" },
-        deliveries: [{ fixtureId: "fx-1", raw }],
+        deliveries: [
+          {
+            archiveImportJob: liveTerminalArchiveImportJob(
+              "provider-terminal-stale-cursor",
+            ),
+            derive: () => {
+              throw new Error("Stale cursor must not derive a projection");
+            },
+            fixtureId: "fx-1",
+            raw,
+          },
+        ],
         mode: "live",
         sourceFence: liveSourceFence,
       }),
@@ -991,6 +2072,11 @@ describe("fixture truth repository", () => {
     expect(
       fake.queries.some(({ query }) =>
         query.includes("INSERT INTO matchsense.raw_source_records"),
+      ),
+    ).toBe(false);
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("INSERT INTO matchsense.archive_import_jobs"),
       ),
     ).toBe(false);
   });
