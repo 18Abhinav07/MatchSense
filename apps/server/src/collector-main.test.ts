@@ -140,9 +140,13 @@ describe("collector-only runtime", () => {
 
   it("creates the real worker lifecycle after migration when no test lifecycle is injected", async () => {
     const database = {
+      archive: { ensureRightsGrant: vi.fn(async () => ({})) },
+      archiveImportJobs: {},
       close: vi.fn(async () => undefined),
+      fixtureTruth: {},
       migrate: vi.fn(async () => undefined),
       outbox: {},
+      sourceState: {},
     };
     const sourceLifecycle = {
       start: vi.fn(async () => undefined),
@@ -162,6 +166,10 @@ describe("collector-only runtime", () => {
         TXLINE_API_TOKEN: "fixture-collector-only-token",
       }),
       {
+        archiveImportPoller: {
+          start: vi.fn(),
+          stop: vi.fn(async () => undefined),
+        } as never,
         databaseRuntime: database as never,
         outboxWorker: outboxWorker as never,
         sourceLifecycleFactory,
@@ -178,11 +186,154 @@ describe("collector-only runtime", () => {
     expect(sourceLifecycle.stop).toHaveBeenCalledOnce();
   });
 
-  it("owns migration, TxLINE credentials, source lifecycle, and outbox processing without an HTTP listener", async () => {
+  it("preserves a revoked bootstrap grant before wiring a durable archive poller", async () => {
+    const events: string[] = [];
+    const revokedGrant = {
+      active: false,
+      expiresAt: "2026-08-01T12:00:00.000Z",
+      id: "txline-world-cup-hackathon-2026",
+      rawRetentionUntil: "2026-07-25T12:00:00.000Z",
+      revokedAt: "2026-07-18T11:00:00.000Z",
+      scopes: ["replay"],
+    };
+    const ensureRightsGrant = vi.fn(async () => {
+      events.push("rights");
+      return revokedGrant;
+    });
+    const upsertRightsGrant = vi.fn(async () => {
+      events.push("admin:upsert");
+      return {
+        ...revokedGrant,
+        active: true,
+        revokedAt: null,
+        scopes: ["audio", "raw_retention", "replay"],
+      };
+    });
     const database = {
-      close: vi.fn(async () => undefined),
+      archive: { ensureRightsGrant, upsertRightsGrant },
+      archiveImportJobs: {},
+      close: vi.fn(async () => {
+        events.push("database:close");
+      }),
+      commentaryJobs: {},
+      fans: {},
+      fixtureTruth: {},
       migrate: vi.fn(async () => undefined),
       outbox: {},
+      pushDevices: {},
+      rooms: {},
+      sourceState: {},
+      teamCatalog: {},
+    };
+    const txlineClient = { prepare: vi.fn() };
+    const sourceLifecycle = {
+      start: vi.fn(async () => {
+        events.push("live:start");
+      }),
+      stop: vi.fn(async () => {
+        events.push("live:stop");
+      }),
+    };
+    const archiveRunner = {
+      runOnce: vi.fn(async () => ({ kind: "idle" as const })),
+    };
+    const archivePoller = {
+      start: vi.fn(() => {
+        events.push("archive:start");
+      }),
+      stop: vi.fn(async () => {
+        events.push("archive:stop");
+      }),
+    };
+    const archiveImportRunnerFactory = vi.fn(() => archiveRunner);
+    const archiveImportPollerFactory = vi.fn(() => archivePoller);
+    const commentaryWorker = {
+      handleOutbox: vi.fn(async () => ({ kind: "ignored" as const })),
+      runOnce: vi.fn(async () => ({ kind: "idle" as const })),
+      start: vi.fn(() => {
+        events.push("commentary:start");
+      }),
+      stop: vi.fn(async () => {
+        events.push("commentary:stop");
+      }),
+    };
+    const outboxWorker = {
+      start: vi.fn(() => {
+        events.push("outbox:start");
+      }),
+      stop: vi.fn(async () => {
+        events.push("outbox:stop");
+      }),
+    };
+
+    const runtime = await startCollector(
+      parseServerEnv({
+        DATABASE_URL: "postgresql://db.example/matchsense",
+        ROLE: "worker",
+        TXLINE_API_TOKEN: "fixture-collector-only-token",
+      }),
+      {
+        archiveImportPollerFactory,
+        archiveImportRunnerFactory,
+        commentaryWorker: commentaryWorker as never,
+        databaseRuntime: database as never,
+        outboxWorker: outboxWorker as never,
+        sourceLifecycle,
+        txlineClientFactory: vi.fn(() => txlineClient) as never,
+      },
+    );
+
+    expect(archiveImportRunnerFactory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        archiveImportJobs: database.archiveImportJobs,
+        client: txlineClient,
+        fixtureTruth: database.fixtureTruth,
+        rightsGrantId: "txline-world-cup-hackathon-2026",
+        sourceState: database.sourceState,
+        workerId: expect.stringMatching(/^collector:/),
+      }),
+    );
+    expect(archiveImportPollerFactory).toHaveBeenCalledWith(archiveRunner);
+    expect(ensureRightsGrant).toHaveBeenCalledWith({
+      active: true,
+      id: "txline-world-cup-hackathon-2026",
+      reference: "TxLINE World Cup Hackathon 2026",
+      scopes: ["audio", "raw_retention", "replay"],
+    });
+    expect(upsertRightsGrant).not.toHaveBeenCalled();
+    expect(revokedGrant).toEqual({
+      active: false,
+      expiresAt: "2026-08-01T12:00:00.000Z",
+      id: "txline-world-cup-hackathon-2026",
+      rawRetentionUntil: "2026-07-25T12:00:00.000Z",
+      revokedAt: "2026-07-18T11:00:00.000Z",
+      scopes: ["replay"],
+    });
+    expect(events.slice(0, 3)).toEqual([
+      "rights",
+      "live:start",
+      "archive:start",
+    ]);
+
+    await runtime.close();
+    expect(events.slice(-5)).toEqual([
+      "archive:stop",
+      "live:stop",
+      "outbox:stop",
+      "commentary:stop",
+      "database:close",
+    ]);
+  });
+
+  it("owns migration, TxLINE credentials, source lifecycle, and outbox processing without an HTTP listener", async () => {
+    const database = {
+      archive: { ensureRightsGrant: vi.fn(async () => ({})) },
+      archiveImportJobs: {},
+      close: vi.fn(async () => undefined),
+      fixtureTruth: {},
+      migrate: vi.fn(async () => undefined),
+      outbox: {},
+      sourceState: {},
     };
     const txlineClientFactory = vi.fn(() => ({ prepare: vi.fn() })) as never;
     const outboxWorker = {
@@ -207,6 +358,10 @@ describe("collector-only runtime", () => {
         TXLINE_API_TOKEN: "fixture-collector-only-token",
       }),
       {
+        archiveImportPoller: {
+          start: vi.fn(),
+          stop: vi.fn(async () => undefined),
+        } as never,
         databaseRuntime: database as never,
         commentaryWorker: commentaryWorker as never,
         outboxWorker: outboxWorker as never,

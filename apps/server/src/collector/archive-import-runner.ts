@@ -25,6 +25,7 @@ import {
 const RECORDED_LEASE_DURATION_MS = 2 * 60_000;
 const OWNERSHIP_RENEWAL_MS = RECORDED_LEASE_DURATION_MS / 2;
 const RETRY_DELAY_MS = 30_000;
+const SHUTDOWN_RETRY_ERROR = "archive import worker is shutting down";
 
 const recordedLeaseKey = {
   mode: "recorded" as const,
@@ -89,7 +90,10 @@ export type ArchiveImportRunResult =
     };
 
 export interface ArchiveImportRunner {
-  runOnce(now?: Date): Promise<ArchiveImportRunResult>;
+  runOnce(
+    now?: Date,
+    shutdownSignal?: AbortSignal,
+  ): Promise<ArchiveImportRunResult>;
 }
 
 function isoAt(now: Date, offsetMs: number) {
@@ -225,7 +229,8 @@ export function createArchiveImportRunner(
   };
 
   return {
-    async runOnce(now = new Date()) {
+    async runOnce(now = new Date(), shutdownSignal?: AbortSignal) {
+      if (shutdownSignal?.aborted) return { kind: "idle" };
       try {
         await options.archiveImportJobs.recoverExpiredClaims(now);
       } catch (error) {
@@ -233,9 +238,17 @@ export function createArchiveImportRunner(
           `Archive import recovery failed: ${errorMessage(error)}`,
         );
       }
+      if (shutdownSignal?.aborted) return { kind: "idle" };
 
       const job = await options.archiveImportJobs.claim(options.workerId, now);
       if (!job) return { kind: "idle" };
+      const retryAfterShutdown = async () => {
+        await retrySafely(job, now, SHUTDOWN_RETRY_ERROR);
+        return { fixtureId: job.fixtureId, kind: "retry_wait" } as const;
+      };
+      if (shutdownSignal?.aborted) {
+        return retryAfterShutdown();
+      }
 
       let lease: SourceLeaseRecord | null;
       try {
@@ -245,9 +258,11 @@ export function createArchiveImportRunner(
           leaseUntil: isoAt(now, RECORDED_LEASE_DURATION_MS),
         });
       } catch (error) {
+        if (shutdownSignal?.aborted) return retryAfterShutdown();
         return settleFailure(job, now, error);
       }
       if (!lease) {
+        if (shutdownSignal?.aborted) return retryAfterShutdown();
         await retrySafely(job, now, "recorded archive import lease is held");
         return { fixtureId: job.fixtureId, kind: "lease_conflict" };
       }
@@ -257,6 +272,18 @@ export function createArchiveImportRunner(
       let renewalInFlight: Promise<void> | null = null;
       let stopping = false;
       const fetchController = new AbortController();
+      const shutdownRequested = () => shutdownSignal?.aborted === true;
+      const abortForShutdown = () => {
+        if (!fetchController.signal.aborted) {
+          fetchController.abort(shutdownSignal?.reason);
+        }
+      };
+      if (shutdownSignal?.aborted) abortForShutdown();
+      else {
+        shutdownSignal?.addEventListener("abort", abortForShutdown, {
+          once: true,
+        });
+      }
 
       const recordOwnershipLoss = (error: unknown) => {
         ownershipLost = true;
@@ -325,6 +352,7 @@ export function createArchiveImportRunner(
       };
 
       try {
+        if (shutdownRequested()) return retryAfterShutdown();
         let imported: Awaited<
           ReturnType<HistoricalArchiveImporter["importFixture"]>
         >;
@@ -341,18 +369,22 @@ export function createArchiveImportRunner(
             now: () => now.toISOString(),
             signal: fetchController.signal,
           });
+          if (shutdownRequested()) return retryAfterShutdown();
           if (!(await ownershipIsCurrent())) {
             return retryAfterOwnershipLoss();
           }
+          if (shutdownRequested()) return retryAfterShutdown();
           imported = await importer.importFixture({
             fixture: frozenFixture(job),
             records,
           });
         } catch (error) {
+          if (shutdownRequested()) return retryAfterShutdown();
           if (ownershipLost) return retryAfterOwnershipLoss();
           return settleFailure(job, now, error);
         }
 
+        if (shutdownRequested()) return retryAfterShutdown();
         if (!(await ownershipIsCurrent())) {
           return retryAfterOwnershipLoss();
         }
@@ -378,25 +410,34 @@ export function createArchiveImportRunner(
             "Recorded importer returned replay_ready without a replay-ready manifest",
           );
         }
+        if (shutdownRequested()) return retryAfterShutdown();
         if (!(await ownershipIsCurrent())) {
           return retryAfterOwnershipLoss();
         }
+        if (shutdownRequested()) return retryAfterShutdown();
         try {
           await options.archiveImportJobs.bindVerifiedArchiveOutput({
             ...workerClaim(job, options.workerId),
             archiveManifestHash: manifest.deliveryManifestHash,
             archiveManifestId: manifest.id,
           });
+          if (shutdownRequested()) return retryAfterShutdown();
+          if (!(await ownershipIsCurrent())) {
+            return retryAfterOwnershipLoss();
+          }
+          if (shutdownRequested()) return retryAfterShutdown();
           await options.archiveImportJobs.markReplayReady(
             workerClaim(job, options.workerId),
           );
           return { fixtureId: job.fixtureId, kind: "replay_ready" };
         } catch (error) {
+          if (shutdownRequested()) return retryAfterShutdown();
           return settleFailure(job, now, error);
         }
       } finally {
         stopping = true;
         clearInterval(renewalTimer);
+        shutdownSignal?.removeEventListener("abort", abortForShutdown);
         await renewalInFlight;
         try {
           await options.sourceState.releaseLease({

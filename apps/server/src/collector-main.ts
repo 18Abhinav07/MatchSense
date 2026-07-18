@@ -23,6 +23,15 @@ import {
   createPipelineCommentaryGenerator,
   type CommentaryJobWorker,
 } from "./commentary-job-worker.js";
+import {
+  createArchiveImportPoller,
+  type ArchiveImportPoller,
+} from "./collector/archive-import-poller.js";
+import {
+  createArchiveImportRunner,
+  type ArchiveImportRunner,
+  type ArchiveImportRunnerOptions,
+} from "./collector/archive-import-runner.js";
 import { createArchiveService } from "./collector/archive-service.js";
 import {
   createScheduleSync,
@@ -58,6 +67,7 @@ import { createVapidWebPushSender } from "./web-push-sender.js";
 export type CollectorDatabaseRuntime = Pick<
   ApplicationDatabase,
   | "archive"
+  | "archiveImportJobs"
   | "close"
   | "commentaryJobs"
   | "fans"
@@ -76,6 +86,13 @@ export interface CollectorSourceLifecycle {
 }
 
 export interface StartCollectorOptions {
+  archiveImportPoller?: ArchiveImportPoller;
+  archiveImportPollerFactory?: (
+    runner: ArchiveImportRunner,
+  ) => ArchiveImportPoller;
+  archiveImportRunnerFactory?: (
+    options: ArchiveImportRunnerOptions,
+  ) => ArchiveImportRunner;
   commentaryWorker?: CommentaryJobWorker;
   databaseFactory?: (databaseUrl: string) => CollectorDatabaseRuntime;
   databaseRuntime?: CollectorDatabaseRuntime;
@@ -96,7 +113,9 @@ const STREAM_SOURCE = "txline";
 const STREAM_KEY = "scores:mainnet";
 const LEASE_DURATION_MS = 90_000;
 const LEASE_RENEWAL_MS = 30_000;
+const SCHEDULE_REFRESH_INTERVAL_MS = 60_000;
 const HACKATHON_RIGHTS_GRANT_ID = "txline-world-cup-hackathon-2026";
+const processCollectorWorkerId = `collector:${randomUUID()}`;
 const WORLD_CUP_CATALOG_START_EPOCH_DAY = Math.floor(
   Date.UTC(2026, 5, 11) / 86_400_000,
 );
@@ -242,6 +261,17 @@ function sourceFence(lease: SourceLeaseRecord) {
   };
 }
 
+async function establishCollectorRights(
+  database: Pick<CollectorDatabaseRuntime, "archive">,
+) {
+  await database.archive.ensureRightsGrant({
+    active: true,
+    id: HACKATHON_RIGHTS_GRANT_ID,
+    reference: "TxLINE World Cup Hackathon 2026",
+    scopes: ["audio", "raw_retention", "replay"],
+  });
+}
+
 /**
  * The deployed worker's real TxLINE lifecycle. It acquires the only source
  * lease, writes schedule observations, then keeps raw SSE ownership isolated
@@ -250,24 +280,189 @@ function sourceFence(lease: SourceLeaseRecord) {
  */
 export function createDurableCollectorLifecycle(input: {
   database: CollectorDatabaseRuntime;
+  scheduleRefreshIntervalMs?: number;
   txlineClient: TxlineAuthenticatedClient;
 }): CollectorSourceLifecycle {
   const holderId = `collector:${randomUUID()}`;
-  let abortController: AbortController | null = null;
-  let sourceTask: Promise<void> | null = null;
-  let renewTimer: ReturnType<typeof setInterval> | null = null;
+  const scheduleRefreshIntervalMs =
+    input.scheduleRefreshIntervalMs ?? SCHEDULE_REFRESH_INTERVAL_MS;
+  if (
+    !Number.isSafeInteger(scheduleRefreshIntervalMs) ||
+    scheduleRefreshIntervalMs < 50 ||
+    scheduleRefreshIntervalMs > 300_000
+  ) {
+    throw new Error("Collector schedule refresh interval is invalid");
+  }
+
   let activeLease: SourceLeaseRecord | null = null;
+  let liveConfiguration: string | null = null;
+  let liveController: AbortController | null = null;
+  let refreshTask: Promise<void> | null = null;
+  let renewTimer: ReturnType<typeof setInterval> | null = null;
+  let scheduleRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  let sourceTask: Promise<void> | null = null;
+  let started = false;
+  let stopping = false;
+  let lifecycleGeneration = 0;
+  let renewalTask: Promise<void> | null = null;
+
+  const stopLiveSource = async () => {
+    const controller = liveController;
+    const task = sourceTask;
+    controller?.abort();
+    if (task) await task.catch(() => undefined);
+    if (sourceTask === task) {
+      sourceTask = null;
+      liveController = null;
+      liveConfiguration = null;
+    }
+  };
+
+  const configurationFor = (fixtures: readonly TxlineScheduleFixture[]) =>
+    fixtures
+      .map((fixture) =>
+        [
+          fixture.fixtureId,
+          fixture.participant1.id,
+          fixture.participant2.id,
+          fixture.participant1IsHome ? "home" : "away",
+          fixture.startTimeMs,
+        ].join(":"),
+      )
+      .join("|");
+
+  const startLiveSource = (
+    schedule: readonly TxlineScheduleFixture[],
+    fence: ReturnType<typeof sourceFence>,
+    configuration: string,
+  ) => {
+    const fixtures = new Map(
+      schedule.map((fixture) => [
+        fixture.fixtureId,
+        durableFixtureFromSchedule(fixture),
+      ]),
+    );
+    const collector = createTxlineCollector({
+      archive: createArchiveService({ archive: input.database.archive }),
+      fixtureForId: (fixtureId) => fixtures.get(fixtureId) ?? null,
+      fixtureTruth: input.database.fixtureTruth,
+      rightsGrantId: HACKATHON_RIGHTS_GRANT_ID,
+      sourceFence: fence,
+    });
+    const source = createTxlineRawScoreSource({
+      client: input.txlineClient,
+      fixtureIds: schedule.map(({ fixtureId }) => fixtureId),
+      loadCursor: async () =>
+        (
+          await input.database.sourceState.getCursor({
+            mode: "live",
+            source: STREAM_SOURCE,
+            streamKey: STREAM_KEY,
+          })
+        )?.cursorValue ?? null,
+      onLiveFrame: (frame) => collector.ingestLiveFrame(frame),
+      onRawRecord: async (record) => {
+        await collector.ingest(record);
+      },
+      onWarning: (warning) => {
+        process.stderr.write(
+          `TxLINE collector ${warning.code}: ${warning.message}\n`,
+        );
+      },
+    });
+    const controller = new AbortController();
+    const task = source.run(controller.signal);
+    liveConfiguration = configuration;
+    liveController = controller;
+    sourceTask = task;
+    void task.then(
+      () => {
+        if (sourceTask !== task) return;
+        sourceTask = null;
+        liveController = null;
+        liveConfiguration = null;
+      },
+      (error: unknown) => {
+        process.stderr.write(
+          `TxLINE collector stopped: ${
+            error instanceof Error ? error.message : String(error)
+          }\n`,
+        );
+        if (sourceTask !== task) return;
+        sourceTask = null;
+        liveController = null;
+        liveConfiguration = null;
+      },
+    );
+  };
+
+  const refreshSchedule = async () => {
+    if (refreshTask) return refreshTask;
+    const task = (async () => {
+      const schedule = await fetchTournamentSchedule(input.txlineClient);
+      const lease = activeLease;
+      if (stopping || !lease) return;
+      if (schedule.catalogue && schedule.catalogue.length > 0) {
+        await input.database.teamCatalog.upsert(
+          durableTeamCatalogFromSchedule([
+            ...schedule.catalogue,
+            ...schedule.current,
+          ]),
+        );
+      } else if ((await input.database.teamCatalog.list()).length === 0) {
+        throw new Error(
+          "TxLINE tournament roster is unavailable and durable roster is empty",
+        );
+      } else {
+        process.stderr.write(
+          "TxLINE tournament roster refresh unavailable; using durable roster\n",
+        );
+      }
+      if (stopping || !activeLease) return;
+      if (schedule.current.length === 0) {
+        await stopLiveSource();
+        return;
+      }
+      const fence = sourceFence(activeLease);
+      await createScheduleSync({
+        repository: input.database.fixtureTruth,
+        rightsGrantId: HACKATHON_RIGHTS_GRANT_ID,
+        sourceFence: fence,
+      }).sync(schedule.current);
+      if (stopping || !activeLease) return;
+      const configuration = configurationFor(schedule.current);
+      if (sourceTask && liveConfiguration === configuration) return;
+      await stopLiveSource();
+      if (stopping || !activeLease) return;
+      startLiveSource(
+        schedule.current,
+        sourceFence(activeLease),
+        configuration,
+      );
+    })();
+    refreshTask = task;
+    try {
+      await task;
+    } finally {
+      if (refreshTask === task) refreshTask = null;
+    }
+  };
 
   const stop = async () => {
+    stopping = true;
+    started = false;
+    lifecycleGeneration += 1;
+    renewalTask = null;
+    if (scheduleRefreshTimer) {
+      clearInterval(scheduleRefreshTimer);
+      scheduleRefreshTimer = null;
+    }
     if (renewTimer) {
       clearInterval(renewTimer);
       renewTimer = null;
     }
-    abortController?.abort();
-    const task = sourceTask;
-    sourceTask = null;
-    abortController = null;
-    if (task) await task.catch(() => undefined);
+    await refreshTask?.catch(() => undefined);
+    await stopLiveSource();
     const lease = activeLease;
     activeLease = null;
     if (lease) {
@@ -281,116 +476,103 @@ export function createDurableCollectorLifecycle(input: {
     }
   };
 
+  const stopAfterFenceLoss = () => {
+    void stop().catch((error: unknown) => {
+      process.stderr.write(
+        `TxLINE collector fence shutdown failed: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`,
+      );
+    });
+  };
+
+  const renewActiveLease = () => {
+    const current = activeLease;
+    if (stopping || !current || renewalTask) return;
+    const generation = lifecycleGeneration;
+    const task = (async () => {
+      try {
+        const renewed = await input.database.sourceState.renewLease({
+          fencingToken: current.fencingToken,
+          holderId: current.holderId,
+          leaseUntil: leaseUntil(),
+          mode: current.mode,
+          source: current.source,
+          streamKey: current.streamKey,
+        });
+        if (
+          stopping ||
+          generation !== lifecycleGeneration ||
+          activeLease !== current
+        ) {
+          return;
+        }
+        if (!renewed) stopAfterFenceLoss();
+        else activeLease = renewed;
+      } catch {
+        if (
+          stopping ||
+          generation !== lifecycleGeneration ||
+          activeLease !== current
+        ) {
+          return;
+        }
+        stopAfterFenceLoss();
+      }
+    })();
+    renewalTask = task;
+    void task.finally(() => {
+      if (renewalTask === task) renewalTask = null;
+    });
+  };
+
   return {
     async start() {
-      if (abortController) return;
-      const lease = await input.database.sourceState.acquireLease({
-        holderId,
-        leaseUntil: leaseUntil(),
-        mode: "live",
-        source: STREAM_SOURCE,
-        streamKey: STREAM_KEY,
-      });
+      if (started) return;
+      started = true;
+      stopping = false;
+      const generation = ++lifecycleGeneration;
+      let lease: SourceLeaseRecord | null;
+      try {
+        lease = await input.database.sourceState.acquireLease({
+          holderId,
+          leaseUntil: leaseUntil(),
+          mode: "live",
+          source: STREAM_SOURCE,
+          streamKey: STREAM_KEY,
+        });
+      } catch (error) {
+        if (generation === lifecycleGeneration) started = false;
+        throw error;
+      }
       if (!lease) {
+        if (generation === lifecycleGeneration) started = false;
         throw new Error("Collector source lease is held by another worker");
       }
+      if (stopping || generation !== lifecycleGeneration) {
+        await input.database.sourceState.releaseLease({
+          fencingToken: lease.fencingToken,
+          holderId: lease.holderId,
+          mode: lease.mode,
+          source: lease.source,
+          streamKey: lease.streamKey,
+        });
+        return;
+      }
       activeLease = lease;
-      const fence = sourceFence(lease);
+      renewTimer = setInterval(renewActiveLease, LEASE_RENEWAL_MS);
       try {
-        await input.database.archive.upsertRightsGrant({
-          active: true,
-          id: HACKATHON_RIGHTS_GRANT_ID,
-          reference: "TxLINE World Cup Hackathon 2026",
-          scopes: ["audio", "raw_retention", "replay"],
-        });
-        const schedule = await fetchTournamentSchedule(input.txlineClient);
-        if (schedule.catalogue && schedule.catalogue.length > 0) {
-          await input.database.teamCatalog.upsert(
-            durableTeamCatalogFromSchedule([
-              ...schedule.catalogue,
-              ...schedule.current,
-            ]),
-          );
-        } else if ((await input.database.teamCatalog.list()).length === 0) {
-          throw new Error(
-            "TxLINE tournament roster is unavailable and durable roster is empty",
-          );
-        } else {
-          process.stderr.write(
-            "TxLINE tournament roster refresh unavailable; using durable roster\n",
-          );
-        }
-        if (schedule.current.length === 0) {
-          throw new Error(
-            "TxLINE returned no current World Cup fixtures for live collection",
-          );
-        }
-        await createScheduleSync({
-          repository: input.database.fixtureTruth,
-          rightsGrantId: HACKATHON_RIGHTS_GRANT_ID,
-          sourceFence: fence,
-        }).sync(schedule.current);
-        const fixtures = new Map(
-          schedule.current.map((fixture) => [
-            fixture.fixtureId,
-            durableFixtureFromSchedule(fixture),
-          ]),
-        );
-        const collector = createTxlineCollector({
-          archive: createArchiveService({ archive: input.database.archive }),
-          fixtureForId: (fixtureId) => fixtures.get(fixtureId) ?? null,
-          fixtureTruth: input.database.fixtureTruth,
-          rightsGrantId: HACKATHON_RIGHTS_GRANT_ID,
-          sourceFence: fence,
-        });
-        const source = createTxlineRawScoreSource({
-          client: input.txlineClient,
-          fixtureIds: schedule.current.map(({ fixtureId }) => fixtureId),
-          loadCursor: async () =>
-            (
-              await input.database.sourceState.getCursor({
-                mode: "live",
-                source: STREAM_SOURCE,
-                streamKey: STREAM_KEY,
-              })
-            )?.cursorValue ?? null,
-          onLiveFrame: (frame) => collector.ingestLiveFrame(frame),
-          onRawRecord: async (record) => {
-            await collector.ingest(record);
-          },
-          onWarning: (warning) => {
+        await refreshSchedule();
+        if (stopping) return;
+        scheduleRefreshTimer = setInterval(() => {
+          void refreshSchedule().catch((error: unknown) => {
             process.stderr.write(
-              `TxLINE collector ${warning.code}: ${warning.message}\n`,
+              `TxLINE schedule refresh failed: ${
+                error instanceof Error ? error.message : String(error)
+              }\n`,
             );
-          },
-        });
-        abortController = new AbortController();
-        sourceTask = source.run(abortController.signal);
-        void sourceTask.catch((error: unknown) => {
-          process.stderr.write(
-            `TxLINE collector stopped: ${
-              error instanceof Error ? error.message : String(error)
-            }\n`,
-          );
-        });
-        renewTimer = setInterval(() => {
-          const current = activeLease;
-          if (!current) return;
-          void input.database.sourceState
-            .renewLease({
-              fencingToken: current.fencingToken,
-              holderId: current.holderId,
-              leaseUntil: leaseUntil(),
-              mode: current.mode,
-              source: current.source,
-              streamKey: current.streamKey,
-            })
-            .then((renewed) => {
-              if (!renewed) abortController?.abort();
-              else activeLease = renewed;
-            })
-            .catch(() => abortController?.abort());
-        }, LEASE_RENEWAL_MS);
+          });
+        }, scheduleRefreshIntervalMs);
       } catch (error) {
         await stop();
         throw error;
@@ -430,13 +612,16 @@ export async function startCollector(
   let unregisterSignals: () => void = () => undefined;
   let outboxWorker: OutboxWorker | null = null;
   let commentaryWorker: CommentaryJobWorker | null = null;
+  let archiveImportPoller: ArchiveImportPoller | null = null;
   let sourceLifecycle: CollectorSourceLifecycle | null = null;
+  let archiveImportPollerStarted = false;
   let sourceStarted = false;
 
   const close = async () => {
     if (closed) return;
     closed = true;
     unregisterSignals();
+    if (archiveImportPollerStarted) await archiveImportPoller?.stop();
     if (sourceStarted) await sourceLifecycle?.stop();
     await outboxWorker?.stop();
     await commentaryWorker?.stop();
@@ -445,9 +630,37 @@ export async function startCollector(
 
   try {
     await databaseRuntime.migrate();
+    await establishCollectorRights(databaseRuntime);
     const txlineClient = (
       options.txlineClientFactory ?? createTxlineAuthenticatedClient
     )({ apiToken: txlineApiToken });
+    const archiveImportRunner = (
+      options.archiveImportRunnerFactory ?? createArchiveImportRunner
+    )({
+      archive: createArchiveService({ archive: databaseRuntime.archive }),
+      archiveImportJobs: databaseRuntime.archiveImportJobs,
+      client: txlineClient,
+      fixtureTruth: databaseRuntime.fixtureTruth,
+      rightsGrantId: HACKATHON_RIGHTS_GRANT_ID,
+      sourceState: databaseRuntime.sourceState,
+      workerId: processCollectorWorkerId,
+    });
+    archiveImportPoller =
+      options.archiveImportPoller ??
+      (
+        options.archiveImportPollerFactory ??
+        ((runner) =>
+          createArchiveImportPoller({
+            onError: (error) => {
+              process.stderr.write(
+                `Archive import poll failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }\n`,
+              );
+            },
+            runner,
+          }))
+      )(archiveImportRunner);
     sourceLifecycle =
       options.sourceLifecycle ??
       (options.sourceLifecycleFactory ?? createDurableCollectorLifecycle)({
@@ -510,6 +723,8 @@ export async function startCollector(
       )(databaseRuntime.outbox);
     await sourceLifecycle.start();
     sourceStarted = true;
+    archiveImportPoller.start();
+    archiveImportPollerStarted = true;
     commentaryWorker?.start();
     outboxWorker.start();
     unregisterSignals = registerShutdownSignals(

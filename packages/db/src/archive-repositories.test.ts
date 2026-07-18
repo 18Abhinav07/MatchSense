@@ -16,6 +16,7 @@ interface TestClient {
 }
 
 type ArchiveRepository = {
+  ensureRightsGrant?(input: Record<string, unknown>): Promise<unknown>;
   insertDelivery(input: Record<string, unknown>): Promise<unknown>;
   invalidateArchive(input: Record<string, unknown>): Promise<void>;
   orderedDeliveries(
@@ -156,6 +157,49 @@ function testClient(
 }
 
 describe("archive repository", () => {
+  it("preserves an existing revoked rights grant when bootstrap rights are ensured", async () => {
+    const existing = {
+      active: false,
+      created_at: "2026-07-17T12:00:00.000Z",
+      expires_at: "2026-08-01T12:00:00.000Z",
+      id: "txline-world-cup-hackathon-2026",
+      raw_retention_until: "2026-07-25T12:00:00.000Z",
+      reference: "manually revoked TxLINE grant",
+      revoked_at: "2026-07-18T11:00:00.000Z",
+      scopes: ["replay"],
+      updated_at: "2026-07-18T11:00:00.000Z",
+    };
+    const fake = testClient((query) => {
+      if (query.includes("INSERT INTO matchsense.rights_grants")) return [];
+      if (query.includes("FROM matchsense.rights_grants")) return [existing];
+      return [];
+    });
+    const archive = db.createArchiveRepository?.(fake.client);
+
+    const ensured = await archive?.ensureRightsGrant?.({
+      active: true,
+      id: "txline-world-cup-hackathon-2026",
+      reference: "TxLINE World Cup Hackathon 2026",
+      scopes: ["audio", "raw_retention", "replay"],
+    });
+
+    expect(ensured).toEqual({
+      active: false,
+      createdAt: existing.created_at,
+      expiresAt: existing.expires_at,
+      id: existing.id,
+      rawRetentionUntil: existing.raw_retention_until,
+      reference: existing.reference,
+      revokedAt: existing.revoked_at,
+      scopes: ["replay"],
+      updatedAt: existing.updated_at,
+    });
+    expect(fake.queries).toHaveLength(2);
+    expect(fake.queries[0]?.query).toContain("ON CONFLICT (id) DO NOTHING");
+    expect(fake.queries[0]?.query).not.toContain("DO UPDATE");
+    expect(fake.queries[1]?.query).toContain("FROM matchsense.rights_grants");
+  });
+
   it("retains one immutable source-only delivery and keeps its duplicate inert", async () => {
     let insertCount = 0;
     const fake = testClient((query) => {

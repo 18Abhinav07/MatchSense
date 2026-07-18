@@ -117,6 +117,7 @@ export type ArchiveVerificationResult =
   { kind: "fenced" } | { kind: "verified"; manifest: ArchiveManifest };
 
 export interface ArchiveRepository {
+  ensureRightsGrant(input: RightsGrantWrite): Promise<RightsGrant>;
   insertDelivery(input: DurableSourceDelivery): Promise<InsertDeliveryResult>;
   invalidateArchive(
     input: ArchiveInvalidationInput,
@@ -327,6 +328,17 @@ function parseRightsGrant(row: QueryRow): RightsGrant {
   };
 }
 
+function assertRightsGrantWrite(input: RightsGrantWrite) {
+  assertNonempty(input.id, "Rights grant id");
+  assertNonempty(input.reference, "Rights grant reference");
+  if (
+    input.scopes.length === 0 ||
+    input.scopes.some((scope) => scope.trim().length === 0)
+  ) {
+    throw new Error("Rights grant scopes are required");
+  }
+}
+
 function assertDelivery(input: DurableSourceDelivery) {
   assertSha256(input.deliveryKey, "Delivery key");
   assertSha256(input.payloadHash, "Raw payload hash");
@@ -394,15 +406,43 @@ export function createArchiveRepository(
   client: RepositoryClient,
 ): ArchiveRepository {
   return {
+    ensureRightsGrant: async (input) => {
+      assertRightsGrantWrite(input);
+      const parameters = [
+        input.id,
+        input.reference,
+        input.scopes,
+        input.active,
+        input.rawRetentionUntil ?? null,
+        input.expiresAt ?? null,
+        input.revokedAt ?? null,
+      ];
+      const inserted = await client.unsafe(
+        `INSERT INTO matchsense.rights_grants (
+  id, reference, scopes, active, raw_retention_until, expires_at, revoked_at
+)
+VALUES ($1, $2, $3::text[], $4, $5::timestamptz, $6::timestamptz, $7::timestamptz)
+ON CONFLICT (id) DO NOTHING
+RETURNING id, reference, scopes, active, raw_retention_until, expires_at,
+  revoked_at, created_at, updated_at;`,
+        parameters,
+      );
+      const row =
+        inserted[0] ??
+        (
+          await client.unsafe(
+            `SELECT id, reference, scopes, active, raw_retention_until, expires_at,
+  revoked_at, created_at, updated_at
+FROM matchsense.rights_grants
+WHERE id = $1;`,
+            [input.id],
+          )
+        )[0];
+      if (!row) throw new Error("Rights grant ensure returned no row");
+      return parseRightsGrant(row);
+    },
     upsertRightsGrant: async (input) => {
-      assertNonempty(input.id, "Rights grant id");
-      assertNonempty(input.reference, "Rights grant reference");
-      if (
-        input.scopes.length === 0 ||
-        input.scopes.some((scope) => scope.trim().length === 0)
-      ) {
-        throw new Error("Rights grant scopes are required");
-      }
+      assertRightsGrantWrite(input);
       const rows = await client.unsafe(
         `INSERT INTO matchsense.rights_grants (
   id, reference, scopes, active, raw_retention_until, expires_at, revoked_at

@@ -37,6 +37,42 @@ function fixture(input: {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+async function flushMicrotasks(count = 8) {
+  for (let index = 0; index < count; index += 1) {
+    await Promise.resolve();
+  }
+}
+
+function liveLease(fencingToken = 1) {
+  return {
+    fencingToken,
+    holderId: "collector-test",
+    leaseUntil: "2026-07-18T12:01:30.000Z",
+    mode: "live" as const,
+    source: "txline",
+    streamKey: "scores:mainnet",
+  };
+}
+
+function abortableSource() {
+  return {
+    run: vi.fn(
+      (signal: AbortSignal) =>
+        new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        }),
+    ),
+  };
+}
+
 afterEach(() => {
   vi.clearAllMocks();
   vi.useRealTimers();
@@ -331,6 +367,303 @@ describe("durable collector tournament schedule", () => {
       );
       expect(rawSourceOptions?.fixtureIds).toHaveLength(2);
     } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("boots idle without an empty live SSE source, then starts one source after a schedule refresh", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-18T12:00:00.000Z"));
+    const current = fixture({
+      fixtureId: "fixture-appears-after-idle",
+      sourceTimestampMs: 5,
+    });
+    let currentScheduleReads = 0;
+    adapter.fetchSchedule.mockImplementation(
+      async (_client, options?: { startEpochDay?: number }) => {
+        if (options?.startEpochDay === tournamentStartEpochDay) {
+          return [current];
+        }
+        currentScheduleReads += 1;
+        return currentScheduleReads === 1 ? [] : [current];
+      },
+    );
+    const source: { run(signal: AbortSignal): Promise<void> } = {
+      run: vi.fn(
+        (signal: AbortSignal) =>
+          new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          }),
+      ),
+    };
+    adapter.createRawScoreSource.mockReturnValue(source);
+    const database = {
+      archive: { upsertRightsGrant: vi.fn(async () => undefined) },
+      fixtureTruth: {
+        observeFixtureSchedule: vi.fn(async () => ({
+          fixture: {} as never,
+          kind: "committed" as const,
+          metadataUpdated: true,
+        })),
+      },
+      sourceState: {
+        acquireLease: vi.fn(async () => ({
+          fencingToken: 1,
+          holderId: "collector-test",
+          leaseUntil: "2026-07-18T12:01:30.000Z",
+          mode: "live",
+          source: "txline",
+          streamKey: "scores:mainnet",
+        })),
+        getCursor: vi.fn(async () => null),
+        releaseLease: vi.fn(async () => undefined),
+        renewLease: vi.fn(async () => null),
+      },
+      teamCatalog: {
+        upsert: vi.fn(async () => undefined),
+      },
+    };
+    const lifecycle = createDurableCollectorLifecycle({
+      database: database as never,
+      scheduleRefreshIntervalMs: 100,
+      txlineClient: {} as never,
+    });
+
+    try {
+      await lifecycle.start();
+
+      expect(adapter.createRawScoreSource).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(adapter.createRawScoreSource).toHaveBeenCalledTimes(1);
+      expect(source.run).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(300);
+      expect(adapter.createRawScoreSource).toHaveBeenCalledTimes(1);
+      expect(source.run).toHaveBeenCalledOnce();
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("does not overlap live lease renewals while a prior renewal is in flight", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-18T12:00:00.000Z"));
+    const current = fixture({
+      fixtureId: "fixture-renew-single-flight",
+      sourceTimestampMs: 6,
+    });
+    const renewal = deferred<ReturnType<typeof liveLease> | null>();
+    const source = abortableSource();
+    const renewLease = vi.fn(async () => renewal.promise);
+    const releaseLease = vi.fn(async () => undefined);
+    adapter.fetchSchedule.mockResolvedValue([current]);
+    adapter.createRawScoreSource.mockReturnValue(source);
+    const database = {
+      archive: {},
+      fixtureTruth: {
+        observeFixtureSchedule: vi.fn(async () => ({
+          fixture: {} as never,
+          kind: "committed" as const,
+          metadataUpdated: true,
+        })),
+      },
+      sourceState: {
+        acquireLease: vi.fn(async () => liveLease()),
+        releaseLease,
+        renewLease,
+      },
+      teamCatalog: { upsert: vi.fn(async () => undefined) },
+    };
+    const lifecycle = createDurableCollectorLifecycle({
+      database: database as never,
+      txlineClient: {} as never,
+    });
+
+    try {
+      await lifecycle.start();
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(renewLease).toHaveBeenCalledOnce();
+      expect(releaseLease).not.toHaveBeenCalled();
+
+      renewal.resolve(liveLease());
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(renewLease).toHaveBeenCalledTimes(2);
+    } finally {
+      renewal.resolve(liveLease());
+      await lifecycle.stop();
+    }
+  });
+
+  it("ignores a stopped lifecycle's late renewal result after a restart", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-18T12:00:00.000Z"));
+    const current = fixture({
+      fixtureId: "fixture-renew-stale-completion",
+      sourceTimestampMs: 7,
+    });
+    const staleRenewal = deferred<ReturnType<typeof liveLease> | null>();
+    const firstLease = liveLease(1);
+    const secondLease = liveLease(2);
+    const source = abortableSource();
+    const releaseLease = vi.fn(async () => undefined);
+    adapter.fetchSchedule.mockResolvedValue([current]);
+    adapter.createRawScoreSource.mockReturnValue(source);
+    const database = {
+      archive: {},
+      fixtureTruth: {
+        observeFixtureSchedule: vi.fn(async () => ({
+          fixture: {} as never,
+          kind: "committed" as const,
+          metadataUpdated: true,
+        })),
+      },
+      sourceState: {
+        acquireLease: vi
+          .fn()
+          .mockResolvedValueOnce(firstLease)
+          .mockResolvedValueOnce(secondLease),
+        releaseLease,
+        renewLease: vi.fn(async () => staleRenewal.promise),
+      },
+      teamCatalog: { upsert: vi.fn(async () => undefined) },
+    };
+    const lifecycle = createDurableCollectorLifecycle({
+      database: database as never,
+      txlineClient: {} as never,
+    });
+
+    try {
+      await lifecycle.start();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await lifecycle.stop();
+      await lifecycle.start();
+
+      staleRenewal.resolve(null);
+      await flushMicrotasks();
+
+      expect(releaseLease).toHaveBeenCalledOnce();
+      expect(source.run).toHaveBeenCalledTimes(2);
+    } finally {
+      staleRenewal.resolve(null);
+      await lifecycle.stop();
+    }
+  });
+
+  it("retries startup after initial live lease acquisition rejects", async () => {
+    const current = fixture({
+      fixtureId: "fixture-start-retry",
+      sourceTimestampMs: 8,
+    });
+    const source = abortableSource();
+    const acquireLease = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("live lease database unavailable"))
+      .mockResolvedValueOnce(liveLease());
+    adapter.fetchSchedule.mockResolvedValue([current]);
+    adapter.createRawScoreSource.mockReturnValue(source);
+    const database = {
+      archive: {},
+      fixtureTruth: {
+        observeFixtureSchedule: vi.fn(async () => ({
+          fixture: {} as never,
+          kind: "committed" as const,
+          metadataUpdated: true,
+        })),
+      },
+      sourceState: {
+        acquireLease,
+        releaseLease: vi.fn(async () => undefined),
+        renewLease: vi.fn(async () => liveLease()),
+      },
+      teamCatalog: { upsert: vi.fn(async () => undefined) },
+    };
+    const lifecycle = createDurableCollectorLifecycle({
+      database: database as never,
+      txlineClient: {} as never,
+    });
+
+    try {
+      await expect(lifecycle.start()).rejects.toThrow(
+        "live lease database unavailable",
+      );
+      await expect(lifecycle.start()).resolves.toBeUndefined();
+
+      expect(acquireLease).toHaveBeenCalledTimes(2);
+      expect(source.run).toHaveBeenCalledOnce();
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("releases a lease acquired after stop before a later start", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-18T12:00:00.000Z"));
+    const current = fixture({
+      fixtureId: "fixture-stop-during-acquire",
+      sourceTimestampMs: 9,
+    });
+    const firstLease = liveLease(1);
+    const secondLease = liveLease(2);
+    const pendingLease = deferred<ReturnType<typeof liveLease> | null>();
+    const source = abortableSource();
+    const acquireLease = vi
+      .fn()
+      .mockImplementationOnce(async () => pendingLease.promise)
+      .mockResolvedValueOnce(secondLease);
+    const releaseLease = vi.fn(async () => undefined);
+    const renewLease = vi.fn(async () => liveLease());
+    adapter.fetchSchedule.mockResolvedValue([current]);
+    adapter.createRawScoreSource.mockReturnValue(source);
+    const database = {
+      archive: {},
+      fixtureTruth: {
+        observeFixtureSchedule: vi.fn(async () => ({
+          fixture: {} as never,
+          kind: "committed" as const,
+          metadataUpdated: true,
+        })),
+      },
+      sourceState: {
+        acquireLease,
+        releaseLease,
+        renewLease,
+      },
+      teamCatalog: { upsert: vi.fn(async () => undefined) },
+    };
+    const lifecycle = createDurableCollectorLifecycle({
+      database: database as never,
+      txlineClient: {} as never,
+    });
+
+    try {
+      const firstStart = lifecycle.start();
+      await flushMicrotasks();
+      await lifecycle.stop();
+      pendingLease.resolve(firstLease);
+      await expect(firstStart).resolves.toBeUndefined();
+
+      expect(releaseLease).toHaveBeenCalledOnce();
+      expect(releaseLease).toHaveBeenCalledWith({
+        fencingToken: firstLease.fencingToken,
+        holderId: firstLease.holderId,
+        mode: firstLease.mode,
+        source: firstLease.source,
+        streamKey: firstLease.streamKey,
+      });
+      expect(adapter.fetchSchedule).not.toHaveBeenCalled();
+      expect(adapter.createRawScoreSource).not.toHaveBeenCalled();
+      expect(renewLease).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+
+      await expect(lifecycle.start()).resolves.toBeUndefined();
+      expect(acquireLease).toHaveBeenCalledTimes(2);
+      expect(adapter.createRawScoreSource).toHaveBeenCalledOnce();
+      expect(source.run).toHaveBeenCalledOnce();
+    } finally {
+      pendingLease.resolve(firstLease);
       await lifecycle.stop();
     }
   });

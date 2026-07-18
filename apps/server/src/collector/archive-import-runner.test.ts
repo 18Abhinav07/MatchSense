@@ -2,6 +2,7 @@ import type {
   ArchiveImportJob,
   ArchiveImportJobRepository,
   ArchiveImportVerifiedOutput,
+  BindVerifiedArchiveOutput,
   SourceLeaseRecord,
   SourceStateRepository,
 } from "@matchsense/db";
@@ -140,9 +141,33 @@ function deferred<T>() {
   return { promise, reject, resolve };
 }
 
+function observedAbortSignal(
+  controller: AbortController,
+  onAbortedRead: () => void,
+): AbortSignal {
+  return {
+    addEventListener: controller.signal.addEventListener.bind(
+      controller.signal,
+    ),
+    get aborted() {
+      onAbortedRead();
+      return controller.signal.aborted;
+    },
+    removeEventListener: controller.signal.removeEventListener.bind(
+      controller.signal,
+    ),
+    get reason() {
+      return controller.signal.reason;
+    },
+  } as AbortSignal;
+}
+
 function harness(
   input: {
     bindError?: Error;
+    bindImpl?: (
+      input: BindVerifiedArchiveOutput,
+    ) => Promise<ArchiveImportVerifiedOutput>;
     claim?: ArchiveImportJob | null;
     fetchError?: Error;
     fetchImpl?: (
@@ -163,10 +188,19 @@ function harness(
       | { archive: ArchiveRebuildResult; kind: "replay_ready" }
       | { archive: ArchiveRebuildResult; kind: "terminal_pending" };
     leaseError?: Error;
+    leaseImpl?: (
+      input: Parameters<SourceStateRepository["acquireLease"]>[0],
+    ) => Promise<SourceLeaseRecord | null>;
     lease?: SourceLeaseRecord | null;
     renewClaimError?: Error;
+    renewClaimImpl?: (
+      input: Parameters<ArchiveImportJobRepository["renewClaim"]>[0],
+    ) => Promise<ArchiveImportJob | null>;
     renewClaimResult?: ArchiveImportJob | null;
     renewLeaseError?: Error;
+    renewLeaseImpl?: (
+      input: Parameters<SourceStateRepository["renewLease"]>[0],
+    ) => Promise<SourceLeaseRecord | null>;
     renewLeaseResult?: SourceLeaseRecord | null;
     readyError?: Error;
     recoveryError?: Error;
@@ -205,6 +239,7 @@ function harness(
         workerId,
       });
       if (input.bindError) throw input.bindError;
+      if (input.bindImpl) return input.bindImpl(value);
       return verifiedOutput();
     }),
     claim: vi.fn(async () => {
@@ -258,6 +293,7 @@ function harness(
         workerId,
       });
       if (input.renewClaimError) throw input.renewClaimError;
+      if (input.renewClaimImpl) return input.renewClaimImpl(value);
       return input.renewClaimResult === undefined
         ? claimed
         : input.renewClaimResult;
@@ -283,6 +319,7 @@ function harness(
         streamKey: "archive-imports",
       });
       if (input.leaseError) throw input.leaseError;
+      if (input.leaseImpl) return input.leaseImpl(value);
       return input.lease === undefined ? sourceLease : input.lease;
     }),
     releaseLease: vi.fn(async (value) => {
@@ -307,6 +344,7 @@ function harness(
         streamKey: "archive-imports",
       });
       if (input.renewLeaseError) throw input.renewLeaseError;
+      if (input.renewLeaseImpl) return input.renewLeaseImpl(value);
       return input.renewLeaseResult === undefined
         ? sourceLease
         : input.renewLeaseResult;
@@ -623,6 +661,44 @@ describe("archive import runner", () => {
     ]);
   });
 
+  it("releases an acquired recorded lease when shutdown arrives during acquisition", async () => {
+    const acquireStarted = deferred<void>();
+    const acquiredLease = deferred<SourceLeaseRecord | null>();
+    const test = harness({
+      leaseImpl: async () => {
+        acquireStarted.resolve();
+        return acquiredLease.promise;
+      },
+    });
+    const shutdown = new AbortController();
+    const run = test.runner.runOnce(now, shutdown.signal);
+
+    try {
+      await acquireStarted.promise;
+      shutdown.abort(new Error("worker shutdown"));
+      acquiredLease.resolve(sourceLease);
+
+      await expect(run).resolves.toEqual({
+        fixtureId,
+        kind: "retry_wait",
+      });
+      expect(test.calls).toEqual(["claim", "lease", "retry", "release"]);
+      expect(test.sourceState.releaseLease).toHaveBeenCalledTimes(1);
+      expect(test.retryInputs).toEqual([
+        {
+          availableAt: "2026-07-18T12:00:30.000Z",
+          claimGeneration: 3,
+          error: "archive import worker is shutting down",
+          fixtureId,
+          workerId,
+        },
+      ]);
+    } finally {
+      acquiredLease.resolve(sourceLease);
+      await run.catch(() => undefined);
+    }
+  });
+
   it("rejects an impossible replay-ready result without binding or publishing it", async () => {
     const test = harness({
       importerResult: {
@@ -845,6 +921,235 @@ describe("archive import runner", () => {
         archive: replayReadyArchive,
         kind: "replay_ready",
       });
+      await run.catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborts a historical fetch on worker shutdown without binding or publishing its claim", async () => {
+    const fetchStarted = deferred<void>();
+    const fallback = deferred<TxlineRawRecord[]>();
+    let fetchSignal: AbortSignal | undefined;
+    const test = harness({
+      fetchImpl: async ({ signal }) => {
+        fetchSignal = signal;
+        fetchStarted.resolve();
+        return new Promise<TxlineRawRecord[]>((resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+          fallback.promise.then(resolve, reject);
+        });
+      },
+    });
+    const shutdown = new AbortController();
+    const run = test.runner.runOnce(now, shutdown.signal);
+
+    try {
+      await fetchStarted.promise;
+      shutdown.abort(new Error("worker shutdown"));
+
+      expect(fetchSignal?.aborted).toBe(true);
+      await expect(run).resolves.toEqual({
+        fixtureId,
+        kind: "retry_wait",
+      });
+      expect(test.calls).not.toContain("import");
+      expect(test.calls).not.toContain("bind");
+      expect(test.calls).not.toContain("ready");
+      expect(test.retryInputs).toEqual([
+        {
+          availableAt: "2026-07-18T12:00:30.000Z",
+          claimGeneration: 3,
+          error: "archive import worker is shutting down",
+          fixtureId,
+          workerId,
+        },
+      ]);
+      expect(test.calls.at(-1)).toBe("release");
+    } finally {
+      fallback.resolve([historicalRecord]);
+      await run.catch(() => undefined);
+    }
+  });
+
+  it("retries a claim without publishing ready when shutdown arrives during output binding", async () => {
+    const bindStarted = deferred<void>();
+    const bindResult = deferred<ArchiveImportVerifiedOutput>();
+    const test = harness({
+      bindImpl: async () => {
+        bindStarted.resolve();
+        return bindResult.promise;
+      },
+    });
+    const shutdown = new AbortController();
+    const run = test.runner.runOnce(now, shutdown.signal);
+
+    try {
+      await bindStarted.promise;
+      shutdown.abort(new Error("worker shutdown"));
+      bindResult.resolve(verifiedOutput());
+
+      await expect(run).resolves.toEqual({
+        fixtureId,
+        kind: "retry_wait",
+      });
+      expect(test.calls).toContain("bind");
+      expect(test.calls).not.toContain("ready");
+      expect(test.retryInputs).toEqual([
+        {
+          availableAt: "2026-07-18T12:00:30.000Z",
+          claimGeneration: 3,
+          error: "archive import worker is shutting down",
+          fixtureId,
+          workerId,
+        },
+      ]);
+      expect(test.calls.at(-1)).toBe("release");
+    } finally {
+      bindResult.resolve(verifiedOutput());
+      await run.catch(() => undefined);
+    }
+  });
+
+  it("does not begin importing when shutdown arrives during the post-fetch ownership await", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const fetchStarted = deferred<void>();
+    const fetchResult = deferred<TxlineRawRecord[]>();
+    const renewalStarted = deferred<void>();
+    const renewedClaim = deferred<ArchiveImportJob | null>();
+    const renewedLease = deferred<SourceLeaseRecord | null>();
+    const postFetchShutdownCheck = deferred<void>();
+    const test = harness({
+      fetchImpl: async () => {
+        fetchStarted.resolve();
+        return fetchResult.promise;
+      },
+      renewClaimImpl: async () => renewedClaim.promise,
+      renewLeaseImpl: async () => {
+        renewalStarted.resolve();
+        return renewedLease.promise;
+      },
+    });
+    const shutdown = new AbortController();
+    let observePostFetchShutdownCheck = false;
+    const observedShutdownSignal = observedAbortSignal(shutdown, () => {
+      if (!observePostFetchShutdownCheck) return;
+      vi.advanceTimersByTime(60_000);
+      postFetchShutdownCheck.resolve();
+    });
+    const run = test.runner.runOnce(now, observedShutdownSignal);
+
+    try {
+      await fetchStarted.promise;
+      observePostFetchShutdownCheck = true;
+      fetchResult.resolve([historicalRecord]);
+      await postFetchShutdownCheck.promise;
+      observePostFetchShutdownCheck = false;
+      await renewalStarted.promise;
+      shutdown.abort(new Error("worker shutdown"));
+      renewedLease.resolve(sourceLease);
+      renewedClaim.resolve(job());
+
+      await expect(run).resolves.toEqual({
+        fixtureId,
+        kind: "retry_wait",
+      });
+      expect(test.calls).not.toContain("import");
+      expect(test.calls).not.toContain("bind");
+      expect(test.calls).not.toContain("ready");
+      expect(test.retryInputs).toEqual([
+        {
+          availableAt: "2026-07-18T12:00:30.000Z",
+          claimGeneration: 3,
+          error: "archive import worker is shutting down",
+          fixtureId,
+          workerId,
+        },
+      ]);
+      expect(test.calls.at(-1)).toBe("release");
+    } finally {
+      fetchResult.resolve([historicalRecord]);
+      renewedLease.resolve(sourceLease);
+      renewedClaim.resolve(job());
+      await run.catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not bind or publish when shutdown arrives during the pre-bind ownership await", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const importerStarted = deferred<void>();
+    const importerResult = deferred<{
+      archive: ArchiveRebuildResult;
+      kind: "replay_ready";
+    }>();
+    const renewalStarted = deferred<void>();
+    const renewedClaim = deferred<ArchiveImportJob | null>();
+    const renewedLease = deferred<SourceLeaseRecord | null>();
+    const postImportShutdownCheck = deferred<void>();
+    const test = harness({
+      importerImpl: () => {
+        importerStarted.resolve();
+        return importerResult.promise;
+      },
+      renewClaimImpl: async () => renewedClaim.promise,
+      renewLeaseImpl: async () => {
+        renewalStarted.resolve();
+        return renewedLease.promise;
+      },
+    });
+    const shutdown = new AbortController();
+    let observePostImportShutdownCheck = false;
+    let postImportShutdownChecks = 0;
+    const observedShutdownSignal = observedAbortSignal(shutdown, () => {
+      if (!observePostImportShutdownCheck) return;
+      postImportShutdownChecks += 1;
+      if (postImportShutdownChecks === 2) {
+        vi.advanceTimersByTime(60_000);
+        postImportShutdownCheck.resolve();
+      }
+    });
+    const run = test.runner.runOnce(now, observedShutdownSignal);
+
+    try {
+      await importerStarted.promise;
+      observePostImportShutdownCheck = true;
+      importerResult.resolve({
+        archive: replayReadyArchive,
+        kind: "replay_ready",
+      });
+      await postImportShutdownCheck.promise;
+      await renewalStarted.promise;
+      shutdown.abort(new Error("worker shutdown"));
+      renewedLease.resolve(sourceLease);
+      renewedClaim.resolve(job());
+
+      await expect(run).resolves.toEqual({
+        fixtureId,
+        kind: "retry_wait",
+      });
+      expect(test.calls).not.toContain("bind");
+      expect(test.calls).not.toContain("ready");
+      expect(test.retryInputs).toEqual([
+        {
+          availableAt: "2026-07-18T12:00:30.000Z",
+          claimGeneration: 3,
+          error: "archive import worker is shutting down",
+          fixtureId,
+          workerId,
+        },
+      ]);
+      expect(test.calls.at(-1)).toBe("release");
+    } finally {
+      importerResult.resolve({
+        archive: replayReadyArchive,
+        kind: "replay_ready",
+      });
+      renewedLease.resolve(sourceLease);
+      renewedClaim.resolve(job());
       await run.catch(() => undefined);
       vi.useRealTimers();
     }
