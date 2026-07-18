@@ -7,24 +7,50 @@
   flex: 0 0 auto;
   overflow: hidden;
   aspect-ratio: 3 / 2;
-  border: 1px solid rgb(255 255 255 / 28%);
-  border-radius: 0.38rem;
+  border: 0;
+  border-radius: 0;
   background: var(--ms-flag-primary);
-  box-shadow:
-    0 0.45rem 1rem rgb(0 0 0 / 20%),
-    inset 0 1px 0 rgb(255 255 255 / 24%);
+  box-shadow: none;
   isolation: isolate;
 }
 
+.ms-team-flag::before,
 .ms-team-flag::after {
   position: absolute;
   inset: 0;
-  z-index: 2;
-  background:
-    linear-gradient(115deg, rgb(255 255 255 / 20%), transparent 32%),
-    radial-gradient(circle at 78% 80%, rgb(0 0 0 / 20%), transparent 48%);
   content: "";
   pointer-events: none;
+}
+
+.ms-team-flag::before {
+  z-index: 2;
+  background:
+    linear-gradient(
+      104deg,
+      rgb(255 255 255 / 13%) 0%,
+      transparent 24%,
+      rgb(4 12 8 / 15%) 49%,
+      transparent 69%,
+      rgb(255 255 255 / 10%) 100%
+    ),
+    linear-gradient(
+      180deg,
+      rgb(255 255 255 / 10%),
+      transparent 18% 82%,
+      rgb(0 0 0 / 13%)
+    );
+  mix-blend-mode: soft-light;
+}
+
+.ms-team-flag::after {
+  z-index: 4;
+  opacity: 0.26;
+  background: repeating-linear-gradient(
+    96deg,
+    transparent 0 7px,
+    rgb(5 13 8 / 32%) 8px 9px
+  );
+  mix-blend-mode: multiply;
 }
 
 .ms-team-flag__weave {
@@ -32,7 +58,7 @@
   inset: 0;
   z-index: 3;
   pointer-events: none;
-  opacity: 0.38;
+  opacity: 0.32;
   background-image:
     repeating-linear-gradient(
       0deg,
@@ -59,7 +85,6 @@
 
 .ms-team-flag--hero {
   width: clamp(5.8rem, 20vw, 9.5rem);
-  border-radius: 0.7rem;
 }
 
 .ms-team-flag img,

@@ -1,5 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { TodayHub } from "./TodayHub.js";
@@ -20,6 +21,20 @@ const teams = {
 };
 
 describe("TodayHub", () => {
+  it("uses one chronological editorial rail instead of a rounded card grid", () => {
+    const stylesheet = readFileSync(
+      new URL("./today.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(stylesheet).toMatch(
+      /\.ms-today-fixture-list\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0,\s*1fr\);/u,
+    );
+    expect(stylesheet).toMatch(
+      /\.ms-fixture-card\s*\{[\s\S]*?border-radius:\s*0;[\s\S]*?background:\s*transparent;/u,
+    );
+  });
+
   it("renders only server-qualified live, upcoming, and verified-final buckets", () => {
     const markup = renderToStaticMarkup(
       createElement(TodayHub, {
@@ -125,5 +140,54 @@ describe("TodayHub", () => {
     expect(markup).toContain("Your profile");
     expect(markup).toContain('aria-label="Your profile"');
     expect(markup).not.toContain("World Cup match desk");
+  });
+
+  it("prioritises the favorite team and then orders upcoming matches by kickoff", () => {
+    const markup = renderToStaticMarkup(
+      createElement(TodayHub, {
+        catalog: { teams: Object.values(teams) },
+        favoriteTeam: "ARG",
+        fixtures: [
+          {
+            awayTeam: "ENG",
+            fixtureId: "neutral-late",
+            homeTeam: "FRA",
+            kickoffAt: "2026-07-20T21:00:00.000Z",
+            lifecycle: "SCHEDULED",
+            minute: "—",
+            score: null,
+          },
+          {
+            awayTeam: "FRA",
+            fixtureId: "favorite-late",
+            homeTeam: "ARG",
+            kickoffAt: "2026-07-21T19:00:00.000Z",
+            lifecycle: "SCHEDULED",
+            minute: "—",
+            score: null,
+          },
+          {
+            awayTeam: "ESP",
+            fixtureId: "neutral-early",
+            homeTeam: "FRA",
+            kickoffAt: "2026-07-19T19:00:00.000Z",
+            lifecycle: "SCHEDULED",
+            minute: "—",
+            score: null,
+          },
+        ],
+        onOpenFixture: () => undefined,
+        onOpenProfile: () => undefined,
+        state: "ready",
+      }),
+    );
+
+    expect(markup.indexOf("favorite-late")).toBeLessThan(
+      markup.indexOf("neutral-early"),
+    );
+    expect(markup.indexOf("neutral-early")).toBeLessThan(
+      markup.indexOf("neutral-late"),
+    );
+    expect(markup).toContain('data-favorite-team="true"');
   });
 });

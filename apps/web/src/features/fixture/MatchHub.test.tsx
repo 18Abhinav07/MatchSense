@@ -79,7 +79,7 @@ describe("MatchHub", () => {
       }),
     );
 
-    expect(markup).toContain("SCORE NOT PUBLISHED");
+    expect(markup).toContain("Kickoff time pending");
     expect(markup).not.toContain("0—0");
   });
 
@@ -113,7 +113,132 @@ describe("MatchHub", () => {
       }),
     );
 
-    expect(markup).toContain("Open current Moment");
+    expect(markup).toContain("Open Moment");
     expect(markup).not.toContain("Replay a demo");
+  });
+
+  it("renders an upcoming fixture as a scheduled match rather than a missing score", () => {
+    const markup = renderToStaticMarkup(
+      createElement(MatchHub, {
+        catalog,
+        favoriteTeam: "ARG",
+        fixture: {
+          awayTeam: "FRA",
+          fixtureId: "scheduled-1",
+          homeTeam: "ARG",
+          kickoffAt: "2026-07-19T19:00:00.000Z",
+          lifecycle: "SCHEDULED",
+          minute: "—",
+          score: null,
+          sourceLabel: "TXLINE MATCH DATA",
+        },
+        state: "ready",
+      }),
+    );
+
+    expect(markup).toContain("UPCOMING");
+    expect(markup).toContain("Jul");
+    expect(markup).toContain("Match events begin when TxLINE publishes them");
+    expect(markup).not.toContain("SCORE NOT PUBLISHED");
+    expect(markup).not.toContain("Connection required");
+    expect(markup).not.toContain("Stream unavailable");
+  });
+
+  it("prioritises verified-final truth over cached transport freshness", () => {
+    const markup = renderToStaticMarkup(
+      createElement(MatchHub, {
+        catalog,
+        favoriteTeam: "ARG",
+        fixture: {
+          archiveStatus: "REPLAY_READY",
+          awayTeam: "FRA",
+          fixtureId: "final-1",
+          freshness: "cached",
+          homeTeam: "ARG",
+          lifecycle: "FINAL",
+          minute: "FT",
+          score: { away: 1, home: 2 },
+        },
+        state: "ready",
+      }),
+    );
+
+    expect(markup).toContain("VERIFIED FINAL");
+    expect(markup).not.toContain("CACHED DATA");
+  });
+
+  it("labels terminal truth as finalising rather than pending", () => {
+    const markup = renderToStaticMarkup(
+      createElement(MatchHub, {
+        catalog,
+        favoriteTeam: "ARG",
+        fixture: {
+          awayTeam: "FRA",
+          fixtureId: "terminal-1",
+          freshness: "cached",
+          homeTeam: "ARG",
+          lifecycle: "TERMINAL_FACT_COMMITTED",
+          minute: "FT",
+          score: { away: 1, home: 2 },
+        },
+        state: "ready",
+      }),
+    );
+
+    expect(markup).toContain("FINALISING RESULT");
+    expect(markup).not.toContain("MATCH STATUS PENDING");
+  });
+
+  it("renders the ordered canonical event rail and honest reconnect state", () => {
+    const moments = [
+      {
+        celebratesGoal: true,
+        eventTeam: "ARG",
+        id: "goal-1",
+        identity: "goal-1:1",
+        kind: "goal",
+        minute: "23′",
+        revision: 1,
+        score: { away: 0, home: 1 },
+        status: "confirmed",
+        title: "Argentina take the lead",
+      },
+      {
+        celebratesGoal: false,
+        eventTeam: "FRA",
+        id: "card-1",
+        identity: "card-1:1",
+        kind: "red_card",
+        minute: "61′",
+        revision: 1,
+        score: { away: 0, home: 1 },
+        status: "confirmed",
+        title: "France are down to ten",
+      },
+    ] as const;
+    const markup = renderToStaticMarkup(
+      createElement(MatchHub, {
+        catalog,
+        favoriteTeam: "ARG",
+        fixture: {
+          awayTeam: "FRA",
+          fixtureId: "fx-1",
+          freshness: "live",
+          homeTeam: "ARG",
+          lifecycle: "LIVE",
+          minute: "61′",
+          score: { away: 0, home: 1 },
+        },
+        state: "ready",
+        timeline: moments,
+        transportHealth: "stale",
+      }),
+    );
+
+    expect(markup).toContain("RECONNECTING");
+    expect(markup).not.toContain(">LIVE<");
+    expect(markup.indexOf("Argentina take the lead")).toBeLessThan(
+      markup.indexOf("France are down to ten"),
+    );
   });
 });

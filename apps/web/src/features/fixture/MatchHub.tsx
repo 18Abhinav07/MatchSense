@@ -4,7 +4,12 @@ import {
   type ProductCatalog,
   type ProductTeam,
 } from "../../live-api.js";
-import { formatFreshness, type LiveSnapshot } from "../../product-state.js";
+import {
+  formatFreshness,
+  type LiveMoment,
+  type LiveSnapshot,
+  type LiveViewState,
+} from "../../product-state.js";
 
 import "./match-hub.css";
 
@@ -17,6 +22,8 @@ export interface MatchHubProps {
   onBack?: (() => void) | undefined;
   onOpenMoment?: ((identity: string) => void) | undefined;
   state: MatchHubState;
+  timeline?: readonly LiveMoment[] | undefined;
+  transportHealth?: LiveViewState["transportHealth"] | undefined;
 }
 
 function teamFor(
@@ -34,17 +41,43 @@ function teamFor(
   );
 }
 
-function freshnessLabel(fixture: LiveSnapshot) {
+function kickoffLabel(value: string | undefined) {
+  if (!value) return "Kickoff time pending";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "Kickoff time pending";
+  return new Intl.DateTimeFormat("en", {
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    month: "short",
+  }).format(date);
+}
+
+function freshnessLabel(
+  fixture: LiveSnapshot,
+  transportHealth: LiveViewState["transportHealth"] | undefined,
+) {
+  if (transportHealth === "offline") return "OFFLINE";
+  if (transportHealth === "stale") return "RECONNECTING";
+  if (fixture.lifecycle === "FINAL" || fixture.lifecycle === "FINAL_REVISED") {
+    return fixture.archiveStatus === "REPLAY_READY"
+      ? "VERIFIED FINAL"
+      : "FINAL AWAITING ARCHIVE";
+  }
+  if (fixture.lifecycle === "TERMINAL_FACT_COMMITTED") {
+    return "FINALISING RESULT";
+  }
+  if (transportHealth === "connecting" && fixture.lifecycle === "LIVE") {
+    return "CONNECTING";
+  }
   if (fixture.lifecycle === "LIVE" && fixture.freshness === "live") {
     return "LIVE";
   }
   if (fixture.freshness === "cached") return "CACHED DATA";
   if (fixture.freshness === "stale") return "STALE DATA";
   if (fixture.freshness === "offline") return "OFFLINE";
-  if (fixture.lifecycle === "FINAL" || fixture.lifecycle === "FINAL_REVISED") {
-    return fixture.archiveStatus === "REPLAY_READY"
-      ? "VERIFIED FINAL"
-      : "FINAL AWAITING ARCHIVE";
+  if (fixture.lifecycle === "SCHEDULED" || fixture.lifecycle === "TRACKING") {
+    return "UPCOMING";
   }
   return "MATCH STATUS PENDING";
 }
@@ -56,6 +89,8 @@ export function MatchHub({
   onBack,
   onOpenMoment,
   state,
+  timeline = [],
+  transportHealth,
 }: MatchHubProps) {
   if (state === "loading") {
     return (
@@ -88,14 +123,21 @@ export function MatchHub({
 
   const home = teamFor(catalog, fixture.homeTeam, fixture.homeTeamName);
   const away = teamFor(catalog, fixture.awayTeam, fixture.awayTeamName);
-  const status = freshnessLabel(fixture);
+  const status = freshnessLabel(fixture, transportHealth);
   const freshness = formatFreshness(
     fixture.updatedAt,
     new Date().toISOString(),
   );
   const isLive = status === "LIVE";
   const lastEvent = fixture.lastEvent;
+  const eventRail = timeline.length
+    ? timeline.slice(-20)
+    : lastEvent
+      ? [lastEvent]
+      : [];
   const score = fixture.score;
+  const scheduled =
+    fixture.lifecycle === "SCHEDULED" || fixture.lifecycle === "TRACKING";
 
   return (
     <main className="ms-match-hub" id="main-content">
@@ -134,6 +176,11 @@ export function MatchHub({
               <span>{score.away}</span>
               <small>{fixture.minute}</small>
             </strong>
+          ) : scheduled ? (
+            <span className="ms-match-hub-kickoff">
+              <b>{kickoffLabel(fixture.kickoffAt)}</b>
+              <small>Kickoff</small>
+            </span>
           ) : (
             <span className="ms-match-hub-score-pending">
               SCORE NOT PUBLISHED
@@ -152,33 +199,18 @@ export function MatchHub({
             : "This score comes from the current server snapshot."}
         </p>
       </section>
-      <section className="ms-match-hub-utilities" aria-label="Match services">
+      <section className="ms-match-hub-facts" aria-label="Match facts">
         <article>
-          <span>FOLLOW &amp; ALERTS</span>
-          <b>Connection required</b>
-          <p>
-            Follow controls appear after the server confirms this fixture is
-            followable.
-          </p>
+          <span>COMPETITION</span>
+          <b>{fixture.competition ?? "World Cup"}</b>
         </article>
         <article>
-          <span>LISTENING</span>
-          <b>Stream unavailable</b>
-          <p>
-            Listening stays hidden until a durable commentary stream is attached
-            to this match.
-          </p>
+          <span>{scheduled ? "KICKOFF" : "MATCH CLOCK"}</span>
+          <b>{scheduled ? kickoffLabel(fixture.kickoffAt) : fixture.minute}</b>
         </article>
         <article>
-          <span>ROOMS</span>
-          <b>
-            {fixture.lifecycle === "SCHEDULED"
-              ? "Pre-match eligibility pending"
-              : "Unavailable for this lifecycle"}
-          </b>
-          <p>
-            Room actions are enabled only from server-qualified match rules.
-          </p>
+          <span>SOURCE</span>
+          <b>{fixture.sourceLabel ?? "TXLINE MATCH DATA"}</b>
         </article>
       </section>
       <section
@@ -192,29 +224,35 @@ export function MatchHub({
           </div>
           <span>{fixture.sourceLabel ?? "MATCHSENSE SERVER DATA"}</span>
         </header>
-        {lastEvent ? (
-          <article>
-            <time>{lastEvent.minute}</time>
-            <div>
-              <b>{eventLabel(lastEvent)}</b>
-              <span>
-                {lastEvent.detail ??
-                  "A canonical event was published for this match."}
-              </span>
-            </div>
-            <em>{lastEvent.status}</em>
-            {onOpenMoment ? (
-              <button
-                onClick={() => onOpenMoment(lastEvent.identity)}
-                type="button"
-              >
-                Open current Moment
-              </button>
-            ) : null}
-          </article>
+        {eventRail.length ? (
+          <div className="ms-match-hub-event-rail">
+            {eventRail.map((event) => (
+              <article key={event.identity}>
+                <time>{event.minute}</time>
+                <div>
+                  <b>{event.title ?? eventLabel(event)}</b>
+                  <span>
+                    {event.detail ??
+                      `${eventLabel(event)} confirmed at ${event.minute}.`}
+                  </span>
+                </div>
+                <em>{event.status}</em>
+                {onOpenMoment ? (
+                  <button
+                    onClick={() => onOpenMoment(event.identity)}
+                    type="button"
+                  >
+                    Open Moment
+                  </button>
+                ) : null}
+              </article>
+            ))}
+          </div>
         ) : (
           <p className="ms-match-hub-no-event">
-            No canonical event has been published for this snapshot.
+            {scheduled
+              ? "Match events begin when TxLINE publishes them."
+              : "No canonical event has been published for this snapshot."}
           </p>
         )}
       </section>

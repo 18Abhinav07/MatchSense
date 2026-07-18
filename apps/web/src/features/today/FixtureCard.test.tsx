@@ -33,6 +33,7 @@ describe("FixtureCard", () => {
           minute: "—",
           score: null,
         },
+        favoriteTeam: null,
         onOpen: () => undefined,
         tone: "live",
       }),

@@ -78,6 +78,7 @@ export interface CommentaryEventPayload {
   event: "commentary.ready";
   id: string;
   commentary: LiveCommentary;
+  sequence?: number | undefined;
   snapshot: LiveSnapshot;
 }
 
@@ -85,6 +86,7 @@ export interface CatchupEventPayload {
   event: "catchup.ready";
   id: string;
   catchup: { fromEventId: string; moments: LiveMoment[] };
+  sequence?: number | undefined;
   snapshot: LiveSnapshot;
 }
 
@@ -149,13 +151,32 @@ export function liveViewReducer(
   action: LiveViewAction,
 ): LiveViewState {
   if (action.type === "snapshot") {
-    const snapshotRevision = action.snapshot.revision ?? state.currentRevision;
-    if (snapshotRevision < state.currentRevision) return state;
+    const fixtureChanged =
+      state.snapshot !== null &&
+      state.snapshot.fixtureId !== action.snapshot.fixtureId;
+    const base = fixtureChanged ? createInitialLiveState() : state;
+    const snapshotRevision = action.snapshot.revision ?? base.currentRevision;
+    if (!fixtureChanged && snapshotRevision < state.currentRevision) {
+      if (!isContiguous(state.lastAppliedSequence, action.sequence)) {
+        return {
+          ...state,
+          pendingMoment: null,
+          resetRequired: true,
+          transportHealth: "stale",
+        };
+      }
+      return {
+        ...state,
+        lastAppliedSequence: action.sequence ?? state.lastAppliedSequence,
+        resetRequired: false,
+        transportHealth: "reconciled",
+      };
+    }
     return {
-      ...state,
+      ...base,
       currentRevision: snapshotRevision,
       dataMode: dataModeFor(action.snapshot),
-      lastAppliedSequence: action.sequence ?? state.lastAppliedSequence,
+      lastAppliedSequence: action.sequence ?? base.lastAppliedSequence,
       resetRequired: false,
       snapshot: action.snapshot,
       transportHealth: "reconciled",
@@ -178,7 +199,7 @@ export function liveViewReducer(
     );
     const timeline =
       priorIndex < 0
-        ? [action.payload.moment, ...state.timeline]
+        ? [...state.timeline, action.payload.moment]
         : state.timeline.map((moment, index) =>
             index === priorIndex ? action.payload.moment : moment,
           );
@@ -186,31 +207,57 @@ export function liveViewReducer(
       action.payload.deliveryIntent === "realtime" &&
       action.payload.moment.status === "confirmed" &&
       action.payload.snapshot.freshness === "live";
+    const historicalReconcile =
+      action.payload.deliveryIntent === "reconcile" &&
+      (action.payload.snapshot.revision ?? action.payload.moment.revision) <
+        state.currentRevision;
     return {
       ...state,
-      currentRevision: action.payload.moment.revision,
-      dataMode: dataModeFor(action.payload.snapshot),
+      currentRevision: historicalReconcile
+        ? state.currentRevision
+        : action.payload.moment.revision,
+      dataMode: historicalReconcile
+        ? state.dataMode
+        : dataModeFor(action.payload.snapshot),
       lastAppliedSequence: action.payload.sequence ?? state.lastAppliedSequence,
       lastEventId: action.payload.id,
       openMoment: null,
       pendingMoment: canOpenMoment ? action.payload.moment : null,
       resetRequired: false,
-      snapshot: action.payload.snapshot,
+      snapshot: historicalReconcile ? state.snapshot : action.payload.snapshot,
       timeline,
       transportHealth: "reconciled",
     };
   }
   if (action.type === "commentary_ready") {
+    if (!isContiguous(state.lastAppliedSequence, action.payload.sequence)) {
+      return {
+        ...state,
+        pendingMoment: null,
+        resetRequired: true,
+        transportHealth: "stale",
+      };
+    }
     return {
       ...state,
       commentaryByMoment: {
         ...state.commentaryByMoment,
         [action.payload.commentary.momentIdentity]: action.payload.commentary,
       },
+      lastAppliedSequence: action.payload.sequence ?? state.lastAppliedSequence,
+      resetRequired: false,
       transportHealth: "reconciled",
     };
   }
   if (action.type === "catchup_ready") {
+    if (!isContiguous(state.lastAppliedSequence, action.payload.sequence)) {
+      return {
+        ...state,
+        pendingMoment: null,
+        resetRequired: true,
+        transportHealth: "stale",
+      };
+    }
     const known = new Set(state.timeline.map((moment) => moment.identity));
     const missed = action.payload.catchup.moments.filter(
       (moment) => !known.has(moment.identity),
@@ -220,10 +267,12 @@ export function liveViewReducer(
       catchup: action.payload.catchup,
       currentRevision:
         action.payload.snapshot.revision ?? state.currentRevision,
+      lastAppliedSequence: action.payload.sequence ?? state.lastAppliedSequence,
       lastEventId: action.payload.id,
       dataMode: dataModeFor(action.payload.snapshot),
       snapshot: action.payload.snapshot,
-      timeline: [...missed].reverse().concat(state.timeline),
+      timeline: state.timeline.concat(missed),
+      resetRequired: false,
       transportHealth: "reconciled",
     };
   }

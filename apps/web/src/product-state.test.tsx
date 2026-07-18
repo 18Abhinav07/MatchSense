@@ -91,6 +91,126 @@ describe("truthful match state", () => {
     expect(next.timeline).toEqual([goal]);
   });
 
+  it("keeps canonical moments in chronological stream order", () => {
+    const first = liveViewReducer(createInitialLiveState(), {
+      sequence: 0,
+      snapshot,
+      type: "snapshot",
+    });
+    const afterGoal = liveViewReducer(first, {
+      payload: {
+        deliveryIntent: "reconcile",
+        event: "moment.created",
+        id: goal.identity,
+        moment: goal,
+        sequence: 1,
+        snapshot,
+      },
+      type: "canonical_event",
+    });
+    const card = {
+      ...goal,
+      celebratesGoal: false,
+      id: "card-1",
+      identity: "card-1:1",
+      kind: "red_card",
+      minute: "61′",
+      title: "France are down to ten",
+    };
+    const afterCard = liveViewReducer(afterGoal, {
+      payload: {
+        deliveryIntent: "realtime",
+        event: "moment.created",
+        id: card.identity,
+        moment: card,
+        sequence: 2,
+        snapshot: { ...snapshot, lastEvent: card, minute: "61′" },
+      },
+      type: "canonical_event",
+    });
+
+    expect(afterCard.timeline.map((moment) => moment.identity)).toEqual([
+      goal.identity,
+      card.identity,
+    ]);
+  });
+
+  it("advances the durable cursor across interleaved commentary", () => {
+    const painted = liveViewReducer(createInitialLiveState(), {
+      sequence: 1,
+      snapshot,
+      type: "snapshot",
+    });
+    const commented = liveViewReducer(painted, {
+      payload: {
+        commentary: {
+          generatedAt: "2026-07-19T00:00:00.000Z",
+          language: "en",
+          momentIdentity: goal.identity,
+          provider: "deterministic",
+          text: "Argentina have the breakthrough.",
+          usedFallback: false,
+        },
+        event: "commentary.ready",
+        id: "commentary-2",
+        sequence: 2,
+        snapshot,
+      },
+      type: "commentary_ready",
+    });
+    const next = liveViewReducer(commented, {
+      payload: {
+        deliveryIntent: "realtime",
+        event: "moment.created",
+        id: goal.identity,
+        moment: goal,
+        sequence: 3,
+        snapshot,
+      },
+      type: "canonical_event",
+    });
+
+    expect(commented.lastAppliedSequence).toBe(2);
+    expect(next.resetRequired).toBe(false);
+    expect(next.timeline).toEqual([goal]);
+  });
+
+  it("reconciles older history without regressing the latest painted truth", () => {
+    const latest = {
+      ...snapshot,
+      minute: "61′",
+      revision: 4,
+      score: { away: 0, home: 2 },
+    };
+    const painted = liveViewReducer(createInitialLiveState(), {
+      sequence: 0,
+      snapshot: latest,
+      type: "snapshot",
+    });
+    const afterHistoricalSnapshot = liveViewReducer(painted, {
+      sequence: 1,
+      snapshot: { ...snapshot, minute: "4′", revision: 1, score: null },
+      type: "snapshot",
+    });
+    const afterHistoricalMoment = liveViewReducer(afterHistoricalSnapshot, {
+      payload: {
+        deliveryIntent: "reconcile",
+        event: "moment.created",
+        id: goal.identity,
+        moment: { ...goal, revision: 2 },
+        sequence: 2,
+        snapshot: { ...snapshot, revision: 2 },
+      },
+      type: "canonical_event",
+    });
+
+    expect(afterHistoricalSnapshot.lastAppliedSequence).toBe(1);
+    expect(afterHistoricalMoment.lastAppliedSequence).toBe(2);
+    expect(afterHistoricalMoment.currentRevision).toBe(4);
+    expect(afterHistoricalMoment.snapshot).toEqual(latest);
+    expect(afterHistoricalMoment.timeline).toHaveLength(1);
+  });
+
   it("requires a resync rather than applying a sequence gap", () => {
     const painted = liveViewReducer(createInitialLiveState(), {
       sequence: 8,
@@ -112,6 +232,31 @@ describe("truthful match state", () => {
     expect(gapped.resetRequired).toBe(true);
     expect(gapped.timeline).toEqual([]);
     expect(gapped.pendingMoment).toBeNull();
+  });
+
+  it("replaces prior match state when the route changes to another fixture", () => {
+    const first = liveViewReducer(createInitialLiveState(), {
+      sequence: 8,
+      snapshot: { ...snapshot, revision: 8 },
+      type: "snapshot",
+    });
+    const nextFixture = {
+      ...snapshot,
+      awayTeam: "ENG",
+      fixtureId: "fixture-99",
+      homeTeam: "FRA",
+      revision: 0,
+      score: null,
+    } satisfies LiveSnapshot;
+    const switched = liveViewReducer(first, {
+      sequence: 0,
+      snapshot: nextFixture,
+      type: "snapshot",
+    });
+
+    expect(switched.snapshot?.fixtureId).toBe("fixture-99");
+    expect(switched.currentRevision).toBe(0);
+    expect(switched.timeline).toEqual([]);
   });
 
   it("formats freshness and paths deterministically", () => {

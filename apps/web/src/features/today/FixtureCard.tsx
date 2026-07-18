@@ -40,17 +40,20 @@ const labels: Record<FixtureCardTone, string> = {
 export function FixtureCard({
   catalog,
   fixture,
+  favoriteTeam,
   onOpen,
   tone,
 }: {
   catalog: ProductCatalog;
   fixture: LiveSnapshot;
+  favoriteTeam: string | null;
   onOpen(fixtureId: string): void;
   tone: FixtureCardTone;
 }) {
   const home = teamFor(catalog, fixture.homeTeam, fixture.homeTeamName);
   const away = teamFor(catalog, fixture.awayTeam, fixture.awayTeamName);
   const scoreVisible = tone !== "upcoming" && fixture.score !== null;
+  const isFavorite = favoriteTeam === home.code || favoriteTeam === away.code;
   const detail =
     tone === "live"
       ? fixture.minute
@@ -61,21 +64,24 @@ export function FixtureCard({
   return (
     <article
       className={`ms-fixture-card ms-fixture-card--${tone}`}
+      data-favorite-team={isFavorite}
       data-fixture-id={fixture.fixtureId}
     >
-      <div className="ms-fixture-card-meta">
-        <span>{labels[tone]}</span>
-        <small>{detail}</small>
-      </div>
       <button
         aria-label={`Open ${home.name} versus ${away.name}`}
         onClick={() => onOpen(fixture.fixtureId)}
         type="button"
       >
+        <span className="ms-fixture-card-meta">
+          <span>{isFavorite ? "Your team" : labels[tone]}</span>
+          <small>{detail}</small>
+        </span>
         <span className="ms-fixture-card-team ms-fixture-card-team--home">
           <TeamFlag size="standard" team={home} />
-          <b>{home.name}</b>
-          <small>{home.code}</small>
+          <span>
+            <b>{home.name}</b>
+            <small>{home.code}</small>
+          </span>
         </span>
         <strong className="ms-fixture-card-score">
           {scoreVisible ? (
@@ -92,9 +98,23 @@ export function FixtureCard({
         </strong>
         <span className="ms-fixture-card-team ms-fixture-card-team--away">
           <TeamFlag size="standard" team={away} />
-          <b>{away.name}</b>
-          <small>{away.code}</small>
+          <span>
+            <b>{away.name}</b>
+            <small>{away.code}</small>
+          </span>
         </span>
+        <svg
+          aria-hidden="true"
+          className="ms-fixture-card-arrow"
+          fill="none"
+          viewBox="0 0 24 24"
+        >
+          <path
+            d="M5 12h13M13 7l5 5-5 5"
+            stroke="currentColor"
+            strokeWidth="1.5"
+          />
+        </svg>
       </button>
     </article>
   );

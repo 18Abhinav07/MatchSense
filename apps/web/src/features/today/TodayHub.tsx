@@ -1,6 +1,7 @@
 import type { ProductCatalog } from "../../live-api.js";
 import { todayFixtureBucket } from "../../live-api.js";
 import type { LiveSnapshot } from "../../product-state.js";
+import { TeamFlag } from "../../components/TeamFlag.js";
 
 import { FixtureCard, type FixtureCardTone } from "./FixtureCard.js";
 import "./today.css";
@@ -17,7 +18,7 @@ export interface TodayHubProps {
   state: TodayHubState;
 }
 
-function byFavoriteTeam(favoriteTeam: string | null) {
+function byFavoriteTeam(favoriteTeam: string | null, newestFirst = false) {
   return (left: LiveSnapshot, right: LiveSnapshot) => {
     const leftFavorite =
       left.homeTeam === favoriteTeam || left.awayTeam === favoriteTeam ? 1 : 0;
@@ -25,19 +26,27 @@ function byFavoriteTeam(favoriteTeam: string | null) {
       right.homeTeam === favoriteTeam || right.awayTeam === favoriteTeam
         ? 1
         : 0;
-    return rightFavorite - leftFavorite;
+    const favoriteDifference = rightFavorite - leftFavorite;
+    if (favoriteDifference) return favoriteDifference;
+    const leftTime = Date.parse(left.kickoffAt ?? left.updatedAt ?? "");
+    const rightTime = Date.parse(right.kickoffAt ?? right.updatedAt ?? "");
+    const safeLeft = Number.isFinite(leftTime) ? leftTime : 0;
+    const safeRight = Number.isFinite(rightTime) ? rightTime : 0;
+    return newestFirst ? safeRight - safeLeft : safeLeft - safeRight;
   };
 }
 
 function FixtureSection({
   catalog,
   fixtures,
+  favoriteTeam,
   onOpenFixture,
   title,
   tone,
 }: {
   catalog: ProductCatalog;
   fixtures: readonly LiveSnapshot[];
+  favoriteTeam: string | null;
   onOpenFixture(fixtureId: string): void;
   title: string;
   tone: FixtureCardTone;
@@ -56,6 +65,7 @@ function FixtureSection({
           <FixtureCard
             catalog={catalog}
             fixture={fixture}
+            favoriteTeam={favoriteTeam}
             key={fixture.fixtureId}
             onOpen={onOpenFixture}
             tone={tone}
@@ -84,10 +94,11 @@ export function TodayHub({
       (fixture) => todayFixtureBucket(fixture) === "verified_final",
     ),
   };
-  const order = byFavoriteTeam(favoriteTeam);
-  buckets.live.sort(order);
-  buckets.upcoming.sort(order);
-  buckets.verified_final.sort(order);
+  buckets.live.sort(byFavoriteTeam(favoriteTeam));
+  buckets.upcoming.sort(byFavoriteTeam(favoriteTeam));
+  buckets.verified_final.sort(byFavoriteTeam(favoriteTeam, true));
+  const favorite =
+    catalog.teams.find((team) => team.code === favoriteTeam) ?? null;
 
   return (
     <main className="ms-today" id="main-content">
@@ -120,12 +131,15 @@ export function TodayHub({
           </span>
         </div>
         <aside>
-          <b>
-            {favoriteTeam
-              ? "Your team is prioritised"
-              : "Choose a team in your profile"}
-          </b>
-          <span>Nothing is inferred from the clock.</span>
+          {favorite ? <TeamFlag size="hero" team={favorite} /> : null}
+          <span>
+            <b>
+              {favorite
+                ? `${favorite.name} first`
+                : "Choose a team in your profile"}
+            </b>
+            <small>Only source-qualified matches appear.</small>
+          </span>
         </aside>
       </section>
       {state === "loading" ? (
@@ -148,19 +162,19 @@ export function TodayHub({
         buckets.verified_final.length ? (
         <div className="ms-today-content">
           <FixtureSection
-            {...{ catalog, onOpenFixture }}
+            {...{ catalog, favoriteTeam, onOpenFixture }}
             fixtures={buckets.live}
             title="Live now"
             tone="live"
           />
           <FixtureSection
-            {...{ catalog, onOpenFixture }}
+            {...{ catalog, favoriteTeam, onOpenFixture }}
             fixtures={buckets.upcoming}
             title="Upcoming"
             tone="upcoming"
           />
           <FixtureSection
-            {...{ catalog, onOpenFixture }}
+            {...{ catalog, favoriteTeam, onOpenFixture }}
             fixtures={buckets.verified_final}
             title="Verified finals"
             tone="verified_final"

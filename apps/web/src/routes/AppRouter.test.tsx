@@ -237,7 +237,8 @@ describe("truthful application router", () => {
     expect(markup).toContain("Argentina");
     expect(markup).toContain("France");
     expect(markup).toContain("LIVE");
-    expect(markup).toContain("Stream unavailable");
+    expect(markup).toContain("TXLINE MATCH DATA");
+    expect(markup).not.toContain("Stream unavailable");
   });
 
   it("does not expose a public demo route", () => {

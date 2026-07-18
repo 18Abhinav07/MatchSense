@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 
 import { MemorySourceNotice } from "../MemorySourceNotice.js";
 import {
@@ -15,6 +15,11 @@ import {
   type OnboardingProfileApi,
 } from "../features/onboarding/OnboardingFlow.js";
 import { MatchHub } from "../features/fixture/MatchHub.js";
+import {
+  createFixtureEventSourceStream,
+  type FixtureStreamPort,
+  unavailableFixtureStream,
+} from "../features/fixture/fixture-stream.js";
 import {
   RoomExperience,
   createCallThreeRoomApi,
@@ -37,7 +42,12 @@ import {
   type MemoryApi,
   type VerifiedFixtureMemory,
 } from "../memory-api.js";
-import { normalizePath, type LiveSnapshot } from "../product-state.js";
+import {
+  createInitialLiveState,
+  liveViewReducer,
+  normalizePath,
+  type LiveSnapshot,
+} from "../product-state.js";
 import {
   createRecordedReplayApi,
   type RecordedReplayApi,
@@ -62,6 +72,7 @@ export interface AppRouterProps {
   initialReplayTimeline?: RecordedReplayTimeline | undefined;
   initialRoom?: CallThreeRoomView | undefined;
   initialRooms?: readonly CallThreeRoomView[] | undefined;
+  fixtureStream?: FixtureStreamPort | undefined;
   memoryApi?: MemoryApi | undefined;
   momentApi?: MomentResolutionApi | undefined;
   productApi?: ProductApi | undefined;
@@ -185,6 +196,7 @@ export function AppRouter({
   initialReplayTimeline,
   initialRoom,
   initialRooms,
+  fixtureStream,
   memoryApi,
   momentApi,
   productApi,
@@ -210,6 +222,14 @@ export function AppRouter({
     [replayApi],
   );
   const rooms = useMemo(() => roomApi ?? createCallThreeRoomApi(), [roomApi]);
+  const matchStream = useMemo(
+    () =>
+      fixtureStream ??
+      (typeof EventSource === "undefined"
+        ? unavailableFixtureStream()
+        : createFixtureEventSourceStream()),
+    [fixtureStream],
+  );
   const [path, setPath] = useState(() =>
     publicPath(initialPath ?? currentPath()),
   );
@@ -269,6 +289,12 @@ export function AppRouter({
   const [exactFixture, setExactFixture] = useState<LiveSnapshot | null>(null);
   const [exactFixtureState, setExactFixtureState] =
     useState<ResourceState>("ready");
+  const [liveMatch, dispatchLiveMatch] = useReducer(
+    liveViewReducer,
+    undefined,
+    createInitialLiveState,
+  );
+  const [fixtureStreamEpoch, setFixtureStreamEpoch] = useState(0);
 
   const navigate = useCallback((nextPath: string) => {
     const next = publicPath(nextPath);
@@ -367,6 +393,45 @@ export function AppRouter({
       });
     return () => controller.abort();
   }, [product, requestedFixtureId, requestedKnownFixture]);
+
+  const routedFixture =
+    scheduledFixture ??
+    (exactFixture?.fixtureId === selectedFixtureId ? exactFixture : null);
+
+  useEffect(() => {
+    if (!selectedFixtureId || !routedFixture) return;
+    dispatchLiveMatch({ snapshot: routedFixture, type: "snapshot" });
+    if (
+      routedFixture.lifecycle === "FINAL" ||
+      routedFixture.lifecycle === "FINAL_REVISED" ||
+      routedFixture.lifecycle === "RESULT_UNAVAILABLE"
+    ) {
+      return;
+    }
+    dispatchLiveMatch({ transportHealth: "connecting", type: "transport" });
+    const subscription = matchStream.subscribe({
+      afterSequence: 0,
+      fixtureId: selectedFixtureId,
+      handlers: {
+        onCanonicalEvent: (payload) =>
+          dispatchLiveMatch({ payload, type: "canonical_event" }),
+        onCatchup: (payload) =>
+          dispatchLiveMatch({ payload, type: "catchup_ready" }),
+        onCommentary: (payload) =>
+          dispatchLiveMatch({ payload, type: "commentary_ready" }),
+        onReset: () => setFixtureStreamEpoch((epoch) => epoch + 1),
+        onSnapshot: (snapshot, sequence) =>
+          dispatchLiveMatch({
+            ...(sequence === undefined ? {} : { sequence }),
+            snapshot,
+            type: "snapshot",
+          }),
+        onTransportError: () =>
+          dispatchLiveMatch({ transportHealth: "stale", type: "transport" }),
+      },
+    });
+    return () => subscription.close();
+  }, [fixtureStreamEpoch, matchStream, routedFixture, selectedFixtureId]);
 
   useEffect(() => {
     if (!memoryFixtureId) return;
@@ -737,11 +802,13 @@ export function AppRouter({
   }
 
   if (selectedFixtureId) {
+    const streamed =
+      liveMatch.snapshot?.fixtureId === selectedFixtureId ? liveMatch : null;
     return (
       <MatchHub
         catalog={catalog}
         favoriteTeam={profile.favoriteTeam}
-        fixture={scheduledFixture ?? exactFixture}
+        fixture={streamed?.snapshot ?? routedFixture}
         onBack={() => navigate("/")}
         onOpenMoment={(identity) => {
           if (!selectedFixtureId) return;
@@ -750,6 +817,8 @@ export function AppRouter({
           );
         }}
         state={exactFixtureState}
+        timeline={streamed?.timeline}
+        transportHealth={streamed?.transportHealth}
       />
     );
   }

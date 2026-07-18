@@ -1,5 +1,6 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { BUNDLED_FLAG_CODES, TeamFlag } from "./TeamFlag.js";
@@ -44,6 +45,23 @@ const argentina = {
 };
 
 describe("TeamFlag", () => {
+  it("uses a sharp unbordered textile plane instead of a rounded badge", () => {
+    const stylesheet = readFileSync(
+      new URL("./team-flag.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(stylesheet).toMatch(
+      /\.ms-team-flag\s*\{[\s\S]*?border:\s*0;[\s\S]*?border-radius:\s*0;/u,
+    );
+    expect(stylesheet).toMatch(
+      /\.ms-team-flag__weave\s*\{[\s\S]*?repeating-linear-gradient/u,
+    );
+    expect(stylesheet).not.toMatch(
+      /\.ms-team-flag--hero\s*\{[\s\S]*?border-radius/u,
+    );
+  });
+
   it.each(["compact", "standard", "hero"] as const)(
     "renders accessible bundled national artwork in the %s frame",
     (size) => {

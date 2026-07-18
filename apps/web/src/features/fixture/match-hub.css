@@ -27,7 +27,7 @@
 }
 .ms-match-hub-header > span,
 .ms-match-hub-status,
-.ms-match-hub-utilities span,
+.ms-match-hub-facts span,
 .ms-match-hub-timeline p,
 .ms-match-hub-timeline header > span {
   font:
@@ -125,6 +125,25 @@
   letter-spacing: 0.13em;
   text-align: center;
 }
+.ms-match-hub-kickoff {
+  display: grid;
+  gap: 8px;
+  min-width: 150px;
+  text-align: center;
+}
+.ms-match-hub-kickoff b {
+  font-size: clamp(18px, 2.4vw, 28px);
+  letter-spacing: -0.045em;
+}
+.ms-match-hub-kickoff small {
+  color: #a8b8a6;
+  font:
+    750 10px/1 "SFMono-Regular",
+    ui-monospace,
+    monospace;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
 .ms-match-hub-score-pending {
   color: #a8b8a6;
   font:
@@ -142,32 +161,29 @@
   text-align: center;
 }
 
-.ms-match-hub-utilities {
+.ms-match-hub-facts {
   display: grid;
-  grid-template-columns: 1.3fr 0.85fr 0.85fr;
+  grid-template-columns: 1.15fr 0.85fr 1fr;
   gap: 1px;
   width: min(100%, 1160px);
   margin: 0 auto;
   background: rgb(255 255 255 / 10%);
 }
-.ms-match-hub-utilities article {
-  min-height: 190px;
-  padding: 24px;
+.ms-match-hub-facts article {
+  min-height: 132px;
+  padding: 22px 24px;
   background: #17231a;
 }
-.ms-match-hub-utilities span {
+.ms-match-hub-facts span {
   color: #9fd16e;
 }
-.ms-match-hub-utilities b {
+.ms-match-hub-facts b {
   display: block;
-  margin-top: 28px;
-  font-size: 19px;
+  max-width: 28ch;
+  margin-top: 24px;
+  overflow-wrap: anywhere;
+  font-size: 18px;
   letter-spacing: -0.04em;
-}
-.ms-match-hub-utilities p {
-  margin: 8px 0 0;
-  color: #a8b8a6;
-  line-height: 1.5;
 }
 
 .ms-match-hub-timeline {
@@ -202,6 +218,9 @@
   gap: 18px;
   padding: 24px 0;
   border-bottom: 1px solid rgb(255 255 255 / 10%);
+}
+.ms-match-hub-event-rail {
+  display: grid;
 }
 .ms-match-hub-timeline time,
 .ms-match-hub-timeline em {
@@ -283,14 +302,26 @@
 }
 @media (max-width: 760px) {
   .ms-match-hub-teams {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    gap: 10px;
+  }
+  .ms-match-hub-teams > div .ms-team-flag {
+    width: min(100%, 104px);
+  }
+  .ms-match-hub-teams > div b {
+    font-size: clamp(17px, 5vw, 24px);
   }
   .ms-match-hub-teams > strong {
-    grid-column: 1 / -1;
-    grid-row: 1;
-    justify-self: center;
+    gap: 5px;
+    font-size: clamp(34px, 11vw, 52px);
   }
-  .ms-match-hub-utilities {
+  .ms-match-hub-kickoff {
+    min-width: 76px;
+  }
+  .ms-match-hub-kickoff b {
+    font-size: 15px;
+  }
+  .ms-match-hub-facts {
     grid-template-columns: minmax(0, 1fr);
   }
   .ms-match-hub-timeline header {
@@ -299,6 +330,12 @@
   }
   .ms-match-hub-timeline header > span {
     text-align: left;
+  }
+  .ms-match-hub-timeline article {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+  .ms-match-hub-timeline article em {
+    grid-column: 2;
   }
 }
 @media (prefers-reduced-motion: reduce) {

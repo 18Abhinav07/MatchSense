@@ -453,6 +453,10 @@ export function parseCanonicalEvent(
   const event = text(payload.event, "moment.created");
   if (event !== "moment.created" && event !== "moment.revised") return null;
   return {
+    ...(payload.deliveryIntent === "realtime" ||
+    payload.deliveryIntent === "reconcile"
+      ? { deliveryIntent: payload.deliveryIntent }
+      : {}),
     event,
     id: text(payload.id, moment.identity),
     moment,
