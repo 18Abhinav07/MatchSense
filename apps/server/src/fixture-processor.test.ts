@@ -6,7 +6,10 @@ import {
 import type { CanonicalEventFact } from "@matchsense/contracts";
 import { describe, expect, it } from "vitest";
 
-import { createFixtureProcessor } from "./fixture-processor.js";
+import {
+  createFixtureProcessor,
+  restoreFixtureProjection,
+} from "./fixture-processor.js";
 
 const fixture = {
   awayTeam: "FRA",
@@ -107,7 +110,7 @@ describe("fixture processor", () => {
     ).toBe(true);
   });
 
-  it("keeps reconcile truth off every live delivery topic", async () => {
+  it("keeps reconciled truth off Moments and every fan delivery topic", async () => {
     const repository = repositoryHarness("demo");
     const processor = createFixtureProcessor({
       repository,
@@ -121,14 +124,13 @@ describe("fixture processor", () => {
       raw,
     });
 
-    const topics = repository
-      .inspect({ fixtureId: fixture.fixtureId, mode: "demo" })
-      .outbox.map(({ topic }) => topic);
-    expect(topics).toEqual([
-      "fixture.reconcile",
-      "room.reconcile",
-      "memory.reconcile",
-    ]);
+    const state = repository.inspect({
+      fixtureId: fixture.fixtureId,
+      mode: "demo",
+    });
+    expect(state.outbox).toEqual([]);
+    expect(state.moments).toEqual([]);
+    expect(state.projection).toMatchObject({ revision: 1 });
   });
 
   it("sanitizes live raw payload before crossing the repository boundary", async () => {
@@ -159,6 +161,46 @@ describe("fixture processor", () => {
     expect(stored?.payload).toBeNull();
     expect(stored?.deliveryIntent).toBe("realtime");
     expect(stored?.occurredAt).toBe(goalFact.occurredAt);
+  });
+
+  it("restores authorised recorded Moments and keeps reconciliation off fan effects", async () => {
+    const repository = repositoryHarness("recorded");
+    const processor = createFixtureProcessor({ repository });
+    const recordedFact = {
+      ...goalFact,
+      provenance: "recorded_txline_authorised" as const,
+    };
+
+    await processor.process({
+      deliveryIntent: "reconcile",
+      fact: recordedFact,
+      fixture,
+      mode: "recorded",
+      raw: { ...raw, source: "txline-history" },
+    });
+
+    const stored = repository.inspect({
+      fixtureId: fixture.fixtureId,
+      mode: "recorded",
+    }).projection;
+    expect(stored).not.toBeNull();
+    if (!stored) throw new Error("expected recorded projection");
+    const restored = restoreFixtureProjection({
+      fixture,
+      provenance: "recorded_txline_authorised",
+      record: stored,
+    });
+
+    expect(restored.lastEvent).toMatchObject({
+      kind: "goal",
+      provenance: "recorded_txline_authorised",
+    });
+    expect(
+      repository.inspect({
+        fixtureId: fixture.fixtureId,
+        mode: "recorded",
+      }).outbox,
+    ).toEqual([]);
   });
 
   it("normalizes a legacy v2 projection before reducing the next event", async () => {

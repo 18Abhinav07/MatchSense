@@ -349,6 +349,19 @@ function unwrapUpdate(payload: unknown): unknown {
   return pick(payload, "Update", "update") ?? payload;
 }
 
+/** Stable provider-record identity used by durable raw persistence. */
+export function hashTxlineScorePayload(payload: unknown) {
+  return hashPayload(unwrapUpdate(payload));
+}
+
+/** Extracts only the documented fixture identifier; no action is interpreted. */
+export function txlineFixtureIdFromPayload(payload: unknown): string | null {
+  const unwrapped = unwrapUpdate(payload);
+  return isObject(unwrapped)
+    ? asIdentifier(pick(unwrapped, "FixtureId", "fixtureId"))
+    : null;
+}
+
 function warning(input: {
   code: TxlineWarningCode;
   fixtureId?: string | null | undefined;

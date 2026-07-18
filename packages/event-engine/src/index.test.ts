@@ -38,6 +38,22 @@ function reduce(
 }
 
 describe("canonical fixture reducer", () => {
+  it("labels authorised recorded TxLINE history without presenting it as live", () => {
+    const projection = createFixtureProjection({
+      awayTeam: "FRA",
+      fixtureId: "recorded-fixture-1",
+      homeTeam: "ARG",
+      kickoffAt: "2026-07-16T18:00:00.000Z",
+      observedAt: "2026-07-16T17:59:00.000Z",
+      provenance: "recorded_txline_authorised",
+    });
+
+    expect(projection).toMatchObject({
+      provenance: "recorded_txline_authorised",
+      sourceLabel: "RECORDED · TXLINE DATA",
+    });
+  });
+
   it("creates one revision-linked goal moment and ignores duplicate source delivery", () => {
     const envelope = {
       id: "synthetic-goal-arg-fra-1",

@@ -20,6 +20,7 @@ import type {
 import {
   SIMULATION_SOURCE_LABEL,
   TXLINE_DEVNET_SOURCE_LABEL,
+  TXLINE_RECORDED_SOURCE_LABEL,
 } from "@matchsense/contracts";
 
 const ZERO_SCORE: Score = { away: 0, home: 0 };
@@ -359,7 +360,9 @@ export function createFixtureProjection(input: {
     sourceLabel:
       provenance === "live_txline"
         ? TXLINE_DEVNET_SOURCE_LABEL
-        : SIMULATION_SOURCE_LABEL,
+        : provenance === "recorded_txline_authorised"
+          ? TXLINE_RECORDED_SOURCE_LABEL
+          : SIMULATION_SOURCE_LABEL,
     stats: zeroStats(),
     updatedAt: input.observedAt,
   };

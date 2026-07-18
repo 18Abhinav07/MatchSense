@@ -5,6 +5,7 @@ import type {
 
 export * from "./live.js";
 export * from "./client.js";
+export * from "./durable-reducer.js";
 export * from "./raw-source.js";
 export * from "./schedule.js";
 

@@ -221,6 +221,74 @@ describe("raw TxLINE score source", () => {
     ]);
   });
 
+  it("hands a whole identified live frame to the atomic collector before acknowledging its cursor", async () => {
+    const controller = new AbortController();
+    const individualRecords = vi.fn();
+    const legacyCursor = vi.fn();
+    const atomicFrames: Array<{
+      expectedCursor: string | null;
+      nextCursor: string;
+      records: Array<{ seq: number; sseEventId: string | null }>;
+    }> = [];
+    const fetchImpl: typeof fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/auth/guest/start")) return authResponse();
+      if (url.includes("/api/scores/historical/")) {
+        return new Response("[]", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(
+        `id: cursor:52\nevent: score\ndata: ${JSON.stringify([
+          { Action: "shot", Seq: 50 },
+          { Action: "corner", Seq: 51 },
+        ])}\n\n`,
+        {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        },
+      );
+    });
+    const source = createTxlineRawScoreSource({
+      advanceCursor: legacyCursor,
+      client: createTxlineAuthenticatedClient({
+        apiToken: "fixture-activated-server-token",
+        fetchImpl,
+      }),
+      fixtureIds: ["18257865"],
+      loadCursor: async () => "cursor:49",
+      onLiveFrame: async (frame) => {
+        atomicFrames.push({
+          expectedCursor: frame.expectedCursor,
+          nextCursor: frame.nextCursor,
+          records: frame.records.map((record) => ({
+            seq: (record.payload as { Seq: number }).Seq,
+            sseEventId: record.metadata.sseEventId,
+          })),
+        });
+        controller.abort();
+        return true;
+      },
+      onRawRecord: individualRecords,
+    });
+
+    await source.run(controller.signal);
+
+    expect(atomicFrames).toEqual([
+      {
+        expectedCursor: "cursor:49",
+        nextCursor: "cursor:52",
+        records: [
+          { seq: 50, sseEventId: "cursor:52" },
+          { seq: 51, sseEventId: "cursor:52" },
+        ],
+      },
+    ]);
+    expect(individualRecords).not.toHaveBeenCalled();
+    expect(legacyCursor).not.toHaveBeenCalled();
+  });
+
   it("does not advance the cursor when downstream fails and surfaces the reconnect warning", async () => {
     const controller = new AbortController();
     const cursorChanges = vi.fn();

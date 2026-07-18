@@ -7,6 +7,7 @@ import type {
   MemoryRecord,
   MemoryRepository,
   PersistenceMode,
+  PersistenceProvenance,
 } from "@matchsense/db";
 
 type JsonObject = Record<string, unknown>;
@@ -43,7 +44,7 @@ export interface MatchMemoryPayload {
   keyMoments: MatchMemoryMoment[];
   kickoffAt: string;
   mode: PersistenceMode;
-  provenance: "live_txline" | "synthetic_txline_shaped";
+  provenance: PersistenceProvenance;
   replay: MatchMemoryReplay;
   revision: number;
   schemaVersion: 1;
@@ -185,9 +186,14 @@ function projectionPayload(record: FixtureProjectionRecord) {
 }
 
 function sourceLabel(fixture: FixtureRecord) {
-  return fixture.provenance === "live_txline"
-    ? "TXLINE · DEVNET SOURCE"
-    : "SIMULATION · TXLINE-SHAPED DATA";
+  switch (fixture.provenance) {
+    case "live_txline":
+      return "TXLINE · DEVNET SOURCE";
+    case "recorded_txline_authorised":
+      return "RECORDED · TXLINE DATA";
+    case "synthetic_txline_shaped":
+      return "SIMULATION · TXLINE-SHAPED DATA";
+  }
 }
 
 function replayMetadata(

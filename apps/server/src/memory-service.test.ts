@@ -91,7 +91,7 @@ function memoryRepository() {
     append: async (input: {
       fanId: string;
       fixtureId: string;
-      mode: "demo" | "live";
+      mode: "demo" | "live" | "recorded";
       payload: MatchMemoryPayload;
       revision: number;
     }) => {
@@ -108,7 +108,7 @@ function memoryRepository() {
     latestForFanFixture: async (input: {
       fanId: string;
       fixtureId: string;
-      mode: "demo" | "live";
+      mode: "demo" | "live" | "recorded";
     }) =>
       (values.get(key(input.fanId, input.mode, input.fixtureId)) ?? [])
         .toSorted((left, right) => right.revision - left.revision)
@@ -269,6 +269,66 @@ describe("durable per-fan Match Memory", () => {
       templateId: "five-minute-match",
       templateVersion: 1,
     });
+  });
+
+  it("materializes an authorised recorded final with its distinct replay provenance", async () => {
+    const memories = memoryRepository();
+    const fixture: FixtureRecord = {
+      ...liveFixture,
+      id: "fixture-recorded",
+      mode: "recorded",
+      provenance: "recorded_txline_authorised",
+    };
+    const projection: FixtureProjectionRecord = {
+      ...finalProjection,
+      fixtureId: fixture.id,
+      mode: "recorded",
+    };
+    const events = [
+      {
+        ...fixtureEvent({
+          identity: `${fixture.id}:event:goal:1`,
+          kind: "goal",
+          minute: "23'",
+          revision: 1,
+          sequence: 1,
+          team: "ARG",
+        }),
+        fixtureId: fixture.id,
+        mode: "recorded" as const,
+      },
+    ];
+    const service = createMatchMemoryService({
+      experiences: { listForOwner: async () => [] },
+      fans: {
+        listFollows: async () => [
+          {
+            createdAt: "2026-07-17T11:00:00.000Z",
+            eventPreferences: {},
+            fanId: "fan-1",
+            fixtureId: fixture.id,
+            mode: "recorded",
+          },
+        ],
+      },
+      fixtureTruth: {
+        eventsAfter: async () => events,
+        get: async () => fixture,
+        getLatestProjection: async () => projection,
+      },
+      memories,
+    });
+
+    await expect(service.listForFan("fan-1")).resolves.toMatchObject([
+      {
+        fixtureId: fixture.id,
+        mode: "recorded",
+        payload: {
+          provenance: "recorded_txline_authorised",
+          sourceLabel: "RECORDED · TXLINE DATA",
+        },
+      },
+    ]);
   });
 
   it("does not expose unfinished or unrelated fixtures", async () => {

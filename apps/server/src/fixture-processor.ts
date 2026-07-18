@@ -4,6 +4,7 @@ import type {
   PersistenceMode,
   ProcessSourceEnvelopeResult,
   RawSourceRecordWrite,
+  SourceEnvelopeCommitPlan,
   SourceDeliveryIntent,
   SourceFence,
 } from "@matchsense/db";
@@ -11,6 +12,7 @@ import type {
   CanonicalEventEffect,
   CanonicalEventKind,
   CanonicalMoment,
+  DataProvenance,
   FixtureProjection,
   FixtureStats,
   FixtureStreamEvent,
@@ -114,6 +116,14 @@ function nonNegativeInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
     ? value
     : null;
+}
+
+function isDataProvenance(value: unknown): value is DataProvenance {
+  return (
+    value === "live_txline" ||
+    value === "recorded_txline_authorised" ||
+    value === "synthetic_txline_shaped"
+  );
 }
 
 function normalizedScore(value: unknown, fallback: Score): Score {
@@ -232,9 +242,7 @@ function normalizedMoment(value: unknown): CanonicalMoment | null {
     !eventKinds.has(moment.kind as CanonicalEventKind) ||
     typeof moment.minute !== "string" ||
     typeof moment.sourceEnvelopeId !== "string" ||
-    typeof moment.provenance !== "string" ||
-    (moment.provenance !== "live_txline" &&
-      moment.provenance !== "synthetic_txline_shaped") ||
+    !isDataProvenance(moment.provenance) ||
     (moment.eventTeam !== null && typeof moment.eventTeam !== "string") ||
     (moment.occurredAt !== null && typeof moment.occurredAt !== "string") ||
     nonNegativeInteger(moment.revision) === null
@@ -357,6 +365,137 @@ function outboxId(
   return `outbox:${mode}:${fixtureId}:${revision}:${topic}`;
 }
 
+export interface FixtureSourceEnvelopePlanInput {
+  deliveryIntent: SourceDeliveryIntent;
+  facts: readonly SourceFact[];
+  fixture: FixtureProcessorFixture;
+  mode: PersistenceMode;
+}
+
+interface DerivedFixturePlan {
+  event: FixtureStreamEvent;
+  plan: SourceEnvelopeCommitPlan;
+}
+
+function deriveFixtureSourceEnvelopePlans(
+  input: FixtureSourceEnvelopePlanInput,
+  currentRecord: FixtureProjectionRecord | null,
+): readonly DerivedFixturePlan[] {
+  if (input.facts.length === 0) return [];
+  const reconciliation = input.deliveryIntent === "reconcile";
+  let current = currentRecord
+    ? storedProjection(currentRecord, input.fixture, input.facts[0]!.provenance)
+    : null;
+  const derived: DerivedFixturePlan[] = [];
+
+  for (const fact of input.facts) {
+    if (fact.fixtureId !== input.fixture.fixtureId) {
+      throw new Error("Source fact fixture does not match fixture definition");
+    }
+    const projection =
+      current ??
+      createFixtureProjection({
+        awayTeam: input.fixture.awayTeam,
+        fixtureId: input.fixture.fixtureId,
+        homeTeam: input.fixture.homeTeam,
+        kickoffAt: input.fixture.kickoffAt,
+        observedAt: fact.receivedAt,
+        provenance: fact.provenance,
+      });
+    const existed = eventAlreadyExists(projection, fact);
+    const reduced = reduceSourceFact(projection, fact);
+    current = reduced.projection;
+    if (!reduced.changed) continue;
+
+    const snapshot = toFixtureSnapshot(reduced.projection);
+    const revision = reduced.projection.revision;
+    const eventName: FixtureStreamEvent["event"] =
+      !reconciliation && reduced.moment
+        ? existed
+          ? "moment.revised"
+          : "moment.created"
+        : "snapshot";
+    const event: FixtureStreamEvent = {
+      event: eventName,
+      id: `${input.fixture.fixtureId}:revision:${revision}`,
+      ...(!reconciliation && reduced.moment ? { moment: reduced.moment } : {}),
+      snapshot,
+    };
+    const celebratesGoal = reduced.moment?.celebratesGoal === true;
+    const alertsFan = Boolean(
+      reduced.moment &&
+      reduced.moment.status === "confirmed" &&
+      (celebratesGoal ||
+        reduced.moment.kind === "card.red" ||
+        reduced.moment.kind === "phase.full_time"),
+    );
+    const payload = {
+      celebratesGoal,
+      deliveryIntent: input.deliveryIntent,
+      event,
+      fact,
+      fixtureId: input.fixture.fixtureId,
+      mode: input.mode,
+      moment: reduced.moment,
+      revision,
+      snapshot,
+    };
+    const topics = reconciliation
+      ? []
+      : [
+          "fixture.broadcast",
+          ...(alertsFan ? ["push.candidate", "commentary.prepare"] : []),
+          "room.project",
+          "memory.project",
+        ];
+    derived.push({
+      event,
+      plan: {
+        event: {
+          id: event.id,
+          payload: event,
+          type: event.event,
+        },
+        ...(!reconciliation && reduced.moment
+          ? {
+              moment: {
+                id: reduced.moment.familyId,
+                kind: reduced.moment.kind,
+                payload: reduced.moment,
+                revision: reduced.moment.revision,
+              },
+            }
+          : {}),
+        outbox: topics.map((topic) => ({
+          id: outboxId(input.mode, input.fixture.fixtureId, revision, topic),
+          idempotencyKey: `${input.fixture.fixtureId}:${revision}:${topic}`,
+          payload,
+          topic,
+        })),
+        projection: {
+          payload: reduced.projection,
+          revision,
+        },
+      },
+    });
+  }
+  return derived;
+}
+
+/**
+ * Produces all deterministic canonical plans for one raw delivery. A TxLINE
+ * action may expand into kickoff, a primary action, and stat deltas; the
+ * database applies the returned plans in sequence inside its frame boundary.
+ */
+export function createFixtureSourceEnvelopePlanDeriver(
+  input: FixtureSourceEnvelopePlanInput,
+): (
+  current: FixtureProjectionRecord | null,
+) => readonly SourceEnvelopeCommitPlan[] {
+  return (current) =>
+    deriveFixtureSourceEnvelopePlans(input, current).map(({ plan }) => plan);
+}
+
 export function createFixtureProcessor(
   options: CreateFixtureProcessorOptions,
 ): FixtureProcessor {
@@ -372,103 +511,27 @@ export function createFixtureProcessor(
           ? input.fact.occurredAt
           : input.fact.receivedAt;
       let committedEvent: FixtureStreamEvent | undefined;
+      const planInput: FixtureSourceEnvelopePlanInput = {
+        deliveryIntent: input.deliveryIntent,
+        facts: [input.fact],
+        fixture: input.fixture,
+        mode: input.mode,
+      };
       const persisted = await options.repository.processSourceEnvelope({
         derive: (currentRecord) => {
-          const current = currentRecord
-            ? storedProjection(
-                currentRecord,
-                input.fixture,
-                input.fact.provenance,
-              )
-            : createFixtureProjection({
-                awayTeam: input.fixture.awayTeam,
-                fixtureId: input.fixture.fixtureId,
-                homeTeam: input.fixture.homeTeam,
-                kickoffAt: input.fixture.kickoffAt,
-                observedAt: input.fact.receivedAt,
-                provenance: input.fact.provenance,
-              });
-          const existed = eventAlreadyExists(current, input.fact);
-          const reduced = reduceSourceFact(current, input.fact);
-          if (!reduced.changed) return null;
-
-          const snapshot = toFixtureSnapshot(reduced.projection);
-          const revision = reduced.projection.revision;
-          const eventName: FixtureStreamEvent["event"] = reduced.moment
-            ? existed
-              ? "moment.revised"
-              : "moment.created"
-            : "snapshot";
-          const event: FixtureStreamEvent = {
-            event: eventName,
-            id: `${input.fixture.fixtureId}:revision:${revision}`,
-            ...(reduced.moment ? { moment: reduced.moment } : {}),
-            snapshot,
-          };
-          committedEvent = event;
-          const celebratesGoal = reduced.moment?.celebratesGoal === true;
-          const alertsFan = Boolean(
-            reduced.moment &&
-            reduced.moment.status === "confirmed" &&
-            (celebratesGoal ||
-              reduced.moment.kind === "card.red" ||
-              reduced.moment.kind === "phase.full_time"),
+          const derived = deriveFixtureSourceEnvelopePlans(
+            planInput,
+            currentRecord,
           );
-          const payload = {
-            celebratesGoal,
-            deliveryIntent: input.deliveryIntent,
-            event,
-            fact: input.fact,
-            fixtureId: input.fixture.fixtureId,
-            mode: input.mode,
-            moment: reduced.moment,
-            revision,
-            snapshot,
-          };
-          const topics =
-            input.deliveryIntent === "reconcile"
-              ? ["fixture.reconcile", "room.reconcile", "memory.reconcile"]
-              : [
-                  "fixture.broadcast",
-                  ...(alertsFan
-                    ? ["push.candidate", "commentary.prepare"]
-                    : []),
-                  "room.project",
-                  "memory.project",
-                ];
-
-          return {
-            event: {
-              id: event.id,
-              payload: event,
-              type: event.event,
-            },
-            ...(reduced.moment
-              ? {
-                  moment: {
-                    id: reduced.moment.familyId,
-                    kind: reduced.moment.kind,
-                    payload: reduced.moment,
-                    revision: reduced.moment.revision,
-                  },
-                }
-              : {}),
-            outbox: topics.map((topic) => ({
-              id: outboxId(
-                input.mode,
-                input.fixture.fixtureId,
-                revision,
-                topic,
-              ),
-              idempotencyKey: `${input.fixture.fixtureId}:${revision}:${topic}`,
-              payload,
-              topic,
-            })),
-            projection: {
-              payload: reduced.projection,
-              revision,
-            },
-          };
+          const first = derived[0];
+          if (!first) return null;
+          if (derived.length !== 1) {
+            throw new Error(
+              "Single-fact fixture processing must produce at most one plan",
+            );
+          }
+          committedEvent = first.event;
+          return first.plan;
         },
         fixtureId: input.fixture.fixtureId,
         mode: input.mode,

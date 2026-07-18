@@ -2,11 +2,22 @@ export const TEAM_CODES = ["ARG", "BRA", "ENG", "ESP", "FRA", "JPN"] as const;
 export const SIMULATION_SOURCE_LABEL =
   "SIMULATION · TXLINE-SHAPED DATA" as const;
 export const TXLINE_DEVNET_SOURCE_LABEL = "TXLINE · DEVNET SOURCE" as const;
+export const TXLINE_RECORDED_SOURCE_LABEL = "RECORDED · TXLINE DATA" as const;
 export const TEAM_CODE_PATTERN = /^[A-Z0-9][A-Z0-9-]{1,19}$/;
 
 export type KnownTeamCode = (typeof TEAM_CODES)[number];
 export type TeamCode = string;
-export type DataProvenance = "synthetic_txline_shaped" | "live_txline";
+/**
+ * `recorded_txline_authorised` is historical TxLINE data retained under an
+ * explicit right. It is authoritative for Memory/Replay, but never a source
+ * for realtime fan effects.
+ *
+ * `synthetic_txline_shaped` remains only for the isolated legacy experience
+ * runtime while that surface is migrated; public durable reads use the two
+ * TxLINE provenance values above.
+ */
+export type DataProvenance =
+  "synthetic_txline_shaped" | "live_txline" | "recorded_txline_authorised";
 
 export interface TeamSummary {
   code: TeamCode;
@@ -200,7 +211,9 @@ export interface FixtureSnapshot {
   decidedBy?: MatchDecision | null | undefined;
   provenance: DataProvenance;
   sourceLabel:
-    typeof SIMULATION_SOURCE_LABEL | typeof TXLINE_DEVNET_SOURCE_LABEL;
+    | typeof SIMULATION_SOURCE_LABEL
+    | typeof TXLINE_DEVNET_SOURCE_LABEL
+    | typeof TXLINE_RECORDED_SOURCE_LABEL;
   lastEvent: CanonicalMoment | null;
   revision: number;
   updatedAt: string;

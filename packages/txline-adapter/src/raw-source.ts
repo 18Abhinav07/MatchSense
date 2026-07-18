@@ -20,6 +20,16 @@ export interface TxlineRawRecord {
   payload: unknown;
 }
 
+/**
+ * One committed SSE frame. Supplying this handler moves the durable boundary
+ * from "record then cursor" to one downstream transaction that owns both.
+ */
+export interface TxlineRawLiveFrame {
+  expectedCursor: string | null;
+  nextCursor: string;
+  records: readonly TxlineRawRecord[];
+}
+
 export type TxlineRawSourceStateName =
   | "authenticating"
   | "connecting"
@@ -46,14 +56,15 @@ export interface TxlineRawSourceWarning {
 }
 
 export interface TxlineRawScoreSourceOptions {
-  advanceCursor: (
-    expected: string | null,
-    next: string,
-  ) => boolean | Promise<boolean>;
+  advanceCursor?:
+    | ((expected: string | null, next: string) => boolean | Promise<boolean>)
+    | undefined;
   client: TxlineAuthenticatedClient;
   fixtureIds: readonly string[];
   loadCursor: () => Promise<string | null>;
   now?: (() => string) | undefined;
+  onLiveFrame?:
+    ((frame: TxlineRawLiveFrame) => boolean | Promise<boolean>) | undefined;
   onRawRecord: (record: TxlineRawRecord) => void | Promise<void>;
   onState?: ((state: TxlineRawSourceState) => void) | undefined;
   onWarning?: ((warning: TxlineRawSourceWarning) => void) | undefined;
@@ -121,6 +132,11 @@ export function createTxlineRawScoreSource(
   if (options.fixtureIds.some((fixtureId) => fixtureId.length === 0)) {
     throw new Error("TxLINE fixture IDs must not be empty");
   }
+  if (!options.onLiveFrame && !options.advanceCursor) {
+    throw new Error(
+      "TxLINE raw source requires an atomic frame handler or cursor callback",
+    );
+  }
   const now = options.now ?? (() => new Date().toISOString());
   const random = options.random ?? Math.random;
   const sleep = options.sleep ?? defaultSleep;
@@ -146,11 +162,16 @@ export function createTxlineRawScoreSource(
     payload: unknown,
     metadata: Omit<TxlineRawRecordMetadata, "receivedAt">,
   ) => {
-    await options.onRawRecord({
-      metadata: { ...metadata, receivedAt: now() },
-      payload,
-    });
+    await options.onRawRecord(record(payload, metadata));
   };
+
+  const record = (
+    payload: unknown,
+    metadata: Omit<TxlineRawRecordMetadata, "receivedAt">,
+  ): TxlineRawRecord => ({
+    metadata: { ...metadata, receivedAt: now() },
+    payload,
+  });
 
   const reconcile = async (signal: AbortSignal, attempt: number) => {
     for (const fixtureId of options.fixtureIds) {
@@ -268,18 +289,42 @@ export function createTxlineRawScoreSource(
           );
           payloads = [];
         }
-        for (const payload of payloads) {
-          if (signal.aborted) return;
-          await deliver(payload, {
+        const records = payloads.map((payload) =>
+          record(payload, {
             delivery: "live",
             requestedFixtureId: null,
             sourcePath: path,
             sseEventId: frame.id,
-          });
-        }
+          }),
+        );
         if (signal.aborted) return;
-        if (frame.id !== null && frame.id !== cursor) {
-          const advanced = await options.advanceCursor(cursor, frame.id);
+        if (options.onLiveFrame && frame.id !== null) {
+          if (frame.id !== cursor) {
+            const advanced = await options.onLiveFrame({
+              expectedCursor: cursor,
+              nextCursor: frame.id,
+              records,
+            });
+            if (!advanced) {
+              warn(
+                "cursor_conflict",
+                `TxLINE cursor changed before ${frame.id} could be committed`,
+                "live",
+              );
+              throw new TxlineCursorConflictError(
+                `TxLINE cursor compare-and-set failed for ${frame.id}`,
+              );
+            }
+            cursor = frame.id;
+          }
+        } else {
+          for (const raw of records) {
+            if (signal.aborted) return;
+            await options.onRawRecord(raw);
+          }
+        }
+        if (!options.onLiveFrame && frame.id !== null && frame.id !== cursor) {
+          const advanced = await options.advanceCursor!(cursor, frame.id);
           if (!advanced) {
             warn(
               "cursor_conflict",

@@ -93,6 +93,22 @@ export interface CommitFixtureScheduleInput {
   sourceFence?: SourceFence;
 }
 
+/** A schedule observation is durable audit evidence, not a match event. */
+export interface FixtureScheduleObservationWrite {
+  observedAt: string;
+  payload: unknown;
+  responseHash: string;
+  rightsGrantId: string;
+  source: string;
+  sourcePath: string;
+}
+
+export interface ObserveFixtureScheduleInput {
+  fixture: FixtureUpsert;
+  observation: FixtureScheduleObservationWrite;
+  sourceFence?: SourceFence;
+}
+
 export interface CommitRawSourceRecordInput {
   fixtureId: string;
   mode: PersistenceMode;
@@ -106,6 +122,11 @@ export type CommitRawSourceRecordResult =
 export type CommitFixtureScheduleResult =
   | { kind: "duplicate" }
   | { fixture: FixtureRecord; kind: "committed" }
+  | { kind: "fenced" };
+
+export type ObserveFixtureScheduleResult =
+  | { fixture: FixtureRecord; kind: "committed"; metadataUpdated: boolean }
+  | { fixture: FixtureRecord; kind: "duplicate"; metadataUpdated: false }
   | { kind: "fenced" };
 
 export type CommitSourceChangeResult =
@@ -137,6 +158,53 @@ export interface ProcessSourceEnvelopeInput {
   raw: RawSourceRecordWrite;
   sourceFence?: SourceFence;
 }
+
+/**
+ * A frame is the atomic durable boundary for a live SSE event. The raw source
+ * rows, any derived canonical truth, and the source cursor all either commit
+ * together or remain replayable from the previous cursor.
+ */
+export interface CollectorFrameDelivery {
+  derive?: (
+    current: FixtureProjectionRecord | null,
+  ) => readonly SourceEnvelopeCommitPlan[];
+  fixtureId: string;
+  raw: RawSourceRecordWrite;
+}
+
+export interface CommitCollectorFrameInput {
+  cursor?:
+    | {
+        expectedCursor: string | null;
+        nextCursor: string;
+      }
+    | undefined;
+  deliveries: readonly CollectorFrameDelivery[];
+  mode: PersistenceMode;
+  sourceFence: SourceFence;
+}
+
+export type CollectorFrameDeliveryResult =
+  | { kind: "duplicate" }
+  | { kind: "accepted_no_change" }
+  | {
+      eventSequences: readonly number[];
+      kind: "committed";
+      revisions: readonly number[];
+    };
+
+export type CommitCollectorFrameResult =
+  | { kind: "fenced" }
+  | { currentCursor: string | null; kind: "conflict" }
+  | {
+      cursor: SourceCursorRecord;
+      deliveries: readonly CollectorFrameDeliveryResult[];
+      kind: "advanced";
+    }
+  | {
+      deliveries: readonly CollectorFrameDeliveryResult[];
+      kind: "committed";
+    };
 
 export type ProcessSourceEnvelopeResult =
   | { kind: "duplicate" }
@@ -177,6 +245,9 @@ export class FixtureRevisionConflictError extends Error {
 }
 
 export interface FixtureTruthRepository {
+  commitCollectorFrame(
+    input: CommitCollectorFrameInput,
+  ): Promise<CommitCollectorFrameResult>;
   commitFixtureSchedule(
     input: CommitFixtureScheduleInput,
   ): Promise<CommitFixtureScheduleResult>;
@@ -200,6 +271,9 @@ export interface FixtureTruthRepository {
     fixtureId: string;
     mode: PersistenceMode;
   }): Promise<FixtureProjectionRecord | null>;
+  observeFixtureSchedule(
+    input: ObserveFixtureScheduleInput,
+  ): Promise<ObserveFixtureScheduleResult>;
   list(input: {
     limit?: number;
     mode: PersistenceMode;
@@ -705,10 +779,390 @@ RETURNING ${fixtureColumns};`,
   return parseFixture(row);
 }
 
+function assertScheduleObservation(
+  mode: PersistenceMode,
+  observation: FixtureScheduleObservationWrite,
+) {
+  if (mode === "demo") {
+    throw new Error("Schedule observations require live or recorded mode");
+  }
+  for (const [value, label] of [
+    [observation.observedAt, "Schedule observed at"],
+    [observation.rightsGrantId, "Schedule rights grant id"],
+    [observation.source, "Schedule source"],
+    [observation.sourcePath, "Schedule source path"],
+  ] as const) {
+    if (value.trim().length === 0) throw new Error(`${label} is required`);
+  }
+  if (!/^[a-f0-9]{64}$/u.test(observation.responseHash)) {
+    throw new Error("Schedule response hash must be lowercase SHA-256 hex");
+  }
+}
+
+function scheduleMayUpdateFixture(status: string) {
+  return status === "scheduled" || status === "upcoming";
+}
+
+async function insertScheduleObservation(
+  transaction: SqlExecutor,
+  input: {
+    fixtureId: string;
+    mode: PersistenceMode;
+    observation: FixtureScheduleObservationWrite;
+  },
+) {
+  const rows = await transaction.unsafe(
+    `INSERT INTO matchsense.fixture_schedule_observations (
+  mode, fixture_id, source, source_path, observed_at, response_hash,
+  rights_grant_id, payload
+)
+VALUES ($1, $2, $3, $4, $5::timestamptz, $6, $7, $8::jsonb)
+ON CONFLICT (mode, fixture_id, source, observed_at, response_hash) DO NOTHING
+RETURNING fixture_id;`,
+    [
+      input.mode,
+      input.fixtureId,
+      input.observation.source,
+      input.observation.sourcePath,
+      input.observation.observedAt,
+      input.observation.responseHash,
+      input.observation.rightsGrantId,
+      json(input.observation.payload),
+    ],
+  );
+  return rows[0] !== undefined;
+}
+
+async function applyCollectorPlans(
+  transaction: SqlExecutor,
+  input: {
+    derive: (
+      current: FixtureProjectionRecord | null,
+    ) => readonly SourceEnvelopeCommitPlan[];
+    fixtureId: string;
+    mode: PersistenceMode;
+    raw: RawSourceRecordWrite;
+  },
+): Promise<CollectorFrameDeliveryResult> {
+  const fixtureRows = await transaction.unsafe(
+    `SELECT id
+FROM matchsense.fixtures
+WHERE mode = $1 AND id = $2
+FOR UPDATE;`,
+    [input.mode, input.fixtureId],
+  );
+  if (!fixtureRows[0]) throw new Error("Fixture does not exist");
+
+  const projectionRows = await transaction.unsafe(
+    `SELECT ${projectionColumns}
+FROM matchsense.fixture_projections
+WHERE mode = $1 AND fixture_id = $2;`,
+    [input.mode, input.fixtureId],
+  );
+  let current = projectionRows[0] ? parseProjection(projectionRows[0]) : null;
+  const plans = input.derive(current);
+  if (plans.length === 0) return { kind: "accepted_no_change" };
+
+  if (
+    input.raw.deliveryIntent === "reconcile" &&
+    plans.some((plan) => plan.moment !== undefined || plan.outbox.length > 0)
+  ) {
+    throw new Error(
+      "Reconciliation delivery cannot create Moments or outbox effects",
+    );
+  }
+
+  const eventSequences: number[] = [];
+  const revisions: number[] = [];
+  for (const plan of plans) {
+    const currentRevision = current?.revision ?? 0;
+    const nextRevision = currentRevision + 1;
+    if (plan.projection.revision !== nextRevision) {
+      throw new Error("Derived projection must advance exactly once");
+    }
+    if (plan.moment && plan.moment.revision !== nextRevision) {
+      throw new Error("Derived Moment must use the fixture revision");
+    }
+
+    await transaction.unsafe(
+      `INSERT INTO matchsense.fixture_projections (
+  mode, fixture_id, revision, source_sequence, payload
+)
+VALUES ($1, $2, $3, $4, $5::jsonb)
+ON CONFLICT (mode, fixture_id) DO UPDATE SET
+  revision = EXCLUDED.revision,
+  source_sequence = EXCLUDED.source_sequence,
+  payload = EXCLUDED.payload,
+  updated_at = clock_timestamp();`,
+      [
+        input.mode,
+        input.fixtureId,
+        plan.projection.revision,
+        input.raw.sourceSequence,
+        json(plan.projection.payload),
+      ],
+    );
+
+    if (plan.moment) {
+      await transaction.unsafe(
+        `INSERT INTO matchsense.canonical_moments (
+  mode, fixture_id, id, kind, current_revision
+)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (mode, fixture_id, id) DO UPDATE SET
+  current_revision = EXCLUDED.current_revision;`,
+        [
+          input.mode,
+          input.fixtureId,
+          plan.moment.id,
+          plan.moment.kind,
+          plan.moment.revision,
+        ],
+      );
+      await transaction.unsafe(
+        `INSERT INTO matchsense.moment_revisions (
+  mode, fixture_id, moment_id, revision, source_record_id, payload
+)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb);`,
+        [
+          input.mode,
+          input.fixtureId,
+          plan.moment.id,
+          plan.moment.revision,
+          input.raw.id,
+          json(plan.moment.payload),
+        ],
+      );
+    }
+
+    const eventRows = await transaction.unsafe(
+      `INSERT INTO matchsense.fixture_events (
+  mode, fixture_id, sequence, event_id, event_type, payload, source_record_id
+)
+SELECT $1, $2, COALESCE(MAX(sequence), 0) + 1, $3, $4, $5::jsonb, $6
+FROM matchsense.fixture_events
+WHERE mode = $1 AND fixture_id = $2
+RETURNING sequence;`,
+      [
+        input.mode,
+        input.fixtureId,
+        plan.event.id,
+        plan.event.type,
+        json(plan.event.payload),
+        input.raw.id,
+      ],
+    );
+    const eventRow = eventRows[0];
+    if (!eventRow) throw new Error("Fixture event insert returned no row");
+    eventSequences.push(safeInteger(eventRow.sequence, "sequence"));
+
+    for (const message of plan.outbox) {
+      await transaction.unsafe(
+        `INSERT INTO matchsense.outbox (
+  mode, id, fixture_id, topic, idempotency_key, payload, available_at, source_record_id
+)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb,
+  COALESCE($7::timestamptz, clock_timestamp()), $8);`,
+        [
+          input.mode,
+          message.id,
+          input.fixtureId,
+          message.topic,
+          message.idempotencyKey,
+          json(message.payload),
+          message.availableAt ?? null,
+          input.raw.id,
+        ],
+      );
+    }
+
+    revisions.push(plan.projection.revision);
+    current = {
+      fixtureId: input.fixtureId,
+      mode: input.mode,
+      payload: plan.projection.payload,
+      revision: plan.projection.revision,
+      sourceSequence: input.raw.sourceSequence,
+      updatedAt: input.raw.receivedAt,
+    };
+  }
+
+  return { eventSequences, kind: "committed", revisions };
+}
+
+async function advanceCursorWithLockedFence(
+  transaction: SqlExecutor,
+  input: FencedSourceLeaseKey & {
+    cursorValue: string;
+    expectedCursor: string | null;
+  },
+): Promise<AdvanceSourceCursorResult> {
+  const cursorRows = await transaction.unsafe(
+    `SELECT ${sourceCursorColumns}
+FROM matchsense.source_cursors
+WHERE mode = $1 AND source = $2 AND stream_key = $3
+FOR UPDATE;`,
+    [input.mode, input.source, input.streamKey],
+  );
+  const currentCursor = cursorRows[0]
+    ? requiredString(cursorRows[0], "cursor_value")
+    : null;
+  if (currentCursor !== input.expectedCursor) {
+    return { currentCursor, kind: "conflict" };
+  }
+
+  const advancedRows = await transaction.unsafe(
+    `INSERT INTO matchsense.source_cursors AS source_cursors (
+  mode, source, stream_key, cursor_value, fencing_token
+)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (mode, source, stream_key) DO UPDATE SET
+  cursor_value = EXCLUDED.cursor_value,
+  fencing_token = EXCLUDED.fencing_token,
+  updated_at = clock_timestamp()
+WHERE source_cursors.cursor_value IS NOT DISTINCT FROM $6
+RETURNING ${sourceCursorColumns};`,
+    [
+      input.mode,
+      input.source,
+      input.streamKey,
+      input.cursorValue,
+      input.fencingToken,
+      input.expectedCursor,
+    ],
+  );
+  if (advancedRows[0]) {
+    return { cursor: parseSourceCursor(advancedRows[0]), kind: "advanced" };
+  }
+
+  const racedRows = await transaction.unsafe(
+    `SELECT ${sourceCursorColumns}
+FROM matchsense.source_cursors
+WHERE mode = $1 AND source = $2 AND stream_key = $3;`,
+    [input.mode, input.source, input.streamKey],
+  );
+  return {
+    currentCursor: racedRows[0]
+      ? requiredString(racedRows[0], "cursor_value")
+      : null,
+    kind: "conflict",
+  };
+}
+
+/**
+ * Acquires the cursor row before any durable delivery write. A caller that
+ * observes a stale cursor must return without committing raw truth; otherwise
+ * a reconnect could acknowledge an SSE frame that belongs to another worker.
+ */
+async function lockExpectedCursor(
+  transaction: SqlExecutor,
+  input: SourceStreamKey & { expectedCursor: string | null },
+): Promise<
+  { kind: "ready" } | { currentCursor: string | null; kind: "conflict" }
+> {
+  const cursorRows = await transaction.unsafe(
+    `SELECT ${sourceCursorColumns}
+FROM matchsense.source_cursors
+WHERE mode = $1 AND source = $2 AND stream_key = $3
+FOR UPDATE;`,
+    [input.mode, input.source, input.streamKey],
+  );
+  const currentCursor = cursorRows[0]
+    ? requiredString(cursorRows[0], "cursor_value")
+    : null;
+  return currentCursor === input.expectedCursor
+    ? { kind: "ready" }
+    : { currentCursor, kind: "conflict" };
+}
+
 export function createFixtureTruthRepository(
   client: RepositoryClient,
 ): FixtureTruthRepository {
   return {
+    commitCollectorFrame: async (input) => {
+      assertFencingToken(input.sourceFence.fencingToken);
+      for (const delivery of input.deliveries) {
+        assertRawSourceRecord(input.mode, delivery.raw);
+        if (
+          delivery.raw.source !== input.sourceFence.source ||
+          (delivery.raw.streamKey ?? delivery.raw.source) !==
+            input.sourceFence.streamKey
+        ) {
+          throw new Error(
+            "Collector frame delivery does not match the fenced source stream",
+          );
+        }
+        if (delivery.raw.canonicalEligible !== false && !delivery.derive) {
+          throw new Error(
+            "Canonical collector delivery requires a deterministic reducer",
+          );
+        }
+      }
+      return client.begin(async (transaction) => {
+        if (
+          !(await lockCurrentSourceFence(transaction, {
+            mode: input.mode,
+            rawSource: input.sourceFence.source,
+            sourceFence: input.sourceFence,
+          }))
+        ) {
+          return { kind: "fenced" };
+        }
+
+        if (input.cursor) {
+          const cursor = await lockExpectedCursor(transaction, {
+            expectedCursor: input.cursor.expectedCursor,
+            mode: input.mode,
+            source: input.sourceFence.source,
+            streamKey: input.sourceFence.streamKey,
+          });
+          if (cursor.kind === "conflict") {
+            return { currentCursor: cursor.currentCursor, kind: "conflict" };
+          }
+        }
+
+        const deliveries: CollectorFrameDeliveryResult[] = [];
+        for (const delivery of input.deliveries) {
+          const inserted = await insertRawSourceRecord(transaction, {
+            fixtureId: delivery.fixtureId,
+            mode: input.mode,
+            raw: delivery.raw,
+          });
+          if (!inserted) {
+            deliveries.push({ kind: "duplicate" });
+            continue;
+          }
+          if (delivery.raw.canonicalEligible === false) {
+            deliveries.push({ kind: "accepted_no_change" });
+            continue;
+          }
+          deliveries.push(
+            await applyCollectorPlans(transaction, {
+              derive: delivery.derive!,
+              fixtureId: delivery.fixtureId,
+              mode: input.mode,
+              raw: delivery.raw,
+            }),
+          );
+        }
+
+        if (!input.cursor) return { deliveries, kind: "committed" };
+        const cursor = await advanceCursorWithLockedFence(transaction, {
+          cursorValue: input.cursor.nextCursor,
+          expectedCursor: input.cursor.expectedCursor,
+          fencingToken: input.sourceFence.fencingToken,
+          holderId: input.sourceFence.holderId,
+          mode: input.mode,
+          source: input.sourceFence.source,
+          streamKey: input.sourceFence.streamKey,
+        });
+        if (cursor.kind === "conflict") {
+          return { currentCursor: cursor.currentCursor, kind: "conflict" };
+        }
+        if (cursor.kind === "fenced") return { kind: "fenced" };
+        return { cursor: cursor.cursor, deliveries, kind: "advanced" };
+      });
+    },
     commitFixtureSchedule: async (input) => {
       assertModeProvenance(input.fixture.mode, input.fixture.provenance);
       assertRawSourceRecord(input.fixture.mode, input.raw);
@@ -732,6 +1186,66 @@ export function createFixtureTruthRepository(
         return {
           fixture: await upsertFixture(transaction, input.fixture),
           kind: "committed",
+        };
+      });
+    },
+    observeFixtureSchedule: async (input) => {
+      assertModeProvenance(input.fixture.mode, input.fixture.provenance);
+      assertScheduleObservation(input.fixture.mode, input.observation);
+      return client.begin(async (transaction) => {
+        if (
+          !(await lockCurrentSourceFence(transaction, {
+            mode: input.fixture.mode,
+            rawSource: input.observation.source,
+            sourceFence: input.sourceFence,
+          }))
+        ) {
+          return { kind: "fenced" };
+        }
+
+        const existingRows = await transaction.unsafe(
+          `SELECT ${fixtureColumns}
+FROM matchsense.fixtures
+WHERE mode = $1 AND id = $2
+FOR UPDATE;`,
+          [input.fixture.mode, input.fixture.id],
+        );
+        const existing = existingRows[0] ? parseFixture(existingRows[0]) : null;
+        if (!existing) {
+          const fixture = await upsertFixture(transaction, input.fixture);
+          const observed = await insertScheduleObservation(transaction, {
+            fixtureId: fixture.id,
+            mode: input.fixture.mode,
+            observation: input.observation,
+          });
+          return observed
+            ? { fixture, kind: "committed", metadataUpdated: true }
+            : { fixture, kind: "duplicate", metadataUpdated: false };
+        }
+
+        const observed = await insertScheduleObservation(transaction, {
+          fixtureId: existing.id,
+          mode: input.fixture.mode,
+          observation: input.observation,
+        });
+        if (!observed) {
+          return {
+            fixture: existing,
+            kind: "duplicate",
+            metadataUpdated: false,
+          };
+        }
+        if (!scheduleMayUpdateFixture(existing.status)) {
+          return {
+            fixture: existing,
+            kind: "committed",
+            metadataUpdated: false,
+          };
+        }
+        return {
+          fixture: await upsertFixture(transaction, input.fixture),
+          kind: "committed",
+          metadataUpdated: true,
         };
       });
     },
@@ -1188,59 +1702,7 @@ FOR UPDATE;`,
         );
         if (!leaseRows[0]) return { kind: "fenced" };
 
-        const cursorRows = await transaction.unsafe(
-          `SELECT ${sourceCursorColumns}
-FROM matchsense.source_cursors
-WHERE mode = $1 AND source = $2 AND stream_key = $3
-FOR UPDATE;`,
-          [input.mode, input.source, input.streamKey],
-        );
-        const currentCursor = cursorRows[0]
-          ? requiredString(cursorRows[0], "cursor_value")
-          : null;
-        if (currentCursor !== input.expectedCursor) {
-          return { currentCursor, kind: "conflict" };
-        }
-
-        const advancedRows = await transaction.unsafe(
-          `INSERT INTO matchsense.source_cursors AS source_cursors (
-  mode, source, stream_key, cursor_value, fencing_token
-)
-VALUES ($1, $2, $3, $4, $5)
-ON CONFLICT (mode, source, stream_key) DO UPDATE SET
-  cursor_value = EXCLUDED.cursor_value,
-  fencing_token = EXCLUDED.fencing_token,
-  updated_at = clock_timestamp()
-WHERE source_cursors.cursor_value IS NOT DISTINCT FROM $6
-RETURNING ${sourceCursorColumns};`,
-          [
-            input.mode,
-            input.source,
-            input.streamKey,
-            input.cursorValue,
-            input.fencingToken,
-            input.expectedCursor,
-          ],
-        );
-        if (advancedRows[0]) {
-          return {
-            cursor: parseSourceCursor(advancedRows[0]),
-            kind: "advanced",
-          };
-        }
-
-        const racedRows = await transaction.unsafe(
-          `SELECT ${sourceCursorColumns}
-FROM matchsense.source_cursors
-WHERE mode = $1 AND source = $2 AND stream_key = $3;`,
-          [input.mode, input.source, input.streamKey],
-        );
-        return {
-          currentCursor: racedRows[0]
-            ? requiredString(racedRows[0], "cursor_value")
-            : null,
-          kind: "conflict",
-        };
+        return advanceCursorWithLockedFence(transaction, input);
       });
     },
     getCursor: async (input) => {

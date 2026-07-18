@@ -22,6 +22,7 @@ type RepositoryModule = {
     upsert(input: Record<string, unknown>): Promise<unknown>;
   };
   createFixtureTruthRepository?: (client: TestClient) => {
+    commitCollectorFrame(input: Record<string, unknown>): Promise<unknown>;
     commitFixtureSchedule(input: Record<string, unknown>): Promise<unknown>;
     commitRawSourceRecord(input: Record<string, unknown>): Promise<unknown>;
     commitSourceChange(input: Record<string, unknown>): Promise<unknown>;
@@ -29,6 +30,7 @@ type RepositoryModule = {
     get(input: Record<string, unknown>): Promise<unknown>;
     getLatestProjection(input: Record<string, unknown>): Promise<unknown>;
     list(input: Record<string, unknown>): Promise<unknown>;
+    observeFixtureSchedule(input: Record<string, unknown>): Promise<unknown>;
     upsert(input: Record<string, unknown>): Promise<unknown>;
   };
   createOutboxRepository?: (client: TestClient) => {
@@ -193,6 +195,13 @@ const liveFixtureInput = {
   provenance: "live_txline",
 };
 
+const liveFinalFixtureRow = {
+  ...fixtureRow,
+  mode: "live",
+  provenance: "live_txline",
+  status: "full_time",
+};
+
 const liveRaw = {
   ...sourceChange.raw,
   provenance: "live_txline",
@@ -281,6 +290,58 @@ describe("fixture truth repository", () => {
       duplicateRepository?.commitFixtureSchedule(input),
     ).resolves.toEqual({ kind: "duplicate" });
     expect(duplicate.queries).toHaveLength(1);
+  });
+
+  it("keeps schedule observations out of the match-event archive and cannot downgrade final truth", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [sourceLeaseRow];
+      }
+      if (query.includes("FROM matchsense.fixtures")) {
+        return [liveFinalFixtureRow];
+      }
+      if (
+        query.includes("INSERT INTO matchsense.fixture_schedule_observations")
+      ) {
+        return [{ fixture_id: "fx-1" }];
+      }
+      if (query.includes("INSERT INTO matchsense.fixtures")) {
+        throw new Error(
+          "A final fixture must not be rewritten by schedule data",
+        );
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+
+    await expect(
+      repository?.observeFixtureSchedule({
+        fixture: liveFixtureInput,
+        observation: {
+          observedAt: "2026-07-18T12:00:00.000Z",
+          payload: { FixtureId: "fx-1", StartTime: 1_784_408_400_000 },
+          responseHash: "d".repeat(64),
+          rightsGrantId: "grant-1",
+          source: "txline",
+          sourcePath: "/api/fixtures/snapshot?competitionId=72",
+        },
+        sourceFence: liveSourceFence,
+      }),
+    ).resolves.toMatchObject({
+      fixture: { status: "full_time" },
+      kind: "committed",
+      metadataUpdated: false,
+    });
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("INSERT INTO matchsense.fixture_schedule_observations"),
+      ),
+    ).toBe(true);
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("INSERT INTO matchsense.raw_source_records"),
+      ),
+    ).toBe(false);
   });
 
   it("commits a raw-only update without creating projection, Moment, event, or outbox", async () => {
@@ -481,6 +542,153 @@ describe("fixture truth repository", () => {
     ]);
     expect(fake.queries[0]?.query).toContain("sequence > $3");
     expect(fake.queries[0]?.query).toContain("ORDER BY sequence ASC");
+  });
+
+  it("commits raw delivery, canonical truth, and its fenced stream cursor in one transaction", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [sourceLeaseRow];
+      }
+      if (query.includes("FROM matchsense.source_cursors")) return [];
+      if (query.includes("INSERT INTO matchsense.raw_source_records")) {
+        return [{ id: "raw-frame-1" }];
+      }
+      if (query.includes("SELECT id") && query.includes("FOR UPDATE")) {
+        return [{ id: "fx-1" }];
+      }
+      if (query.includes("FROM matchsense.fixture_projections")) return [];
+      if (query.includes("INSERT INTO matchsense.fixture_events")) {
+        return [{ sequence: "1" }];
+      }
+      if (query.includes("INSERT INTO matchsense.source_cursors")) {
+        return [
+          {
+            ...sourceCursorRow,
+            cursor_value: "cursor:51",
+          },
+        ];
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const raw = {
+      ...liveRaw,
+      canonicalEligible: true,
+      deliveryIntent: "realtime" as const,
+      deliveryKey: "e".repeat(64),
+      id: "raw-frame-1",
+      orderingKey: "00000000000000000051",
+      payload: { Action: "goal", FixtureId: "fx-1" },
+      rawRetention: "authorised_raw" as const,
+      responseHash: "f".repeat(64),
+      rightsGrantId: "grant-1",
+      sourcePath: "/api/scores/stream",
+      streamKey: "scores:mainnet",
+    };
+
+    await expect(
+      repository?.commitCollectorFrame({
+        deliveries: [
+          {
+            derive: () => [
+              {
+                event: {
+                  id: "event-frame-1",
+                  payload: { event: "moment.created" },
+                  type: "moment.created",
+                },
+                moment: {
+                  id: "goal-family-1",
+                  kind: "goal",
+                  payload: { identity: "goal-family-1:1" },
+                  revision: 1,
+                },
+                outbox: [
+                  {
+                    id: "outbox-frame-1",
+                    idempotencyKey: "goal-family-1:1:fixture.broadcast",
+                    payload: { revision: 1 },
+                    topic: "fixture.broadcast",
+                  },
+                ],
+                projection: { payload: { revision: 1 }, revision: 1 },
+              },
+            ],
+            fixtureId: "fx-1",
+            raw,
+          },
+        ],
+        cursor: { expectedCursor: null, nextCursor: "cursor:51" },
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).resolves.toMatchObject({
+      cursor: { cursorValue: "cursor:51" },
+      deliveries: [{ kind: "committed", revisions: [1] }],
+      kind: "advanced",
+    });
+
+    expect(fake.client.begin).toHaveBeenCalledTimes(1);
+    expect(fake.queries.every(({ transaction }) => transaction)).toBe(true);
+    const rawIndex = fake.queries.findIndex(({ query }) =>
+      query.includes("INSERT INTO matchsense.raw_source_records"),
+    );
+    const projectionIndex = fake.queries.findIndex(({ query }) =>
+      query.includes("INSERT INTO matchsense.fixture_projections"),
+    );
+    const cursorIndex = fake.queries.findIndex(({ query }) =>
+      query.includes("INSERT INTO matchsense.source_cursors"),
+    );
+    expect(rawIndex).toBeGreaterThan(-1);
+    expect(projectionIndex).toBeGreaterThan(rawIndex);
+    expect(cursorIndex).toBeGreaterThan(projectionIndex);
+  });
+
+  it("does not persist any frame delivery when its fenced cursor is already stale", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [sourceLeaseRow];
+      }
+      if (query.includes("FROM matchsense.source_cursors")) {
+        return [sourceCursorRow];
+      }
+      if (query.includes("INSERT INTO matchsense.raw_source_records")) {
+        throw new Error("A stale cursor must not write raw delivery state");
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const raw = {
+      ...liveRaw,
+      canonicalEligible: false,
+      deliveryIntent: "realtime" as const,
+      deliveryKey: "d".repeat(64),
+      id: "raw-stale-frame",
+      orderingKey: "00000000000000000052",
+      payload: { Action: "coverage_update", FixtureId: "fx-1" },
+      rawRetention: "authorised_raw" as const,
+      responseHash: "e".repeat(64),
+      rightsGrantId: "grant-1",
+      sourcePath: "/api/scores/stream",
+      streamKey: "scores:mainnet",
+    };
+
+    await expect(
+      repository?.commitCollectorFrame({
+        cursor: { expectedCursor: null, nextCursor: "cursor:52" },
+        deliveries: [{ fixtureId: "fx-1", raw }],
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).resolves.toEqual({
+      currentCursor: "cursor-620",
+      kind: "conflict",
+    });
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("INSERT INTO matchsense.raw_source_records"),
+      ),
+    ).toBe(false);
   });
 });
 
