@@ -57,6 +57,7 @@ export type {
   FeaturedReplayConfigInput,
   FeaturedReplayReady,
   FeaturedReplayRepository,
+  RenewArchiveImportJobClaim,
   RetryArchiveImportJob,
   TerminalArchiveImportJob,
 } from "./archive-import-job-repository.js";
@@ -82,6 +83,8 @@ export type {
   CommentaryArtifactKey,
   CommentaryArtifactRecord,
   CommentaryArtifactRepository,
+  CommitFencedFixtureUpsertInput,
+  CommitFencedFixtureUpsertResult,
   CommitFixtureScheduleInput,
   CommitFixtureScheduleResult,
   CommitRawSourceRecordInput,

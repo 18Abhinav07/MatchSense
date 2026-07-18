@@ -78,7 +78,7 @@ describe("historical archive importer", () => {
   it("persists real TxLINE reconciliation records into recorded mode, then publishes only a replay-ready final", async () => {
     const fixtureTruth: Pick<
       FixtureTruthRepository,
-      "commitCollectorFrame" | "get" | "upsert"
+      "commitCollectorFrame" | "commitFencedFixtureUpsert" | "get"
     > = {
       commitCollectorFrame: vi.fn(async (input) => {
         expect(input.mode).toBe("recorded");
@@ -104,8 +104,11 @@ describe("historical archive importer", () => {
           kind: "committed" as const,
         };
       }),
+      commitFencedFixtureUpsert: vi.fn(async () => ({
+        fixture: {} as never,
+        kind: "committed" as const,
+      })),
       get: vi.fn(async () => null),
-      upsert: vi.fn(async () => ({}) as never),
     };
     const archive: ArchiveService = {
       rebuild: vi.fn(async () => ({
@@ -137,28 +140,75 @@ describe("historical archive importer", () => {
         rightsGrantId: "grant-history",
       }),
     );
-    expect(fixtureTruth.upsert).toHaveBeenNthCalledWith(
+    expect(fixtureTruth.commitFencedFixtureUpsert).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
-        id: fixture.fixtureId,
-        mode: "recorded",
-        provenance: "recorded_txline_authorised",
-        status: "tracking",
+        fixture: expect.objectContaining({
+          id: fixture.fixtureId,
+          mode: "recorded",
+          provenance: "recorded_txline_authorised",
+          status: "tracking",
+        }),
+        sourceFence: fence,
       }),
     );
-    expect(fixtureTruth.upsert).toHaveBeenLastCalledWith(
-      expect.objectContaining({ status: "final" }),
+    expect(fixtureTruth.commitFencedFixtureUpsert).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        fixture: expect.objectContaining({ status: "final" }),
+        sourceFence: fence,
+      }),
     );
+  });
+
+  it("returns fenced when the historical source fence is lost before final fixture state", async () => {
+    let upsertCount = 0;
+    const fixtureTruth: Pick<
+      FixtureTruthRepository,
+      "commitCollectorFrame" | "commitFencedFixtureUpsert" | "get"
+    > = {
+      commitCollectorFrame: vi.fn(async () => ({
+        deliveries: [{ kind: "accepted_no_change" as const }],
+        kind: "committed" as const,
+      })),
+      commitFencedFixtureUpsert: vi.fn(async () => {
+        upsertCount += 1;
+        return upsertCount === 1
+          ? { fixture: {} as never, kind: "committed" as const }
+          : { kind: "fenced" as const };
+      }),
+      get: vi.fn(async () => null),
+    };
+    const archive: ArchiveService = {
+      rebuild: vi.fn(async () => ({
+        manifest: { status: "REPLAY_READY" } as never,
+        projectionHash: "a".repeat(64),
+        status: "REPLAY_READY" as const,
+        terminalDeliveryId: "final-2",
+      })),
+    };
+    const importer = createHistoricalArchiveImporter({
+      archive,
+      fixtureTruth,
+      rightsGrantId: "grant-history",
+      sourceFence: fence,
+    });
+
+    await expect(
+      importer.importFixture({ fixture, records: [record(final)] }),
+    ).resolves.toEqual({ kind: "fenced" });
+    expect(fixtureTruth.commitFencedFixtureUpsert).toHaveBeenCalledTimes(2);
+    expect(fixtureTruth.commitCollectorFrame).toHaveBeenCalledTimes(1);
+    expect(archive.rebuild).toHaveBeenCalledTimes(1);
   });
 
   it("rejects anything other than the requested TxLINE historical reconciliation before persistence", async () => {
     const fixtureTruth: Pick<
       FixtureTruthRepository,
-      "commitCollectorFrame" | "get" | "upsert"
+      "commitCollectorFrame" | "commitFencedFixtureUpsert" | "get"
     > = {
       commitCollectorFrame: vi.fn(),
+      commitFencedFixtureUpsert: vi.fn(),
       get: vi.fn(),
-      upsert: vi.fn(),
     };
     const importer = createHistoricalArchiveImporter({
       archive: { rebuild: vi.fn() },
@@ -174,21 +224,24 @@ describe("historical archive importer", () => {
       }),
     ).rejects.toThrow("Historical import requires reconciliation records");
 
-    expect(fixtureTruth.upsert).not.toHaveBeenCalled();
+    expect(fixtureTruth.commitFencedFixtureUpsert).not.toHaveBeenCalled();
     expect(fixtureTruth.commitCollectorFrame).not.toHaveBeenCalled();
   });
 
   it("does not downgrade an already-final recorded fixture before a replacement archive is ready", async () => {
     const fixtureTruth: Pick<
       FixtureTruthRepository,
-      "commitCollectorFrame" | "get" | "upsert"
+      "commitCollectorFrame" | "commitFencedFixtureUpsert" | "get"
     > = {
       commitCollectorFrame: vi.fn(async () => ({
         deliveries: [{ kind: "accepted_no_change" as const }],
         kind: "committed" as const,
       })),
+      commitFencedFixtureUpsert: vi.fn(async () => ({
+        fixture: {} as never,
+        kind: "committed" as const,
+      })),
       get: vi.fn(async () => ({ status: "final" }) as never),
-      upsert: vi.fn(async () => ({}) as never),
     };
     const importer = createHistoricalArchiveImporter({
       archive: {
@@ -212,6 +265,6 @@ describe("historical archive importer", () => {
       fixtureId: fixture.fixtureId,
       mode: "recorded",
     });
-    expect(fixtureTruth.upsert).not.toHaveBeenCalled();
+    expect(fixtureTruth.commitFencedFixtureUpsert).not.toHaveBeenCalled();
   });
 });

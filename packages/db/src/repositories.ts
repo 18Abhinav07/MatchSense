@@ -93,6 +93,12 @@ export interface CommitFixtureScheduleInput {
   sourceFence?: SourceFence;
 }
 
+/** Writes source-derived fixture lifecycle state under the current source fence. */
+export interface CommitFencedFixtureUpsertInput {
+  fixture: FixtureUpsert;
+  sourceFence: SourceFence;
+}
+
 /** A schedule observation is durable audit evidence, not a match event. */
 export interface FixtureScheduleObservationWrite {
   observedAt: string;
@@ -123,6 +129,9 @@ export type CommitFixtureScheduleResult =
   | { kind: "duplicate" }
   | { fixture: FixtureRecord; kind: "committed" }
   | { kind: "fenced" };
+
+export type CommitFencedFixtureUpsertResult =
+  { fixture: FixtureRecord; kind: "committed" } | { kind: "fenced" };
 
 export type ObserveFixtureScheduleResult =
   | { fixture: FixtureRecord; kind: "committed"; metadataUpdated: boolean }
@@ -248,6 +257,9 @@ export interface FixtureTruthRepository {
   commitCollectorFrame(
     input: CommitCollectorFrameInput,
   ): Promise<CommitCollectorFrameResult>;
+  commitFencedFixtureUpsert(
+    input: CommitFencedFixtureUpsertInput,
+  ): Promise<CommitFencedFixtureUpsertResult>;
   commitFixtureSchedule(
     input: CommitFixtureScheduleInput,
   ): Promise<CommitFixtureScheduleResult>;
@@ -676,12 +688,19 @@ async function lockCurrentSourceFence(
   input: {
     mode: PersistenceMode;
     rawSource: string;
+    rawStreamKey?: string;
     sourceFence: SourceFence | undefined;
   },
 ): Promise<boolean> {
-  if (input.mode === "demo" || input.mode === "recorded") return true;
+  if (input.mode === "demo") return true;
   const fence = input.sourceFence;
-  if (!fence || fence.source !== input.rawSource) return false;
+  if (
+    !fence ||
+    fence.source !== input.rawSource ||
+    (input.rawStreamKey !== undefined && fence.streamKey !== input.rawStreamKey)
+  ) {
+    return false;
+  }
   assertFencingToken(fence.fencingToken);
 
   const rows = await executor.unsafe(
@@ -1103,6 +1122,7 @@ export function createFixtureTruthRepository(
           !(await lockCurrentSourceFence(transaction, {
             mode: input.mode,
             rawSource: input.sourceFence.source,
+            rawStreamKey: input.sourceFence.streamKey,
             sourceFence: input.sourceFence,
           }))
         ) {
@@ -1163,6 +1183,26 @@ export function createFixtureTruthRepository(
         return { cursor: cursor.cursor, deliveries, kind: "advanced" };
       });
     },
+    commitFencedFixtureUpsert: async (input) => {
+      assertModeProvenance(input.fixture.mode, input.fixture.provenance);
+      assertFencingToken(input.sourceFence.fencingToken);
+      return client.begin(async (transaction) => {
+        if (
+          !(await lockCurrentSourceFence(transaction, {
+            mode: input.fixture.mode,
+            rawSource: input.sourceFence.source,
+            rawStreamKey: input.sourceFence.streamKey,
+            sourceFence: input.sourceFence,
+          }))
+        ) {
+          return { kind: "fenced" };
+        }
+        return {
+          fixture: await upsertFixture(transaction, input.fixture),
+          kind: "committed",
+        };
+      });
+    },
     commitFixtureSchedule: async (input) => {
       assertModeProvenance(input.fixture.mode, input.fixture.provenance);
       assertRawSourceRecord(input.fixture.mode, input.raw);
@@ -1171,6 +1211,7 @@ export function createFixtureTruthRepository(
           !(await lockCurrentSourceFence(transaction, {
             mode: input.fixture.mode,
             rawSource: input.raw.source,
+            rawStreamKey: input.raw.streamKey ?? input.raw.source,
             sourceFence: input.sourceFence,
           }))
         ) {
@@ -1256,6 +1297,7 @@ FOR UPDATE;`,
           !(await lockCurrentSourceFence(transaction, {
             mode: input.mode,
             rawSource: input.raw.source,
+            rawStreamKey: input.raw.streamKey ?? input.raw.source,
             sourceFence: input.sourceFence,
           }))
         ) {
@@ -1275,6 +1317,7 @@ FOR UPDATE;`,
           !(await lockCurrentSourceFence(transaction, {
             mode: input.mode,
             rawSource: input.raw.source,
+            rawStreamKey: input.raw.streamKey ?? input.raw.source,
             sourceFence: input.sourceFence,
           }))
         ) {
@@ -1493,6 +1536,7 @@ LIMIT $4;`,
           !(await lockCurrentSourceFence(transaction, {
             mode: input.mode,
             rawSource: input.raw.source,
+            rawStreamKey: input.raw.streamKey ?? input.raw.source,
             sourceFence: input.sourceFence,
           }))
         ) {

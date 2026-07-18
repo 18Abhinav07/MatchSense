@@ -310,7 +310,36 @@ function publicFixtureVisibility() {
   fixture.mode = 'recorded'
   AND fixture.status = 'final'
   AND archive.status = 'REPLAY_READY'
-  AND EXISTS (
+  AND (${currentRecordedArchiveImportBinding()})
+  AND (${activeReplayRights()})
+)`;
+}
+
+/**
+ * A recorded archive cannot become public on an archive manifest alone. The
+ * current terminal archive must be the exact output bound to the generation
+ * that transitioned its import job to replay_ready. This prevents a stale
+ * manifest, old claim output, or correction-requeued job from resurfacing
+ * historical data.
+ */
+function currentRecordedArchiveImportBinding() {
+  return `EXISTS (
+    SELECT 1
+    FROM matchsense.archive_import_jobs AS archive_job
+    JOIN matchsense.archive_import_job_outputs AS archive_output
+      ON archive_output.fixture_id = archive_job.fixture_id
+      AND archive_output.claim_generation = archive_job.claim_generation
+      AND archive_output.archive_manifest_id = archive_job.archive_manifest_id
+      AND archive_output.archive_manifest_hash = archive_job.archive_manifest_hash
+    WHERE archive_job.fixture_id = fixture.id
+      AND archive_job.state = 'replay_ready'
+      AND archive_job.archive_manifest_id = archive.id
+      AND archive_job.archive_manifest_hash = archive.delivery_manifest_hash
+  )`;
+}
+
+function activeReplayRights() {
+  return `EXISTS (
     SELECT 1
     FROM matchsense.rights_grants AS rights_grant
     WHERE rights_grant.id = archive.rights_grant_id
@@ -318,8 +347,7 @@ function publicFixtureVisibility() {
       AND rights_grant.revoked_at IS NULL
       AND (rights_grant.expires_at IS NULL OR rights_grant.expires_at > clock_timestamp())
       AND rights_grant.scopes @> ARRAY['replay']::text[]
-  )
-)`;
+  )`;
 }
 
 function bucketVisibility(bucket: FixtureBucket | undefined) {
@@ -391,15 +419,8 @@ LIMIT $2;`,
   AND fixture.mode = 'recorded'
   AND fixture.status = 'final'
   AND archive.status = 'REPLAY_READY'
-  AND EXISTS (
-    SELECT 1
-    FROM matchsense.rights_grants AS rights_grant
-    WHERE rights_grant.id = archive.rights_grant_id
-      AND rights_grant.active = true
-      AND rights_grant.revoked_at IS NULL
-      AND (rights_grant.expires_at IS NULL OR rights_grant.expires_at > clock_timestamp())
-      AND rights_grant.scopes @> ARRAY['replay']::text[]
-  )`)};`,
+  AND (${currentRecordedArchiveImportBinding()})
+  AND (${activeReplayRights()})`)};`,
         [input.fixtureId, input.mode],
       );
       const fixture = rows[0] ? parseFixture(rows[0]) : null;

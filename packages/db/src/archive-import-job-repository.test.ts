@@ -57,6 +57,7 @@ type ArchiveImportJobRepository = {
   markReplayReady(input: Record<string, unknown>): Promise<ArchiveImportJob>;
   markRetry(input: Record<string, unknown>): Promise<ArchiveImportJob>;
   recoverExpiredClaims(now: Date): Promise<number>;
+  renewClaim(input: Record<string, unknown>): Promise<ArchiveImportJob | null>;
 };
 
 type FeaturedReplayRepository = {
@@ -289,6 +290,85 @@ describe("archive import job repository", () => {
     expect(fake.queries[0]?.query).toContain(
       "claim_started_at = clock_timestamp()",
     );
+  });
+
+  it("renews only the current worker generation and only to a later claim expiry", async () => {
+    const renewedExpiry = "2026-07-18T12:04:00.000Z";
+    const fake = testClient((query) =>
+      query.includes("SET claim_expires_at = $1::timestamptz")
+        ? [
+            jobRow({
+              attempt_count: 1,
+              claim_expires_at: renewedExpiry,
+              claim_generation: 2,
+              claim_started_at: "2026-07-18T12:00:00.000Z",
+              claimed_by: "archive-worker-a",
+              state: "claimed",
+            }),
+          ]
+        : [],
+    );
+    const jobs = db.createArchiveImportJobRepository?.(fake.client);
+
+    await expect(
+      jobs?.renewClaim({
+        claimExpiresAt: renewedExpiry,
+        claimGeneration: 2,
+        fixtureId: jobInput.fixtureId,
+        workerId: "archive-worker-a",
+      }),
+    ).resolves.toMatchObject({
+      claimExpiresAt: renewedExpiry,
+      claimGeneration: 2,
+      claimedBy: "archive-worker-a",
+      state: "claimed",
+    });
+
+    expect(fake.queries[0]?.parameters).toEqual([
+      renewedExpiry,
+      jobInput.fixtureId,
+      "archive-worker-a",
+      2,
+    ]);
+    expect(fake.queries[0]?.query).toContain("state = 'claimed'");
+    expect(fake.queries[0]?.query).toContain("claimed_by = $3");
+    expect(fake.queries[0]?.query).toContain("claim_generation = $4");
+    expect(fake.queries[0]?.query).toContain(
+      "claim_expires_at > clock_timestamp()",
+    );
+    expect(fake.queries[0]?.query).toContain(
+      "$1::timestamptz > claim_expires_at",
+    );
+  });
+
+  it("returns null when a renewal loses ownership, expires, or is not later", async () => {
+    const fake = testClient(() => []);
+    const jobs = db.createArchiveImportJobRepository?.(fake.client);
+
+    await expect(
+      jobs?.renewClaim({
+        claimExpiresAt: "2026-07-18T12:04:00.000Z",
+        claimGeneration: 2,
+        fixtureId: jobInput.fixtureId,
+        workerId: "archive-worker-a",
+      }),
+    ).resolves.toBeNull();
+    expect(fake.queries[0]?.query).toContain("RETURNING");
+  });
+
+  it("rejects an invalid archive claim renewal timestamp before issuing SQL", async () => {
+    const fake = testClient(() => []);
+    const jobs = db.createArchiveImportJobRepository?.(fake.client);
+
+    await expect(
+      jobs?.renewClaim({
+        claimExpiresAt: "not-a-timestamp",
+        claimGeneration: 2,
+        fixtureId: jobInput.fixtureId,
+        workerId: "archive-worker-a",
+      }),
+    ).rejects.toThrow("Archive import claim expiry is invalid");
+    expect(fake.queries).toHaveLength(0);
   });
 
   it("recovers expired leases before a new worker claims work", async () => {
@@ -650,8 +730,30 @@ describe("featured replay repository", () => {
     const readiness = fake.queries.find(({ query }) =>
       query.includes("FROM matchsense.featured_replay_configs"),
     );
+    const configure = fake.queries.find(({ query }) =>
+      query.includes("INSERT INTO matchsense.featured_replay_configs"),
+    );
+    expect(configure?.query).toContain(
+      "matchsense.archive_import_jobs AS archive_job",
+    );
+    expect(configure?.query).toContain(
+      "matchsense.archive_import_job_outputs AS archive_output",
+    );
+    expect(configure?.query).toContain("archive_job.claim_generation");
     expect(readiness?.query).toContain("archive.status = 'REPLAY_READY'");
     expect(readiness?.query).toContain("job.state = 'replay_ready'");
+    expect(readiness?.query).toContain(
+      "JOIN matchsense.archive_import_job_outputs AS output",
+    );
+    expect(readiness?.query).toContain(
+      "output.claim_generation = job.claim_generation",
+    );
+    expect(readiness?.query).toContain(
+      "output.archive_manifest_id = job.archive_manifest_id",
+    );
+    expect(readiness?.query).toContain(
+      "output.archive_manifest_hash = job.archive_manifest_hash",
+    );
     expect(readiness?.query).toContain(
       "job.archive_manifest_id = config.archive_manifest_id",
     );

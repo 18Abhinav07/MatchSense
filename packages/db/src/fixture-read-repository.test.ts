@@ -70,6 +70,35 @@ describe("fixture read repository", () => {
     expect(query).toContain("AS rights_grant");
   });
 
+  it("requires a current replay-ready archive-import output binding before exposing recorded history", async () => {
+    const fake = testClient(() => []);
+    const repository = createFixtureReadRepository(fake.client);
+
+    await expect(
+      repository.getReplayReady({ fixtureId: "fx-bound", mode: "recorded" }),
+    ).resolves.toBeNull();
+
+    const query = fake.queries.at(-1)?.query ?? "";
+    expect(query).toContain("matchsense.archive_import_jobs AS archive_job");
+    expect(query).toContain(
+      "matchsense.archive_import_job_outputs AS archive_output",
+    );
+    expect(query).toContain("archive_job.state = 'replay_ready'");
+    expect(query).toContain("archive_job.archive_manifest_id = archive.id");
+    expect(query).toContain(
+      "archive_job.archive_manifest_hash = archive.delivery_manifest_hash",
+    );
+    expect(query).toContain(
+      "archive_output.claim_generation = archive_job.claim_generation",
+    );
+    expect(query).toContain(
+      "archive_output.archive_manifest_id = archive_job.archive_manifest_id",
+    );
+    expect(query).toContain(
+      "archive_output.archive_manifest_hash = archive_job.archive_manifest_hash",
+    );
+  });
+
   it("lists an authorised recorded final by its requested mode rather than hard-coding live", async () => {
     const fake = testClient((query) => {
       if (query.includes("FROM matchsense.fixtures AS fixture")) {

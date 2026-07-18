@@ -19,6 +19,7 @@ import {
   runDatabaseCli,
   type ApplicationDatabase,
   type CommitSourceChangeInput,
+  type SourceFence,
 } from "./index.js";
 
 const { databaseUrl } = assertDestructiveIntegrationTarget({
@@ -172,6 +173,7 @@ function sourceChange(
   input: {
     expectedRevision?: number;
     outboxIdempotencyKey?: string;
+    sourceFence?: SourceFence;
     suffix?: string;
   } = {},
 ): CommitSourceChangeInput {
@@ -214,7 +216,28 @@ function sourceChange(
       source: "replay",
       sourceRecordId: null,
       sourceSequence: String(revision),
+      streamKey: "replay",
     },
+    sourceFence: input.sourceFence,
+  };
+}
+
+async function acquireRecordedReplayFence(
+  runtime: Pick<ApplicationDatabase, "sourceState">,
+): Promise<SourceFence> {
+  const lease = await runtime.sourceState.acquireLease({
+    holderId: "recorded-replay-test-worker",
+    leaseUntil: "2099-01-01T00:10:00.000Z",
+    mode: "recorded",
+    source: "replay",
+    streamKey: "replay",
+  });
+  if (!lease) throw new Error("Expected recorded replay source lease");
+  return {
+    fencingToken: lease.fencingToken,
+    holderId: lease.holderId,
+    source: lease.source,
+    streamKey: lease.streamKey,
   };
 }
 
@@ -925,6 +948,142 @@ WHERE id = $1;`,
     }
   });
 
+  it("serves recorded history only from a current bound replay-ready import job with active rights", async () => {
+    const runtime = trackedDatabase();
+    await runtime.migrate();
+    const fixtureId = "archive-public-binding-fx";
+    const manifestId = "archive-public-binding-manifest";
+    const manifestHash = "6".repeat(64);
+    const workerId = "archive-public-binding-worker";
+    await seedRecordedReplayArchive({
+      fixtureId,
+      manifestHash,
+      manifestId,
+      terminalDeliveryId: "archive-public-terminal",
+    });
+
+    await admin.unsafe(
+      `INSERT INTO matchsense.archive_import_jobs (
+  fixture_id, home_team_id, away_team_id, kickoff_at, participant1_is_home,
+  context_hash, reason, state, archive_manifest_id, archive_manifest_hash,
+  claim_generation, source_terminal_record_id
+)
+VALUES (
+  $1, 'FRA', 'ESP', '2026-07-18T12:00:00.000Z', true,
+  repeat('7', 64), 'featured_bootstrap', 'replay_ready', $2, $3,
+  1, 'archive-public-source-h1'
+);`,
+      [fixtureId, manifestId, manifestHash],
+    );
+    await expect(
+      runtime.fixtureReads.getReplayReady({ fixtureId, mode: "recorded" }),
+    ).resolves.toBeNull();
+    await expect(runtime.fixtureReads.readHistory()).resolves.toEqual([]);
+    await expect(
+      runtime.featuredReplays.configure({
+        archiveManifestId: manifestId,
+        fixtureId,
+        slot: "archive-public-binding",
+      }),
+    ).rejects.toThrow(
+      "Featured replay manifest is not current, replay-ready, and authorised",
+    );
+
+    await admin.unsafe(
+      "DELETE FROM matchsense.archive_import_jobs WHERE fixture_id = $1;",
+      [fixtureId],
+    );
+    await runtime.archiveImportJobs.enqueue({
+      awayTeamId: "ESP",
+      contextHash: "8".repeat(64),
+      fixtureId,
+      homeTeamId: "FRA",
+      kickoffAt: "2026-07-18T12:00:00.000Z",
+      participant1IsHome: true,
+      reason: "featured_bootstrap",
+      sourceTerminalRecordId: "archive-public-source-h1",
+    });
+    const claimed = await runtime.archiveImportJobs.claim(
+      workerId,
+      new Date("2100-01-01T00:00:00.000Z"),
+    );
+    if (!claimed) throw new Error("Expected public archive claim");
+    await admin.unsafe(
+      `UPDATE matchsense.archive_manifests
+SET verified_at = clock_timestamp(), updated_at = clock_timestamp()
+WHERE id = $1;`,
+      [manifestId],
+    );
+    await runtime.archiveImportJobs.bindVerifiedArchiveOutput({
+      archiveManifestHash: manifestHash,
+      archiveManifestId: manifestId,
+      claimGeneration: claimed.claimGeneration,
+      fixtureId,
+      workerId,
+    });
+    await runtime.archiveImportJobs.markReplayReady({
+      claimGeneration: claimed.claimGeneration,
+      fixtureId,
+      workerId,
+    });
+    await expect(
+      runtime.fixtureReads.getReplayReady({ fixtureId, mode: "recorded" }),
+    ).resolves.toMatchObject({
+      archiveManifestId: manifestId,
+      fixture: expect.objectContaining({ fixtureId, replayReady: true }),
+    });
+    await expect(runtime.fixtureReads.readHistory()).resolves.toEqual([
+      expect.objectContaining({ fixtureId, replayReady: true }),
+    ]);
+    await runtime.featuredReplays.configure({
+      archiveManifestId: manifestId,
+      fixtureId,
+      slot: "archive-public-binding",
+    });
+    await expect(
+      runtime.featuredReplays.ready("archive-public-binding"),
+    ).resolves.toMatchObject({ archiveManifestId: manifestId, fixtureId });
+
+    const grantId = `grant-${fixtureId}`;
+    await admin.unsafe(
+      `UPDATE matchsense.rights_grants
+SET active = false, revoked_at = clock_timestamp()
+WHERE id = $1;`,
+      [grantId],
+    );
+    await expect(
+      runtime.fixtureReads.getReplayReady({ fixtureId, mode: "recorded" }),
+    ).resolves.toBeNull();
+    await expect(runtime.fixtureReads.readHistory()).resolves.toEqual([]);
+    await expect(
+      runtime.featuredReplays.ready("archive-public-binding"),
+    ).resolves.toBeNull();
+    await admin.unsafe(
+      `UPDATE matchsense.rights_grants
+SET active = true, revoked_at = NULL
+WHERE id = $1;`,
+      [grantId],
+    );
+
+    await runtime.archiveImportJobs.enqueue({
+      awayTeamId: "ARG",
+      contextHash: "9".repeat(64),
+      fixtureId,
+      homeTeamId: "BRA",
+      kickoffAt: "2030-01-01T00:00:00.000Z",
+      participant1IsHome: false,
+      reason: "live_correction",
+      sourceTerminalRecordId: "archive-public-source-h2",
+    });
+    await expect(
+      runtime.fixtureReads.getReplayReady({ fixtureId, mode: "recorded" }),
+    ).resolves.toBeNull();
+    await expect(runtime.fixtureReads.readHistory()).resolves.toEqual([]);
+    await expect(
+      runtime.featuredReplays.ready("archive-public-binding"),
+    ).resolves.toBeNull();
+  });
+
   it("rejects a bound output when the archive changes before finalisation", async () => {
     const runtime = trackedDatabase();
     await runtime.migrate();
@@ -1171,8 +1330,9 @@ WHERE mode = 'live' AND id = 'legacy-raw-1';`);
   it("commits schedule raw-first, keeps duplicates inert, and accepts raw-only updates", async () => {
     const runtime = trackedDatabase();
     await runtime.migrate();
+    const sourceFence = await acquireRecordedReplayFence(runtime);
     const scheduleRaw = {
-      ...sourceChange({ suffix: "schedule-1" }).raw,
+      ...sourceChange({ sourceFence, suffix: "schedule-1" }).raw,
       dedupeKey: "schedule:fx-1:v1",
       id: "raw-schedule-1",
     };
@@ -1181,6 +1341,7 @@ WHERE mode = 'live' AND id = 'legacy-raw-1';`);
       runtime.fixtureTruth.commitFixtureSchedule({
         fixture: recordedFixture,
         raw: scheduleRaw,
+        sourceFence,
       }),
     ).resolves.toEqual({
       fixture: expect.objectContaining({
@@ -1196,6 +1357,7 @@ WHERE mode = 'live' AND id = 'legacy-raw-1';`);
           metadata: { competition: "duplicate must not mutate" },
         },
         raw: scheduleRaw,
+        sourceFence,
       }),
     ).resolves.toEqual({ kind: "duplicate" });
     await expect(
@@ -1222,6 +1384,7 @@ WHERE mode = 'live' AND id = 'legacy-raw-1';`);
           id: "raw-schedule-2",
           payloadHash: createHash("sha256").update("schedule-2").digest("hex"),
         },
+        sourceFence,
       }),
     ).resolves.toMatchObject({ kind: "committed" });
     await expect(
@@ -1234,6 +1397,7 @@ WHERE mode = 'live' AND id = 'legacy-raw-1';`);
           id: "raw-neutral-1",
           payloadHash: createHash("sha256").update("neutral-1").digest("hex"),
         },
+        sourceFence,
       }),
     ).resolves.toEqual({ kind: "committed" });
 
@@ -1456,11 +1620,125 @@ WHERE mode = 'live' AND id = 'legacy-raw-1';`);
     ).resolves.toMatchObject({ kind: "committed" });
   });
 
+  it("fences lost recorded source ownership before raw or projection writes and accepts the replacement lease", async () => {
+    const runtime = trackedDatabase();
+    await runtime.migrate();
+    const fixture = {
+      ...recordedFixture,
+      id: "recorded-fenced-frame-fx",
+    };
+    await runtime.fixtureTruth.upsert(fixture);
+    const stream = {
+      mode: "recorded" as const,
+      source: "txline_historical",
+      streamKey: "archive-imports",
+    };
+    const oldLease = await runtime.sourceState.acquireLease({
+      ...stream,
+      holderId: "recorded-worker-old",
+      leaseUntil: "2099-01-01T00:01:00.000Z",
+    });
+    if (!oldLease) throw new Error("Expected old recorded source lease");
+    await runtime.sourceState.releaseLease({
+      ...stream,
+      fencingToken: oldLease.fencingToken,
+      holderId: oldLease.holderId,
+    });
+    const currentLease = await runtime.sourceState.acquireLease({
+      ...stream,
+      holderId: "recorded-worker-new",
+      leaseUntil: "2099-01-01T00:02:00.000Z",
+    });
+    if (!currentLease)
+      throw new Error("Expected current recorded source lease");
+
+    const frame = (
+      suffix: string,
+      sourceFence: SourceFence,
+      revision: number,
+    ) => ({
+      deliveries: [
+        {
+          derive: () => [
+            {
+              event: {
+                id: `recorded-fenced-event-${suffix}`,
+                payload: { revision },
+                type: "fixture.reconciled",
+              },
+              outbox: [],
+              projection: { payload: { revision }, revision },
+            },
+          ],
+          fixtureId: fixture.id,
+          raw: {
+            canonicalEligible: true,
+            dedupeKey: `recorded-fenced:${suffix}`,
+            deliveryIntent: "reconcile" as const,
+            id: `recorded-fenced-raw-${suffix}`,
+            orderingKey: String(revision).padStart(20, "0"),
+            payload: { Action: "game_finalised", FixtureId: fixture.id },
+            payloadHash: createHash("sha256").update(suffix).digest("hex"),
+            provenance: "recorded_txline_authorised" as const,
+            rawRetention: "normalised_only" as const,
+            receivedAt: `2026-07-18T12:0${revision}:00.000Z`,
+            source: stream.source,
+            sourcePath: "/historical/score",
+            sourceRecordId: `recorded-source-${suffix}`,
+            sourceSequence: String(revision),
+            streamKey: stream.streamKey,
+          },
+        },
+      ],
+      mode: "recorded" as const,
+      sourceFence,
+    });
+    const staleFence = {
+      fencingToken: oldLease.fencingToken,
+      holderId: oldLease.holderId,
+      source: oldLease.source,
+      streamKey: oldLease.streamKey,
+    };
+
+    await expect(
+      runtime.fixtureTruth.commitCollectorFrame(frame("stale", staleFence, 1)),
+    ).resolves.toEqual({ kind: "fenced" });
+    await expect(
+      admin.unsafe<{ projections: number; raw: number }[]>(`SELECT
+  (SELECT count(*)::integer FROM matchsense.raw_source_records) AS raw,
+  (SELECT count(*)::integer FROM matchsense.fixture_projections) AS projections;`),
+    ).resolves.toEqual([{ projections: 0, raw: 0 }]);
+
+    await expect(
+      runtime.fixtureTruth.commitCollectorFrame(
+        frame(
+          "current",
+          {
+            fencingToken: currentLease.fencingToken,
+            holderId: currentLease.holderId,
+            source: currentLease.source,
+            streamKey: currentLease.streamKey,
+          },
+          1,
+        ),
+      ),
+    ).resolves.toEqual({
+      deliveries: [{ eventSequences: [1], kind: "committed", revisions: [1] }],
+      kind: "committed",
+    });
+    await expect(
+      admin.unsafe<{ projections: number; raw: number }[]>(`SELECT
+  (SELECT count(*)::integer FROM matchsense.raw_source_records) AS raw,
+  (SELECT count(*)::integer FROM matchsense.fixture_projections) AS projections;`),
+    ).resolves.toEqual([{ projections: 1, raw: 1 }]);
+  });
+
   it("commits one revision, event, and outbox row for concurrent duplicate source records", async () => {
     const runtime = trackedDatabase();
     await runtime.migrate();
     await runtime.fixtureTruth.upsert(recordedFixture);
-    const change = sourceChange();
+    const sourceFence = await acquireRecordedReplayFence(runtime);
+    const change = sourceChange({ sourceFence });
 
     const results = await Promise.all([
       runtime.fixtureTruth.commitSourceChange(change),
@@ -1500,7 +1778,11 @@ WHERE mode = 'live' AND id = 'legacy-raw-1';`);
     const runtime = trackedDatabase();
     await runtime.migrate();
     await runtime.fixtureTruth.upsert(recordedFixture);
-    const raw = sourceChange({ suffix: "process-envelope" }).raw;
+    const sourceFence = await acquireRecordedReplayFence(runtime);
+    const raw = sourceChange({
+      sourceFence,
+      suffix: "process-envelope",
+    }).raw;
     const derive = vi.fn((current: { revision: number } | null) => {
       const revision = (current?.revision ?? 0) + 1;
       return {
@@ -1534,6 +1816,7 @@ WHERE mode = 'live' AND id = 'legacy-raw-1';`);
       fixtureId: recordedFixture.id,
       mode: "recorded" as const,
       raw,
+      sourceFence,
     };
 
     await expect(
@@ -1571,8 +1854,9 @@ WHERE mode = 'live' AND id = 'legacy-raw-1';`);
     const runtime = trackedDatabase();
     await runtime.migrate();
     await runtime.fixtureTruth.upsert(recordedFixture);
+    const sourceFence = await acquireRecordedReplayFence(runtime);
     const reconciliationRaw = {
-      ...sourceChange({ suffix: "reconcile-history" }).raw,
+      ...sourceChange({ sourceFence, suffix: "reconcile-history" }).raw,
       canonicalEligible: true,
       deliveryIntent: "reconcile" as const,
       id: "raw-reconcile-history",
@@ -1592,6 +1876,7 @@ WHERE mode = 'live' AND id = 'legacy-raw-1';`);
         fixtureId: recordedFixture.id,
         mode: "recorded",
         raw: reconciliationRaw,
+        sourceFence,
       }),
     ).resolves.toEqual({ eventSequence: 1, kind: "committed", revision: 1 });
 
@@ -1638,11 +1923,13 @@ VALUES (
     const runtime = trackedDatabase();
     await runtime.migrate();
     await runtime.fixtureTruth.upsert(recordedFixture);
-    const first = sourceChange();
+    const sourceFence = await acquireRecordedReplayFence(runtime);
+    const first = sourceChange({ sourceFence });
     await runtime.fixtureTruth.commitSourceChange(first);
     const conflicting = sourceChange({
       expectedRevision: 1,
       outboxIdempotencyKey: first.outbox.idempotencyKey,
+      sourceFence,
       suffix: "rollback",
     });
 
@@ -1668,7 +1955,10 @@ VALUES (
     const firstRuntime = trackedDatabase();
     await firstRuntime.migrate();
     await firstRuntime.fixtureTruth.upsert(recordedFixture);
-    await firstRuntime.fixtureTruth.commitSourceChange(sourceChange());
+    const sourceFence = await acquireRecordedReplayFence(firstRuntime);
+    await firstRuntime.fixtureTruth.commitSourceChange(
+      sourceChange({ sourceFence }),
+    );
     await expect(
       firstRuntime.fixtureTruth.getLatestProjection({
         fixtureId: recordedFixture.id,
@@ -1698,7 +1988,10 @@ VALUES (
     const secondWorker = trackedDatabase();
     await firstWorker.migrate();
     await firstWorker.fixtureTruth.upsert(recordedFixture);
-    await firstWorker.fixtureTruth.commitSourceChange(sourceChange());
+    const sourceFence = await acquireRecordedReplayFence(firstWorker);
+    await firstWorker.fixtureTruth.commitSourceChange(
+      sourceChange({ sourceFence }),
+    );
 
     const [expiredClaim] = await firstWorker.outbox.claim({
       claimToken: "fixture-claim-expired",
@@ -1779,7 +2072,10 @@ WHERE mode = 'recorded' AND id = 'outbox-1';`);
     const runtime = trackedDatabase();
     await runtime.migrate();
     await runtime.fixtureTruth.upsert(recordedFixture);
-    await runtime.fixtureTruth.commitSourceChange(sourceChange());
+    const sourceFence = await acquireRecordedReplayFence(runtime);
+    await runtime.fixtureTruth.commitSourceChange(
+      sourceChange({ sourceFence }),
+    );
 
     const artifact = await runtime.commentaryArtifacts.upsert({
       bytes: new Uint8Array([1, 2, 3, 4]),

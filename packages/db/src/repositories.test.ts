@@ -23,6 +23,7 @@ type RepositoryModule = {
   };
   createFixtureTruthRepository?: (client: TestClient) => {
     commitCollectorFrame(input: Record<string, unknown>): Promise<unknown>;
+    commitFencedFixtureUpsert(input: Record<string, unknown>): Promise<unknown>;
     commitFixtureSchedule(input: Record<string, unknown>): Promise<unknown>;
     commitRawSourceRecord(input: Record<string, unknown>): Promise<unknown>;
     commitSourceChange(input: Record<string, unknown>): Promise<unknown>;
@@ -189,10 +190,37 @@ const liveSourceFence = {
   streamKey: "scores:mainnet",
 };
 
+const recordedSourceFence = {
+  fencingToken: currentGeneration,
+  holderId: "archive-import-worker",
+  source: "txline_historical",
+  streamKey: "archive-imports",
+};
+
+const recordedSourceLeaseRow = {
+  ...sourceLeaseRow,
+  holder_id: recordedSourceFence.holderId,
+  mode: "recorded",
+  source: recordedSourceFence.source,
+  stream_key: recordedSourceFence.streamKey,
+};
+
 const liveFixtureInput = {
   ...fixtureInput,
   mode: "live",
   provenance: "live_txline",
+};
+
+const recordedFixtureInput = {
+  ...fixtureInput,
+  mode: "recorded",
+  provenance: "recorded_txline_authorised",
+};
+
+const recordedFixtureRow = {
+  ...fixtureRow,
+  mode: "recorded",
+  provenance: "recorded_txline_authorised",
 };
 
 const liveFinalFixtureRow = {
@@ -206,6 +234,7 @@ const liveRaw = {
   ...sourceChange.raw,
   provenance: "live_txline",
   source: "txline",
+  streamKey: "scores:mainnet",
 };
 
 describe("fixture truth repository", () => {
@@ -234,6 +263,62 @@ describe("fixture truth repository", () => {
     expect(fake.queries[0]?.query).toContain("ON CONFLICT (mode, id)");
     expect(fake.queries[1]?.parameters).toEqual(["demo", "fx-1"]);
     expect(fake.queries[2]?.query).toContain("ORDER BY scheduled_at ASC");
+  });
+
+  it("commits recorded fixture state only under its current source fence", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [recordedSourceLeaseRow];
+      }
+      if (query.includes("INSERT INTO matchsense.fixtures")) {
+        return [recordedFixtureRow];
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+
+    await expect(
+      repository?.commitFencedFixtureUpsert({
+        fixture: recordedFixtureInput,
+        sourceFence: recordedSourceFence,
+      }),
+    ).resolves.toEqual({
+      fixture: expect.objectContaining({
+        id: recordedFixtureInput.id,
+        mode: "recorded",
+      }),
+      kind: "committed",
+    });
+    expect(fake.queries[0]?.parameters).toEqual([
+      "recorded",
+      recordedSourceFence.source,
+      recordedSourceFence.streamKey,
+      recordedSourceFence.holderId,
+      recordedSourceFence.fencingToken,
+    ]);
+  });
+
+  it("returns fenced before mutating a recorded fixture when its source lease is lost", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) return [];
+      if (query.includes("INSERT INTO matchsense.fixtures")) {
+        throw new Error("A lost recorded lease must not mutate fixture state");
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+
+    await expect(
+      repository?.commitFencedFixtureUpsert({
+        fixture: recordedFixtureInput,
+        sourceFence: recordedSourceFence,
+      }),
+    ).resolves.toEqual({ kind: "fenced" });
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("INSERT INTO matchsense.fixtures"),
+      ),
+    ).toBe(false);
   });
 
   it("inserts raw first and returns a duplicate as a no-op", async () => {
@@ -642,6 +727,225 @@ describe("fixture truth repository", () => {
     expect(rawIndex).toBeGreaterThan(-1);
     expect(projectionIndex).toBeGreaterThan(rawIndex);
     expect(cursorIndex).toBeGreaterThan(projectionIndex);
+  });
+
+  it("returns fenced before any recorded raw or projection write when its source lease is lost", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) return [];
+      if (
+        query.includes("INSERT INTO matchsense.raw_source_records") ||
+        query.includes("INSERT INTO matchsense.fixture_projections")
+      ) {
+        throw new Error(
+          "Lost recorded source lease must not write archive truth",
+        );
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const raw = {
+      ...liveRaw,
+      canonicalEligible: true,
+      deliveryIntent: "reconcile" as const,
+      deliveryKey: "c".repeat(64),
+      id: "recorded-lost-fence-frame",
+      orderingKey: "00000000000000000001",
+      payload: { Action: "game_finalised", FixtureId: "fx-1" },
+      provenance: "recorded_txline_authorised" as const,
+      rawRetention: "authorised_raw" as const,
+      responseHash: "d".repeat(64),
+      rightsGrantId: "archive-grant-1",
+      source: recordedSourceFence.source,
+      sourcePath: "/historical/score",
+      streamKey: recordedSourceFence.streamKey,
+    };
+
+    await expect(
+      repository?.commitCollectorFrame({
+        deliveries: [
+          {
+            derive: () => [
+              {
+                event: {
+                  id: "recorded-lost-fence-event",
+                  payload: { fixtureId: "fx-1", revision: 1 },
+                  type: "fixture.reconciled",
+                },
+                outbox: [],
+                projection: { payload: { revision: 1 }, revision: 1 },
+              },
+            ],
+            fixtureId: "fx-1",
+            raw,
+          },
+        ],
+        mode: "recorded",
+        sourceFence: recordedSourceFence,
+      }),
+    ).resolves.toEqual({ kind: "fenced" });
+
+    expect(fake.queries[0]).toMatchObject({
+      parameters: [
+        "recorded",
+        recordedSourceFence.source,
+        recordedSourceFence.streamKey,
+        recordedSourceFence.holderId,
+        recordedSourceFence.fencingToken,
+      ],
+    });
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("INSERT INTO matchsense.raw_source_records"),
+      ),
+    ).toBe(false);
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("INSERT INTO matchsense.fixture_projections"),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not let a recorded source lease authorise raw data from another stream", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [recordedSourceLeaseRow];
+      }
+      if (query.includes("INSERT INTO matchsense.raw_source_records")) {
+        throw new Error("A mismatched recorded stream must not write raw data");
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const raw = {
+      ...liveRaw,
+      id: "recorded-stream-mismatch",
+      provenance: "recorded_txline_authorised" as const,
+      source: recordedSourceFence.source,
+      streamKey: "another-recorded-stream",
+    };
+
+    await expect(
+      repository?.commitRawSourceRecord({
+        fixtureId: "fx-1",
+        mode: "recorded",
+        raw,
+        sourceFence: recordedSourceFence,
+      }),
+    ).resolves.toEqual({ kind: "fenced" });
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("INSERT INTO matchsense.raw_source_records"),
+      ),
+    ).toBe(false);
+  });
+
+  it("fences a recorded raw write when its omitted stream key resolves to another stream", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [recordedSourceLeaseRow];
+      }
+      if (query.includes("INSERT INTO matchsense.raw_source_records")) {
+        throw new Error("An effective stream mismatch must not write raw data");
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const { streamKey: _streamKey, ...rawWithoutStreamKey } = {
+      ...liveRaw,
+      id: "recorded-implicit-stream-mismatch",
+      provenance: "recorded_txline_authorised" as const,
+      source: recordedSourceFence.source,
+    };
+
+    await expect(
+      repository?.commitRawSourceRecord({
+        fixtureId: "fx-1",
+        mode: "recorded",
+        raw: rawWithoutStreamKey,
+        sourceFence: recordedSourceFence,
+      }),
+    ).resolves.toEqual({ kind: "fenced" });
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("INSERT INTO matchsense.raw_source_records"),
+      ),
+    ).toBe(false);
+  });
+
+  it("commits a recorded collector frame only under its current source lease", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [recordedSourceLeaseRow];
+      }
+      if (query.includes("INSERT INTO matchsense.raw_source_records")) {
+        return [{ id: "recorded-valid-fence-frame" }];
+      }
+      if (query.includes("SELECT id") && query.includes("FOR UPDATE")) {
+        return [{ id: "fx-1" }];
+      }
+      if (query.includes("FROM matchsense.fixture_projections")) return [];
+      if (query.includes("INSERT INTO matchsense.fixture_events")) {
+        return [{ sequence: "1" }];
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const raw = {
+      ...liveRaw,
+      canonicalEligible: true,
+      deliveryIntent: "reconcile" as const,
+      deliveryKey: "e".repeat(64),
+      id: "recorded-valid-fence-frame",
+      orderingKey: "00000000000000000002",
+      payload: { Action: "game_finalised", FixtureId: "fx-1" },
+      provenance: "recorded_txline_authorised" as const,
+      rawRetention: "authorised_raw" as const,
+      responseHash: "f".repeat(64),
+      rightsGrantId: "archive-grant-1",
+      source: recordedSourceFence.source,
+      sourcePath: "/historical/score",
+      streamKey: recordedSourceFence.streamKey,
+    };
+
+    await expect(
+      repository?.commitCollectorFrame({
+        deliveries: [
+          {
+            derive: () => [
+              {
+                event: {
+                  id: "recorded-valid-fence-event",
+                  payload: { fixtureId: "fx-1", revision: 1 },
+                  type: "fixture.reconciled",
+                },
+                outbox: [],
+                projection: { payload: { revision: 1 }, revision: 1 },
+              },
+            ],
+            fixtureId: "fx-1",
+            raw,
+          },
+        ],
+        mode: "recorded",
+        sourceFence: recordedSourceFence,
+      }),
+    ).resolves.toEqual({
+      deliveries: [{ eventSequences: [1], kind: "committed", revisions: [1] }],
+      kind: "committed",
+    });
+
+    const leaseIndex = fake.queries.findIndex(({ query }) =>
+      query.includes("FROM matchsense.source_leases"),
+    );
+    const rawIndex = fake.queries.findIndex(({ query }) =>
+      query.includes("INSERT INTO matchsense.raw_source_records"),
+    );
+    const projectionIndex = fake.queries.findIndex(({ query }) =>
+      query.includes("INSERT INTO matchsense.fixture_projections"),
+    );
+    expect(leaseIndex).toBeGreaterThan(-1);
+    expect(rawIndex).toBeGreaterThan(leaseIndex);
+    expect(projectionIndex).toBeGreaterThan(rawIndex);
   });
 
   it("does not persist any frame delivery when its fenced cursor is already stale", async () => {

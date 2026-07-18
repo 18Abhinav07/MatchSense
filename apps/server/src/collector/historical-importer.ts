@@ -32,7 +32,7 @@ export interface HistoricalArchiveImporterOptions {
   archive: ArchiveService;
   fixtureTruth: Pick<
     FixtureTruthRepository,
-    "commitCollectorFrame" | "get" | "upsert"
+    "commitCollectorFrame" | "commitFencedFixtureUpsert" | "get"
   >;
   rightsGrantId: string;
   /** Recorded imports do not acquire a live stream lease, but retain this key for the collector frame contract. */
@@ -274,9 +274,11 @@ export function createHistoricalArchiveImporter(
         mode: "recorded",
       });
       if (existing?.status !== "final") {
-        await options.fixtureTruth.upsert(
-          fixtureUpsert(input.fixture, "tracking"),
-        );
+        const tracked = await options.fixtureTruth.commitFencedFixtureUpsert({
+          fixture: fixtureUpsert(input.fixture, "tracking"),
+          sourceFence: options.sourceFence,
+        });
+        if (tracked.kind === "fenced") return { kind: "fenced" };
       }
       const persisted = await options.fixtureTruth.commitCollectorFrame({
         deliveries: prepared.map((delivery) => ({
@@ -308,7 +310,11 @@ export function createHistoricalArchiveImporter(
       if (archive.status !== "REPLAY_READY") {
         return { archive, kind: "terminal_pending" };
       }
-      await options.fixtureTruth.upsert(fixtureUpsert(input.fixture, "final"));
+      const finalized = await options.fixtureTruth.commitFencedFixtureUpsert({
+        fixture: fixtureUpsert(input.fixture, "final"),
+        sourceFence: options.sourceFence,
+      });
+      if (finalized.kind === "fenced") return { kind: "fenced" };
       return { archive, kind: "replay_ready" };
     },
   };

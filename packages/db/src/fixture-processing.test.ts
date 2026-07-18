@@ -99,6 +99,7 @@ describe("atomic fixture envelope processing", () => {
           source: "txline",
           sourceRecordId: "action-1",
           sourceSequence: "620",
+          streamKey: "scores:mainnet",
         },
         sourceFence: {
           fencingToken: fixtureFenceGeneration,
@@ -187,6 +188,7 @@ describe("atomic fixture envelope processing", () => {
           source: "txline",
           sourceRecordId: "coverage-42",
           sourceSequence: "42",
+          streamKey: "scores:mainnet",
         },
         sourceFence: {
           fencingToken: 1,
@@ -250,6 +252,7 @@ describe("atomic fixture envelope processing", () => {
           source: "txline",
           sourceRecordId: "reconcile-1",
           sourceSequence: "621",
+          streamKey: "scores:mainnet",
         },
         sourceFence: {
           fencingToken: 1,

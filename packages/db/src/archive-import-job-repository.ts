@@ -48,6 +48,11 @@ export interface RetryArchiveImportJob extends ClaimedArchiveImportJob {
   error: string;
 }
 
+/** Extends one current, generation-fenced archive-import claim. */
+export interface RenewArchiveImportJobClaim extends ClaimedArchiveImportJob {
+  claimExpiresAt: string;
+}
+
 export interface TerminalArchiveImportJob extends ClaimedArchiveImportJob {
   error: string;
 }
@@ -81,6 +86,9 @@ export interface ArchiveImportJobRepository {
   markReplayReady(input: ClaimedArchiveImportJob): Promise<ArchiveImportJob>;
   markRetry(input: RetryArchiveImportJob): Promise<ArchiveImportJob>;
   recoverExpiredClaims(now: Date): Promise<number>;
+  renewClaim(
+    input: RenewArchiveImportJobClaim,
+  ): Promise<ArchiveImportJob | null>;
 }
 
 export interface FeaturedReplayConfigInput {
@@ -375,6 +383,29 @@ RETURNING ${jobSelectColumns()};`,
         return rows[0] ? parseJob(rows[0]) : null;
       });
     },
+    renewClaim: async (input) => {
+      assertClaimedTransition(input);
+      assertTimestamp(input.claimExpiresAt, "Archive import claim expiry");
+      const rows = await client.unsafe(
+        `UPDATE matchsense.archive_import_jobs
+SET claim_expires_at = $1::timestamptz,
+    updated_at = clock_timestamp()
+WHERE fixture_id = $2
+  AND state = 'claimed'
+  AND claimed_by = $3
+  AND claim_generation = $4
+  AND claim_expires_at > clock_timestamp()
+  AND $1::timestamptz > claim_expires_at
+RETURNING ${jobColumns};`,
+        [
+          input.claimExpiresAt,
+          input.fixtureId,
+          input.workerId,
+          input.claimGeneration,
+        ],
+      );
+      return rows[0] ? parseJob(rows[0]) : null;
+    },
     recoverExpiredClaims: async (now) => {
       if (Number.isNaN(now.valueOf())) {
         throw new Error("Recovery time is invalid");
@@ -633,6 +664,19 @@ WHERE manifest.id = $4
   AND manifest.fixture_id = $2
   AND manifest.mode = 'recorded'
   AND manifest.status = 'REPLAY_READY'
+  AND EXISTS (
+    SELECT 1
+    FROM matchsense.archive_import_jobs AS archive_job
+    JOIN matchsense.archive_import_job_outputs AS archive_output
+      ON archive_output.fixture_id = archive_job.fixture_id
+      AND archive_output.claim_generation = archive_job.claim_generation
+      AND archive_output.archive_manifest_id = archive_job.archive_manifest_id
+      AND archive_output.archive_manifest_hash = archive_job.archive_manifest_hash
+    WHERE archive_job.fixture_id = manifest.fixture_id
+      AND archive_job.state = 'replay_ready'
+      AND archive_job.archive_manifest_id = manifest.id
+      AND archive_job.archive_manifest_hash = manifest.delivery_manifest_hash
+  )
   AND grant.active = true
   AND grant.revoked_at IS NULL
   AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())
@@ -667,6 +711,11 @@ RETURNING slot, fixture_id, archive_manifest_id, archive_manifest_hash, enabled;
 FROM matchsense.featured_replay_configs AS config
 JOIN matchsense.archive_import_jobs AS job
   ON job.fixture_id = config.fixture_id
+JOIN matchsense.archive_import_job_outputs AS output
+  ON output.fixture_id = job.fixture_id
+  AND output.claim_generation = job.claim_generation
+  AND output.archive_manifest_id = job.archive_manifest_id
+  AND output.archive_manifest_hash = job.archive_manifest_hash
 JOIN matchsense.archive_manifests AS archive
   ON archive.id = config.archive_manifest_id
 JOIN matchsense.rights_grants AS grant ON grant.id = archive.rights_grant_id
