@@ -3,10 +3,15 @@ created: 2026-07-17
 project: matchsense
 ecosystem: full-stack
 tags: [implementation, pwa, txline, experience-match, rooms]
-status: active
+status: superseded
 ---
 
 # MatchSense Unified Experience Implementation Plan
+
+> Superseded on 2026-07-18 by
+> [[2026-07-18-real-data-end-to-end-implementation|the real-data end-to-end implementation plan]].
+> This prior plan is retained as historical context only: it contains public
+> synthetic Experience/Demo routes and therefore must not be executed.
 
 > **For Codex:** Execute this plan in dependency order using focused test-first slices. Keep one canonical runtime for Demo, Experience, and live TxLINE. Deploy only after the integrated browser contract passes.
 

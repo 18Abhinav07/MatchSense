@@ -71,11 +71,7 @@ minute, event type, or final outcome.
 The server is the sole authority for a fixture lifecycle:
 
 ```ts
-type FixtureLifecycle =
-  | "scheduled"
-  | "live"
-  | "final"
-  | "result_unavailable";
+type FixtureLifecycle = "scheduled" | "live" | "final" | "result_unavailable";
 ```
 
 - A schedule record can establish fixture identity, participants, and kickoff;

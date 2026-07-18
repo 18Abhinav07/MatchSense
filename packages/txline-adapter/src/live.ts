@@ -17,12 +17,42 @@ export type TxlineKnownAction =
   | "game_finalised"
   | "goal"
   | "halftime_finalised"
+  | "kickoff"
   | "penalty"
   | "score_adjustment"
   | "shot"
   | "substitution"
   | "var"
-  | "var_end";
+  | "var_end"
+  | "yellow_card";
+
+export type TxlineSourceOnlyAction =
+  | "additional_time"
+  | "attack_possession"
+  | "clock_adjustment"
+  | "connected"
+  | "corner"
+  | "coverage_update"
+  | "danger_possession"
+  | "disconnected"
+  | "goal_kick"
+  | "high_danger_possession"
+  | "injury"
+  | "jersey"
+  | "kickoff_team"
+  | "lineups"
+  | "penalty_outcome"
+  | "pitch"
+  | "players_on_the_pitch"
+  | "players_warming_up"
+  | "possession"
+  | "possible"
+  | "safe_possession"
+  | "standby"
+  | "status"
+  | "throw_in"
+  | "venue"
+  | "weather";
 
 const KNOWN_ACTIONS = new Set<TxlineKnownAction>([
   "action_amend",
@@ -32,12 +62,43 @@ const KNOWN_ACTIONS = new Set<TxlineKnownAction>([
   "game_finalised",
   "goal",
   "halftime_finalised",
+  "kickoff",
   "penalty",
   "score_adjustment",
   "shot",
   "substitution",
   "var",
   "var_end",
+  "yellow_card",
+]);
+
+const SOURCE_ONLY_ACTIONS = new Set<TxlineSourceOnlyAction>([
+  "additional_time",
+  "attack_possession",
+  "clock_adjustment",
+  "connected",
+  "corner",
+  "coverage_update",
+  "danger_possession",
+  "disconnected",
+  "goal_kick",
+  "high_danger_possession",
+  "injury",
+  "jersey",
+  "kickoff_team",
+  "lineups",
+  "penalty_outcome",
+  "pitch",
+  "players_on_the_pitch",
+  "players_warming_up",
+  "possession",
+  "possible",
+  "safe_possession",
+  "standby",
+  "status",
+  "throw_in",
+  "venue",
+  "weather",
 ]);
 
 export interface TxlineFixtureContext {
@@ -60,6 +121,15 @@ export interface TxlineSourceReference {
   payloadHash: string;
   sseEventId: string | null;
   sourceTimestampMs: number | null;
+}
+
+export interface TxlineSourceOnlyRecord {
+  action: TxlineSourceOnlyAction;
+  delivery: TxlineDelivery;
+  fixtureId: string;
+  provenance: TxlineDataProvenance;
+  receivedAt: string;
+  source: TxlineSourceReference;
 }
 
 export interface TxlineParticipantStats {
@@ -129,12 +199,14 @@ export interface TxlineWarning {
 
 export type TxlineNormalizeResult =
   | { kind: "supported"; update: TxlineNormalizedUpdate }
+  | { kind: "source_only"; record: TxlineSourceOnlyRecord }
   | { kind: "unsupported"; warning: TxlineWarning };
 
 export type TxlineCanonicalizeResult =
   | { event: TxlineCanonicalEvent; kind: "accepted" }
   | { kind: "duplicate" }
   | { kind: "out_of_order"; warning: TxlineWarning }
+  | { kind: "source_only"; record: TxlineSourceOnlyRecord }
   | { kind: "unsupported"; warning: TxlineWarning };
 
 export interface TxlineSseFrame {
@@ -441,6 +513,14 @@ function knownAction(value: unknown): TxlineKnownAction | null {
     : null;
 }
 
+function sourceOnlyAction(value: unknown): TxlineSourceOnlyAction | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.toLowerCase();
+  return SOURCE_ONLY_ACTIONS.has(normalized as TxlineSourceOnlyAction)
+    ? (normalized as TxlineSourceOnlyAction)
+    : null;
+}
+
 export function normalizeTxlineScoreUpdate(
   payload: unknown,
   metadata: TxlineNormalizeMetadata,
@@ -472,6 +552,29 @@ export function normalizeTxlineScoreUpdate(
   }
 
   const actionValue = pick(unwrapped, "Action", "action");
+  const actionId = asIdentifier(pick(unwrapped, "Id", "id"));
+  const sourceTimestampMs = asFiniteNumber(pick(unwrapped, "Ts", "ts"));
+  const source = {
+    actionId,
+    observedSeq,
+    payloadHash: hashPayload(unwrapped),
+    sseEventId: metadata.sseEventId,
+    sourceTimestampMs,
+  };
+  const lifecycleAction = sourceOnlyAction(actionValue);
+  if (lifecycleAction !== null) {
+    return {
+      kind: "source_only",
+      record: {
+        action: lifecycleAction,
+        delivery: metadata.delivery,
+        fixtureId,
+        provenance: metadata.provenance,
+        receivedAt: metadata.receivedAt,
+        source,
+      },
+    };
+  }
   const action = knownAction(actionValue);
   if (action === null) {
     return {
@@ -487,20 +590,21 @@ export function normalizeTxlineScoreUpdate(
   }
 
   const participantStatsResult = participantStatsOf(unwrapped);
-  if (participantStatsResult === "invalid") {
+  if (participantStatsResult === "invalid" && action === "goal") {
     return {
       kind: "unsupported",
       warning: warning({
         code: "invalid_score_shape",
         fixtureId,
         message:
-          "TxLINE score update lacks participant totals with valid non-negative counters",
+          "TxLINE goal update lacks participant totals with valid non-negative counters",
         observedSeq,
         sseEventId: metadata.sseEventId,
       }),
     };
   }
-  const participantStats = participantStatsResult;
+  const participantStats =
+    participantStatsResult === "invalid" ? null : participantStatsResult;
   const participantScore =
     participantStats === null
       ? null
@@ -539,14 +643,13 @@ export function normalizeTxlineScoreUpdate(
   const participantValue = pick(unwrapped, "Participant", "participant");
   const clock = pick(unwrapped, "Clock", "clock");
   const data = pick(unwrapped, "Data", "data");
-  const sourceTimestampMs = asFiniteNumber(pick(unwrapped, "Ts", "ts"));
   const statusId = asFiniteNumber(pick(unwrapped, "StatusId", "statusId"));
 
   return {
     kind: "supported",
     update: {
       action,
-      actionId: asIdentifier(pick(unwrapped, "Id", "id")),
+      actionId,
       clockSeconds: isObject(clock)
         ? asNonNegativeInteger(pick(clock, "Seconds", "seconds"))
         : null,
@@ -565,13 +668,7 @@ export function normalizeTxlineScoreUpdate(
       provenance: metadata.provenance,
       receivedAt: metadata.receivedAt,
       score,
-      source: {
-        actionId: asIdentifier(pick(unwrapped, "Id", "id")),
-        observedSeq,
-        payloadHash: hashPayload(unwrapped),
-        sseEventId: metadata.sseEventId,
-        sourceTimestampMs,
-      },
+      source,
       statusId,
       varOutcome: varOutcomeOf(data),
       varReviewType: varReviewTypeOf(data),
@@ -697,6 +794,7 @@ export function createTxlineOrderedCanonicalizer(
           fixtureId === null ? undefined : contexts.get(fixtureId),
       });
       if (normalized.kind === "unsupported") return normalized;
+      if (normalized.kind === "source_only") return normalized;
 
       const update = normalized.update;
       const dedupeKey = [

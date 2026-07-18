@@ -193,6 +193,104 @@ describe("TxLINE SSE and historical response decoding", () => {
 });
 
 describe("ordered canonical source revisions", () => {
+  it("retains a coverage update without creating a canonical football event", () => {
+    const canonicalizer = createTxlineOrderedCanonicalizer({
+      fixtureContexts: [fixtureContext],
+    });
+
+    const result = canonicalizer.accept(
+      goalUpdate({ Action: "coverage_update", Seq: 619 }),
+      {
+        delivery: "reconciliation",
+        provenance: "recorded_txline_authorised",
+        receivedAt,
+        sseEventId: null,
+      },
+    );
+
+    expect(result).toMatchObject({
+      kind: "source_only",
+      record: {
+        action: "coverage_update",
+        fixtureId: "18237038",
+        source: { observedSeq: "619" },
+      },
+    });
+  });
+
+  it.each(["yellow_card", "kickoff"] as const)(
+    "accepts observed %s actions as canonical events",
+    (action) => {
+      const canonicalizer = createTxlineOrderedCanonicalizer({
+        fixtureContexts: [fixtureContext],
+      });
+
+      const result = canonicalizer.accept(
+        goalUpdate({ Action: action, Seq: 620 }),
+        {
+          delivery: "reconciliation",
+          provenance: "recorded_txline_authorised",
+          receivedAt,
+          sseEventId: null,
+        },
+      );
+
+      expect(result).toMatchObject({
+        event: { action, fixtureId: "18237038" },
+        kind: "accepted",
+      });
+    },
+  );
+
+  it("accepts a yellow card when its provider score snapshot is partial", () => {
+    const result = normalizeTxlineScoreUpdate(
+      goalUpdate({
+        Action: "yellow_card",
+        Score: {
+          Participant1: {},
+          Participant2: {},
+        },
+      }),
+      {
+        delivery: "reconciliation",
+        fixtureContext,
+        provenance: "recorded_txline_authorised",
+        receivedAt,
+        sseEventId: null,
+      },
+    );
+
+    expect(result).toMatchObject({
+      kind: "supported",
+      update: {
+        action: "yellow_card",
+        participantScore: null,
+        participantStats: null,
+      },
+    });
+  });
+
+  it("retains low-level corner telemetry without creating a canonical event", () => {
+    const canonicalizer = createTxlineOrderedCanonicalizer({
+      fixtureContexts: [fixtureContext],
+    });
+
+    const result = canonicalizer.accept(
+      goalUpdate({ Action: "corner", Seq: 620 }),
+      {
+        delivery: "reconciliation",
+        provenance: "recorded_txline_authorised",
+        receivedAt,
+        sseEventId: null,
+      },
+    );
+
+    expect(result).toMatchObject({
+      kind: "source_only",
+      record: { action: "corner", fixtureId: "18237038" },
+    });
+  });
+
   it("deduplicates reconnect delivery, advances same-action revisions, and rejects regression", () => {
     const canonicalizer = createTxlineOrderedCanonicalizer({
       fixtureContexts: [fixtureContext],

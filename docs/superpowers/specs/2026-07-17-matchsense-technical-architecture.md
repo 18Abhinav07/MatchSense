@@ -3,7 +3,7 @@ created: 2026-07-17
 project: matchsense
 ecosystem: full-stack
 tags: [architecture, txline, pwa, railway, state-machines, evidence]
-status: architecture-approved-pending-gate-a
+status: architecture-approved-gate-a-passed
 ---
 
 # MatchSense Technical Architecture and Evidence Contract
@@ -169,20 +169,20 @@ The implementation extends the existing durable tables instead of rewriting
 the whole database. Names below are logical contracts; migrations make their
 constraints explicit.
 
-| Entity | Purpose and identity | Required invariant |
-|---|---|---|
-| `fixtures` + `fixture_schedule_observations` | source fixture ID, teams, kickoff, source timestamp, lifecycle and coverage | schedule can update schedule fields only; it cannot set a score or `FINAL` |
-| `rights_grants` | private evidence reference, scopes, retention expiry and revocation state | ingestion fails closed unless the required `live_display`, `normalised_retention`, `raw_retention`, `replay`, `audio`, or `fanout` scope is active |
-| `source_deliveries` (current raw record foundation) | immutable ordered source envelope; `delivery_key` is a non-null SHA-256 of source, stream, fixture, source id/sequence/frame ordinal, and payload hash | carries non-null `deliveryIntent: realtime | reconcile`, immutable `orderingKey`, rights grant id, and explicit raw retention (`authorised_raw` or `normalised_only`) |
-| `canonical_event_families` | stable event-family key, kind, fixture and causal links | a family owns many append-only revisions, never mutates history |
-| `canonical_event_revisions` (current Moment revision foundation) | family revision, status, source delivery, `supersedes/overturns` references | revision is monotonically increasing per family and can only point to the same fixture |
-| `fixture_projections` + `fixture_events` | current canonical snapshot and strictly increasing fixture `seq` for clients | carries source delivery intent; a `seq` has one payload forever and a client can replay from it |
-| `archive_manifests` | ordered delivery ids, reducer version, projection hash, finalisation evidence, rights reference | a replay is publishable only when its manifest verifies |
-| `outbox` + `consumer_receipts` + dead letters | at-least-once side effect queue | external work is idempotent by consumer receipt, never by in-memory flags |
-| `commentary_jobs` + `commentary_artifacts` | transcript/job status plus ready compressed bytes | artifact key is `(fixture, family, revision, language, voice, templateVersion)` |
-| `notification_intents` + `push_deliveries` | fan/device-specific intent, provider result and endpoint state | provider acceptance is not claimed as seen/read/sounded |
-| `listening_sessions` + `listening_deliveries` | fan, fixture, preference, attach/play state, expiry, and per-session ordered cue/speech delivery | unique `(session, fixtureSeq, deliveryKind, artifactKey)` rows track `queued`, `sent`, `started`, `skipped`, `superseded` or `expired` |
-| `room_calls`, `room_reactions`, `room_settlements` | immutable locked calls, confirmed-Moment reactions, versioned scoring | settlement key is `(room, finalProjectionRevision, rulesetVersion)` |
+| Entity                                                           | Purpose and identity                                                                                                                                   | Required invariant                                                                                                                                 |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fixtures` + `fixture_schedule_observations`                     | source fixture ID, teams, kickoff, source timestamp, lifecycle and coverage                                                                            | schedule can update schedule fields only; it cannot set a score or `FINAL`                                                                         |
+| `rights_grants`                                                  | private evidence reference, scopes, retention expiry and revocation state                                                                              | ingestion fails closed unless the required `live_display`, `normalised_retention`, `raw_retention`, `replay`, `audio`, or `fanout` scope is active |
+| `source_deliveries` (current raw record foundation)              | immutable ordered source envelope; `delivery_key` is a non-null SHA-256 of source, stream, fixture, source id/sequence/frame ordinal, and payload hash | carries non-null `deliveryIntent: realtime                                                                                                         | reconcile`, immutable `orderingKey`, rights grant id, and explicit raw retention (`authorised_raw`or`normalised_only`) |
+| `canonical_event_families`                                       | stable event-family key, kind, fixture and causal links                                                                                                | a family owns many append-only revisions, never mutates history                                                                                    |
+| `canonical_event_revisions` (current Moment revision foundation) | family revision, status, source delivery, `supersedes/overturns` references                                                                            | revision is monotonically increasing per family and can only point to the same fixture                                                             |
+| `fixture_projections` + `fixture_events`                         | current canonical snapshot and strictly increasing fixture `seq` for clients                                                                           | carries source delivery intent; a `seq` has one payload forever and a client can replay from it                                                    |
+| `archive_manifests`                                              | ordered delivery ids, reducer version, projection hash, finalisation evidence, rights reference                                                        | a replay is publishable only when its manifest verifies                                                                                            |
+| `outbox` + `consumer_receipts` + dead letters                    | at-least-once side effect queue                                                                                                                        | external work is idempotent by consumer receipt, never by in-memory flags                                                                          |
+| `commentary_jobs` + `commentary_artifacts`                       | transcript/job status plus ready compressed bytes                                                                                                      | artifact key is `(fixture, family, revision, language, voice, templateVersion)`                                                                    |
+| `notification_intents` + `push_deliveries`                       | fan/device-specific intent, provider result and endpoint state                                                                                         | provider acceptance is not claimed as seen/read/sounded                                                                                            |
+| `listening_sessions` + `listening_deliveries`                    | fan, fixture, preference, attach/play state, expiry, and per-session ordered cue/speech delivery                                                       | unique `(session, fixtureSeq, deliveryKind, artifactKey)` rows track `queued`, `sent`, `started`, `skipped`, `superseded` or `expired`             |
+| `room_calls`, `room_reactions`, `room_settlements`               | immutable locked calls, confirmed-Moment reactions, versioned scoring                                                                                  | settlement key is `(room, finalProjectionRevision, rulesetVersion)`                                                                                |
 
 Five identities remain distinct:
 
@@ -439,17 +439,17 @@ Room: DRAFT → OPEN → LOCKED(actual kickoff) → PROVISIONAL → SETTLED
 
 ## 6. Fan-facing availability rules
 
-| Capability | Inclusion rule | Failure behavior |
-|---|---|---|
-| Today / schedule | known live, upcoming, or verified final fixture | omit unavailable result rows; show an intentional empty state when no eligible fixtures exist |
-| Live Companion | healthy source + contiguous canonical snapshot | show `CACHED · AS OF …`; suppress cinematic Moment and audio on a gap |
-| Moment | confirmed current revision | show factual correction/neutral state for stale or superseded deep link |
-| Push | iPhone/iPad: installed Home Screen PWA + supported + permission/device valid; macOS/Android: tested feature capability + permission/device valid | keep in-app updates; surface a repair action; never promise lock-screen delivery |
-| Listening | user gesture + stream attach + `play()` confirmation | explicit blocked/paused/reconnect state; cue/text fallback on speech failure |
-| Memory | verified final archive manifest | no Memory action if the fixture lacks verified history |
-| Recorded Replay | Gate A archive marked `REPLAY_READY` | hide Replay completely, not a fabricated substitute |
-| Room | real upcoming/live fixture and all v1 targets data-qualified | hide Create Room for that fixture; never simulate settlement |
-| Player/corner calls | authoritative player/card/corner final-data contracts | not in v1 |
+| Capability          | Inclusion rule                                                                                                                                   | Failure behavior                                                                              |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| Today / schedule    | known live, upcoming, or verified final fixture                                                                                                  | omit unavailable result rows; show an intentional empty state when no eligible fixtures exist |
+| Live Companion      | healthy source + contiguous canonical snapshot                                                                                                   | show `CACHED · AS OF …`; suppress cinematic Moment and audio on a gap                         |
+| Moment              | confirmed current revision                                                                                                                       | show factual correction/neutral state for stale or superseded deep link                       |
+| Push                | iPhone/iPad: installed Home Screen PWA + supported + permission/device valid; macOS/Android: tested feature capability + permission/device valid | keep in-app updates; surface a repair action; never promise lock-screen delivery              |
+| Listening           | user gesture + stream attach + `play()` confirmation                                                                                             | explicit blocked/paused/reconnect state; cue/text fallback on speech failure                  |
+| Memory              | verified final archive manifest                                                                                                                  | no Memory action if the fixture lacks verified history                                        |
+| Recorded Replay     | Gate A archive marked `REPLAY_READY`                                                                                                             | hide Replay completely, not a fabricated substitute                                           |
+| Room                | real upcoming/live fixture and all v1 targets data-qualified                                                                                     | hide Create Room for that fixture; never simulate settlement                                  |
+| Player/corner calls | authoritative player/card/corner final-data contracts                                                                                            | not in v1                                                                                     |
 
 ## 7. End-to-end flows
 
@@ -537,22 +537,35 @@ idle.
 
 ## 9. Gate A — historical replay spike
 
-Before product code begins, a small disposable validation script must use the
-subscribed TxLINE credential and one completed fixture. It passes only if:
+**Passed 2026-07-18.** The subscribed TxLINE historical endpoint returned two
+byte-identical ordered responses for fixture `18237038`: `1,027` source
+records, `154` canonical football records, `873` source-only records, and a
+terminal `game_finalised` with `StatusId=100` at provider sequence `1026`.
+The executable evidence and non-secret hashes are recorded in
+[[10-Projects/Web3-Builds/Hackathons/MatchSense/validation/spike-results]].
+
+The proof script passes only if:
 
 1. two historical fetches produce the same stable fixture id, terminal
    authoritative fact linked to that fixture, source-owned total-order field,
    and identical ordered-delivery manifests: ordering key, ordinal, delivery
    key, and response hash; an observed documented revision rule is the only
    permitted exception and must be recorded in the manifest;
-2. all truth-critical actions parse without an unresolved gap, and every
-   archived row retains an immutable `orderingKey` and ordinal;
+2. all truth-critical actions parse without an unresolved gap, while observed
+   source-only lifecycle/coverage/telemetry records are retained in the source
+   manifest and cannot create a canonical revision or fan-visible side effect;
+   every archived row retains an immutable `orderingKey` and ordinal;
 3. the archive stores response hashes, ordering proof, source headers/metadata,
    and an active private rights-grant reference without exposing credentials;
 4. two clean reductions of the ordered archive produce identical canonical
    event/revision, projection, and manifest hashes;
-5. re-ingestion into the original store creates zero new projection revisions,
-   client events, outbox rows, commentary jobs, or Room settlements.
+5. re-ingestion produces zero new canonical outcomes. In the production store,
+   that must entail zero new projection revisions, client events, outbox rows,
+   commentary jobs, or Room settlements.
+
+The observed provider terminal contract is `action=game_finalised`,
+`statusId=100`, and `confirmed !== false`; `Confirmed` may be omitted. The
+worker must not require an invented `Confirmed:true` flag to finalise a fixture.
 
 Failure removes Recorded Replay, its judge walkthrough, and history audio from
 the public scope. It does not downgrade to authored football data.
