@@ -20,6 +20,7 @@ import type {
 } from "./archive-service.js";
 import type {
   HistoricalArchiveImporter,
+  HistoricalFixtureImportInput,
   HistoricalArchiveImporterOptions,
 } from "./historical-importer.js";
 import { createArchiveImportRunner } from "./archive-import-runner.js";
@@ -129,11 +130,33 @@ function verifiedOutput(): ArchiveImportVerifiedOutput {
   };
 }
 
+function deferred<T>() {
+  let reject!: (error: unknown) => void;
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
+
 function harness(
   input: {
+    bindError?: Error;
     claim?: ArchiveImportJob | null;
     fetchError?: Error;
+    fetchImpl?: (
+      input: FetchTxlineHistoricalRecordsOptions,
+    ) => Promise<TxlineRawRecord[]>;
     importerError?: Error;
+    importerImpl?: (
+      input: HistoricalFixtureImportInput,
+    ) => Promise<
+      | { kind: "empty" }
+      | { kind: "fenced" }
+      | { archive: ArchiveRebuildResult; kind: "replay_ready" }
+      | { archive: ArchiveRebuildResult; kind: "terminal_pending" }
+    >;
     importerResult?:
       | { kind: "empty" }
       | { kind: "fenced" }
@@ -141,6 +164,12 @@ function harness(
       | { archive: ArchiveRebuildResult; kind: "terminal_pending" };
     leaseError?: Error;
     lease?: SourceLeaseRecord | null;
+    renewClaimError?: Error;
+    renewClaimResult?: ArchiveImportJob | null;
+    renewLeaseError?: Error;
+    renewLeaseResult?: SourceLeaseRecord | null;
+    readyError?: Error;
+    releaseError?: Error;
   } = {},
 ) {
   const calls: string[] = [];
@@ -160,6 +189,7 @@ function harness(
     | "markRejected"
     | "markReplayReady"
     | "markRetry"
+    | "renewClaim"
   > = {
     bindVerifiedArchiveOutput: vi.fn(async (value) => {
       calls.push("bind");
@@ -170,6 +200,7 @@ function harness(
         fixtureId: claimed.fixtureId,
         workerId,
       });
+      if (input.bindError) throw input.bindError;
       return verifiedOutput();
     }),
     claim: vi.fn(async () => {
@@ -201,6 +232,7 @@ function harness(
         fixtureId: claimed.fixtureId,
         workerId,
       });
+      if (input.readyError) throw input.readyError;
       return claimed;
     }),
     markRetry: vi.fn(async (value) => {
@@ -213,10 +245,22 @@ function harness(
       });
       return claimed;
     }),
+    renewClaim: vi.fn(async (value) => {
+      calls.push("renew_claim");
+      expect(value).toMatchObject({
+        claimGeneration: claimed.claimGeneration,
+        fixtureId: claimed.fixtureId,
+        workerId,
+      });
+      if (input.renewClaimError) throw input.renewClaimError;
+      return input.renewClaimResult === undefined
+        ? claimed
+        : input.renewClaimResult;
+    }),
   };
   const sourceState: Pick<
     SourceStateRepository,
-    "acquireLease" | "releaseLease"
+    "acquireLease" | "releaseLease" | "renewLease"
   > = {
     acquireLease: vi.fn(async (value) => {
       calls.push("lease");
@@ -239,7 +283,22 @@ function harness(
         source: "txline_historical",
         streamKey: "archive-imports",
       });
+      if (input.releaseError) throw input.releaseError;
       return true;
+    }),
+    renewLease: vi.fn(async (value) => {
+      calls.push("renew_lease");
+      expect(value).toMatchObject({
+        fencingToken: sourceLease.fencingToken,
+        holderId: sourceLease.holderId,
+        mode: "recorded",
+        source: "txline_historical",
+        streamKey: "archive-imports",
+      });
+      if (input.renewLeaseError) throw input.renewLeaseError;
+      return input.renewLeaseResult === undefined
+        ? sourceLease
+        : input.renewLeaseResult;
     }),
   };
   const fetchHistoricalRecords = vi.fn(
@@ -248,6 +307,7 @@ function harness(
       expect(value.fixtureId).toBe(claimed.fixtureId);
       expect(value.now?.()).toBe(now.toISOString());
       if (input.fetchError) throw input.fetchError;
+      if (input.fetchImpl) return input.fetchImpl(value);
       return [historicalRecord];
     },
   );
@@ -259,6 +319,7 @@ function harness(
         records: [historicalRecord],
       });
       if (input.importerError) throw input.importerError;
+      if (input.importerImpl) return input.importerImpl(value);
       return (
         input.importerResult ?? {
           archive: replayReadyArchive,
@@ -385,7 +446,7 @@ describe("archive import runner", () => {
     expect(test.calls).toContain("release");
   });
 
-  it.each([400, 404, 422])(
+  it.each([400, 422])(
     "rejects an explicitly invalid historical-provider response (%i)",
     async (status) => {
       const test = harness({
@@ -405,6 +466,21 @@ describe("archive import runner", () => {
       expect(test.calls).toContain("release");
     },
   );
+
+  it("retries a historical 404 because archive publication can lag the terminal", async () => {
+    const test = harness({
+      fetchError: new TxlineHttpError(404, "/api/scores/historical/18237038"),
+    });
+
+    await expect(test.runner.runOnce(now)).resolves.toEqual({
+      fixtureId,
+      kind: "retry_wait",
+    });
+
+    expect(test.calls).toContain("retry");
+    expect(test.calls).not.toContain("rejected");
+    expect(test.calls).toContain("release");
+  });
 
   it("retries a finite-history transport error at the fixed bounded retry time", async () => {
     const test = harness({
@@ -526,5 +602,208 @@ describe("archive import runner", () => {
       "rejected",
       "release",
     ]);
+  });
+
+  it("retries without publishing when the post-import binding is stale or invalid", async () => {
+    const test = harness({
+      bindError: new Error(
+        "Archive import job claim or current archive output is invalid",
+      ),
+    });
+
+    await expect(test.runner.runOnce(now)).resolves.toEqual({
+      fixtureId,
+      kind: "retry_wait",
+    });
+
+    expect(test.calls).toEqual([
+      "claim",
+      "lease",
+      "create_importer",
+      "fetch",
+      "import",
+      "bind",
+      "retry",
+      "release",
+    ]);
+    expect(test.calls).not.toContain("ready");
+  });
+
+  it("marks an owned import blocked when binding discovers a revoked replay grant", async () => {
+    const test = harness({
+      bindError: new Error(
+        "Archive replay grant is inactive, expired, revoked, or missing replay scope",
+      ),
+    });
+
+    await expect(test.runner.runOnce(now)).resolves.toEqual({
+      fixtureId,
+      kind: "blocked_rights",
+    });
+
+    expect(test.calls).toEqual([
+      "claim",
+      "lease",
+      "create_importer",
+      "fetch",
+      "import",
+      "bind",
+      "blocked_rights",
+      "release",
+    ]);
+    expect(test.calls).not.toContain("ready");
+  });
+
+  it("retries without publishing when readying the bound output loses its generation", async () => {
+    const test = harness({
+      readyError: new Error(
+        "Archive import job claim or verified archive output is invalid",
+      ),
+    });
+
+    await expect(test.runner.runOnce(now)).resolves.toEqual({
+      fixtureId,
+      kind: "retry_wait",
+    });
+
+    expect(test.calls).toEqual([
+      "claim",
+      "lease",
+      "create_importer",
+      "fetch",
+      "import",
+      "bind",
+      "ready",
+      "retry",
+      "release",
+    ]);
+  });
+
+  it("does not let release failure mask an already-safe replay-ready outcome", async () => {
+    const test = harness({
+      releaseError: new Error("recorded lease release transport failure"),
+    });
+
+    await expect(test.runner.runOnce(now)).resolves.toEqual({
+      fixtureId,
+      kind: "replay_ready",
+    });
+
+    expect(test.calls).toEqual([
+      "claim",
+      "lease",
+      "create_importer",
+      "fetch",
+      "import",
+      "bind",
+      "ready",
+      "release",
+    ]);
+  });
+
+  it("renews both fenced ownerships while a finite historical fetch is still in flight", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const fetch = deferred<TxlineRawRecord[]>();
+    const test = harness({ fetchImpl: async () => fetch.promise });
+    const run = test.runner.runOnce(now);
+
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(test.calls).toContain("renew_lease");
+      expect(test.calls).toContain("renew_claim");
+
+      fetch.resolve([historicalRecord]);
+      await expect(run).resolves.toEqual({
+        fixtureId,
+        kind: "replay_ready",
+      });
+    } finally {
+      fetch.resolve([historicalRecord]);
+      await run.catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("aborts the finite fetch and never imports when a renewed archive claim is lost", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const fetchStarted = deferred<void>();
+    const fallback = deferred<TxlineRawRecord[]>();
+    const test = harness({
+      fetchImpl: async ({ signal }) => {
+        fetchStarted.resolve();
+        return new Promise<TxlineRawRecord[]>((resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+          fallback.promise.then(resolve, reject);
+        });
+      },
+      renewClaimResult: null,
+    });
+    const run = test.runner.runOnce(now);
+
+    try {
+      await fetchStarted.promise;
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(test.calls).toContain("renew_lease");
+      expect(test.calls).toContain("renew_claim");
+      await expect(run).resolves.toEqual({
+        fixtureId,
+        kind: "retry_wait",
+      });
+      expect(test.calls).not.toContain("import");
+      expect(test.calls).not.toContain("bind");
+      expect(test.calls).not.toContain("ready");
+    } finally {
+      fallback.resolve([historicalRecord]);
+      await run.catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("never binds or publishes when source ownership is lost during a non-cancellable import", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const importerStarted = deferred<void>();
+    const importerResult = deferred<{
+      archive: ArchiveRebuildResult;
+      kind: "replay_ready";
+    }>();
+    const test = harness({
+      importerImpl: async () => {
+        importerStarted.resolve();
+        return importerResult.promise;
+      },
+      renewLeaseResult: null,
+    });
+    const run = test.runner.runOnce(now);
+
+    try {
+      await importerStarted.promise;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(test.calls).toContain("renew_lease");
+
+      importerResult.resolve({
+        archive: replayReadyArchive,
+        kind: "replay_ready",
+      });
+      await expect(run).resolves.toEqual({
+        fixtureId,
+        kind: "retry_wait",
+      });
+      expect(test.calls).not.toContain("bind");
+      expect(test.calls).not.toContain("ready");
+    } finally {
+      importerResult.resolve({
+        archive: replayReadyArchive,
+        kind: "replay_ready",
+      });
+      await run.catch(() => undefined);
+      vi.useRealTimers();
+    }
   });
 });

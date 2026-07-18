@@ -23,6 +23,7 @@ import {
 } from "./historical-importer.js";
 
 const RECORDED_LEASE_DURATION_MS = 2 * 60_000;
+const OWNERSHIP_RENEWAL_MS = RECORDED_LEASE_DURATION_MS / 2;
 const RETRY_DELAY_MS = 30_000;
 
 const recordedLeaseKey = {
@@ -53,6 +54,7 @@ export interface ArchiveImportRunnerOptions {
     | "markRejected"
     | "markReplayReady"
     | "markRetry"
+    | "renewClaim"
   >;
   client: TxlineAuthenticatedClient;
   createHistoricalArchiveImporter?: (
@@ -63,10 +65,13 @@ export interface ArchiveImportRunnerOptions {
   ) => Promise<TxlineRawRecord[]>;
   fixtureTruth: Pick<
     FixtureTruthRepository,
-    "commitCollectorFrame" | "get" | "upsert"
+    "commitCollectorFrame" | "commitFencedFixtureUpsert" | "get"
   >;
   rightsGrantId: string;
-  sourceState: Pick<SourceStateRepository, "acquireLease" | "releaseLease">;
+  sourceState: Pick<
+    SourceStateRepository,
+    "acquireLease" | "releaseLease" | "renewLease"
+  >;
   workerId: string;
 }
 
@@ -120,7 +125,7 @@ function failureKind(
     if (error.status === 401 || error.status === 403) {
       return "blocked_rights";
     }
-    if (error.status === 400 || error.status === 404 || error.status === 422) {
+    if (error.status === 400 || error.status === 422) {
       return "rejected";
     }
     return "retry_wait";
@@ -162,6 +167,62 @@ export function createArchiveImportRunner(
     });
   };
 
+  const retrySafely = async (
+    job: ArchiveImportJob,
+    now: Date,
+    error: string,
+  ) => {
+    try {
+      await retry(job, now, error);
+    } catch {
+      // A lost/expired claim cannot be transitioned by this worker. The
+      // durable claim recovery path will make it due again; never overwrite a
+      // newer generation just to report a retry locally.
+    }
+  };
+
+  const reject = async (
+    job: ArchiveImportJob,
+    now: Date,
+    error: string,
+  ): Promise<ArchiveImportRunResult> => {
+    try {
+      await options.archiveImportJobs.markRejected({
+        ...workerClaim(job, options.workerId),
+        error,
+      });
+      return { fixtureId: job.fixtureId, kind: "rejected" };
+    } catch {
+      await retrySafely(job, now, error);
+      return { fixtureId: job.fixtureId, kind: "retry_wait" };
+    }
+  };
+
+  const settleFailure = async (
+    job: ArchiveImportJob,
+    now: Date,
+    error: unknown,
+  ): Promise<ArchiveImportRunResult> => {
+    const kind = failureKind(error);
+    if (kind === "blocked_rights") {
+      try {
+        await options.archiveImportJobs.markBlockedRights({
+          ...workerClaim(job, options.workerId),
+          error: errorMessage(error),
+        });
+        return { fixtureId: job.fixtureId, kind };
+      } catch {
+        await retrySafely(job, now, errorMessage(error));
+        return { fixtureId: job.fixtureId, kind: "retry_wait" };
+      }
+    }
+    if (kind === "rejected") {
+      return reject(job, now, errorMessage(error));
+    }
+    await retrySafely(job, now, errorMessage(error));
+    return { fixtureId: job.fixtureId, kind: "retry_wait" };
+  };
+
   return {
     async runOnce(now = new Date()) {
       const job = await options.archiveImportJobs.claim(options.workerId, now);
@@ -175,13 +236,84 @@ export function createArchiveImportRunner(
           leaseUntil: isoAt(now, RECORDED_LEASE_DURATION_MS),
         });
       } catch (error) {
-        await retry(job, now, errorMessage(error));
-        return { fixtureId: job.fixtureId, kind: "retry_wait" };
+        return settleFailure(job, now, error);
       }
       if (!lease) {
-        await retry(job, now, "recorded archive import lease is held");
+        await retrySafely(job, now, "recorded archive import lease is held");
         return { fixtureId: job.fixtureId, kind: "lease_conflict" };
       }
+
+      let currentLease = lease;
+      let ownershipLost = false;
+      let renewalInFlight: Promise<void> | null = null;
+      let stopping = false;
+      const fetchController = new AbortController();
+
+      const recordOwnershipLoss = (error: unknown) => {
+        ownershipLost = true;
+        // The finite TxLINE fetch accepts an AbortSignal. The importer itself
+        // commits through a source fence and cannot be cancelled once its DB
+        // transaction starts, so the checks below deliberately prevent any
+        // output binding or ready transition after ownership is lost.
+        if (!fetchController.signal.aborted) {
+          fetchController.abort(error);
+        }
+      };
+
+      const renewOwnership = async () => {
+        const renewalAt = new Date();
+        const leaseUntil = isoAt(renewalAt, RECORDED_LEASE_DURATION_MS);
+        try {
+          const [renewedLease, renewedClaim] = await Promise.all([
+            options.sourceState.renewLease({
+              ...recordedLeaseKey,
+              fencingToken: currentLease.fencingToken,
+              holderId: currentLease.holderId,
+              leaseUntil,
+            }),
+            options.archiveImportJobs.renewClaim({
+              ...workerClaim(job, options.workerId),
+              claimExpiresAt: leaseUntil,
+            }),
+          ]);
+
+          // Keep the newest lease for final release even if the paired claim
+          // was lost. A missing result on either side makes the worker stale.
+          if (renewedLease) currentLease = renewedLease;
+          if (!renewedLease || !renewedClaim) {
+            recordOwnershipLoss(
+              new Error("recorded archive import ownership was lost"),
+            );
+          }
+        } catch (error) {
+          // A renewal transport failure is not proof that our ownership is
+          // still current. Stop work instead of risking a stale publication.
+          recordOwnershipLoss(error);
+        }
+      };
+
+      const startRenewal = () => {
+        if (stopping || ownershipLost || renewalInFlight) return;
+        const flight = renewOwnership();
+        renewalInFlight = flight;
+        void flight.finally(() => {
+          if (renewalInFlight === flight) renewalInFlight = null;
+        });
+      };
+
+      const renewalTimer = setInterval(startRenewal, OWNERSHIP_RENEWAL_MS);
+      const ownershipIsCurrent = async () => {
+        await renewalInFlight;
+        return !ownershipLost;
+      };
+      const retryAfterOwnershipLoss = async () => {
+        await retrySafely(
+          job,
+          new Date(),
+          "recorded archive import ownership was lost",
+        );
+        return { fixtureId: job.fixtureId, kind: "retry_wait" } as const;
+      };
 
       try {
         let imported: Awaited<
@@ -198,33 +330,26 @@ export function createArchiveImportRunner(
             client: options.client,
             fixtureId: job.fixtureId,
             now: () => now.toISOString(),
+            signal: fetchController.signal,
           });
+          if (!(await ownershipIsCurrent())) {
+            return retryAfterOwnershipLoss();
+          }
           imported = await importer.importFixture({
             fixture: frozenFixture(job),
             records,
           });
         } catch (error) {
-          const kind = failureKind(error);
-          if (kind === "blocked_rights") {
-            await options.archiveImportJobs.markBlockedRights({
-              ...workerClaim(job, options.workerId),
-              error: errorMessage(error),
-            });
-            return { fixtureId: job.fixtureId, kind };
-          }
-          if (kind === "rejected") {
-            await options.archiveImportJobs.markRejected({
-              ...workerClaim(job, options.workerId),
-              error: errorMessage(error),
-            });
-            return { fixtureId: job.fixtureId, kind };
-          }
-          await retry(job, now, errorMessage(error));
-          return { fixtureId: job.fixtureId, kind };
+          if (ownershipLost) return retryAfterOwnershipLoss();
+          return settleFailure(job, now, error);
+        }
+
+        if (!(await ownershipIsCurrent())) {
+          return retryAfterOwnershipLoss();
         }
 
         if (imported.kind !== "replay_ready") {
-          await retry(
+          await retrySafely(
             job,
             now,
             imported.kind === "empty"
@@ -238,28 +363,42 @@ export function createArchiveImportRunner(
 
         const manifest = imported.archive.manifest;
         if (!manifest || imported.archive.status !== "REPLAY_READY") {
-          await options.archiveImportJobs.markRejected({
-            ...workerClaim(job, options.workerId),
-            error:
-              "Recorded importer returned replay_ready without a replay-ready manifest",
-          });
-          return { fixtureId: job.fixtureId, kind: "rejected" };
+          return reject(
+            job,
+            now,
+            "Recorded importer returned replay_ready without a replay-ready manifest",
+          );
         }
-        await options.archiveImportJobs.bindVerifiedArchiveOutput({
-          ...workerClaim(job, options.workerId),
-          archiveManifestHash: manifest.deliveryManifestHash,
-          archiveManifestId: manifest.id,
-        });
-        await options.archiveImportJobs.markReplayReady(
-          workerClaim(job, options.workerId),
-        );
-        return { fixtureId: job.fixtureId, kind: "replay_ready" };
+        if (!(await ownershipIsCurrent())) {
+          return retryAfterOwnershipLoss();
+        }
+        try {
+          await options.archiveImportJobs.bindVerifiedArchiveOutput({
+            ...workerClaim(job, options.workerId),
+            archiveManifestHash: manifest.deliveryManifestHash,
+            archiveManifestId: manifest.id,
+          });
+          await options.archiveImportJobs.markReplayReady(
+            workerClaim(job, options.workerId),
+          );
+          return { fixtureId: job.fixtureId, kind: "replay_ready" };
+        } catch (error) {
+          return settleFailure(job, now, error);
+        }
       } finally {
-        await options.sourceState.releaseLease({
-          ...recordedLeaseKey,
-          fencingToken: lease.fencingToken,
-          holderId: lease.holderId,
-        });
+        stopping = true;
+        clearInterval(renewalTimer);
+        await renewalInFlight;
+        try {
+          await options.sourceState.releaseLease({
+            ...recordedLeaseKey,
+            fencingToken: currentLease.fencingToken,
+            holderId: currentLease.holderId,
+          });
+        } catch {
+          // Release is best-effort after a fenced terminal transition. Its
+          // failure must not lie about the import result or override it.
+        }
       }
     },
   };
