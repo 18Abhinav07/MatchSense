@@ -167,7 +167,6 @@ describe("live product API normalization", () => {
         payload: {
           awayTeam: "ENG",
           fixtureId: "fx-live",
-          freshness: "live",
           homeTeam: "FRA",
           minute: "18'",
           phase: "first_half",

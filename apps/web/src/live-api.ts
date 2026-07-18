@@ -581,9 +581,7 @@ export function todayFixtureBucket(
   ) {
     return "verified_final";
   }
-  if (snapshot.lifecycle === "LIVE" && snapshot.freshness === "live") {
-    return "live";
-  }
+  if (snapshot.lifecycle === "LIVE") return "live";
   if (snapshot.lifecycle === "SCHEDULED" || snapshot.lifecycle === "TRACKING") {
     return "upcoming";
   }

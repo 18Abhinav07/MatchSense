@@ -38,6 +38,7 @@ describe("MatchHub", () => {
           updatedAt: "2026-07-18T06:00:00.000Z",
         },
         state: "ready",
+        transportHealth: "reconciled",
       }),
     );
 
@@ -46,6 +47,29 @@ describe("MatchHub", () => {
     expect(markup).toContain("France");
     expect(markup).not.toContain(">LIVE<");
     expect(markup).not.toContain("Start listening");
+  });
+
+  it("shows a source-projected live match when the SSE is reconciled", () => {
+    const markup = renderToStaticMarkup(
+      createElement(MatchHub, {
+        catalog,
+        favoriteTeam: "FRA",
+        fixture: {
+          awayTeam: "ENG",
+          fixtureId: "france-england",
+          homeTeam: "FRA",
+          lifecycle: "LIVE",
+          minute: "18′",
+          phase: "first_half",
+          score: { away: 0, home: 0 },
+        },
+        state: "ready",
+        transportHealth: "reconciled",
+      }),
+    );
+
+    expect(markup).toContain(">LIVE<");
+    expect(markup).not.toContain("MATCH STATUS PENDING");
   });
 
   it("does not fabricate a score while an exact fixture is loading", () => {

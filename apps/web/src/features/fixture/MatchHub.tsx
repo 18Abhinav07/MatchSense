@@ -70,7 +70,11 @@ function freshnessLabel(
   if (transportHealth === "connecting" && fixture.lifecycle === "LIVE") {
     return "CONNECTING";
   }
-  if (fixture.lifecycle === "LIVE" && fixture.freshness === "live") {
+  if (
+    fixture.lifecycle === "LIVE" &&
+    (fixture.freshness === "live" ||
+      (fixture.freshness === undefined && transportHealth === "reconciled"))
+  ) {
     return "LIVE";
   }
   if (fixture.freshness === "cached") return "CACHED DATA";
