@@ -76,6 +76,23 @@ async function seedV6MigrationLedger() {
   }
 }
 
+async function seedV7MigrationLedger() {
+  for (const migration of migrationCatalog.slice(0, 7)) {
+    await admin.unsafe(migration.sql);
+  }
+  await admin.unsafe(`CREATE TABLE public.matchsense_schema_migrations (
+  version integer PRIMARY KEY CHECK (version > 0),
+  checksum text NOT NULL CHECK (length(checksum) = 64),
+  applied_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);`);
+  for (const migration of migrationCatalog.slice(0, 7)) {
+    await admin.unsafe(
+      "INSERT INTO public.matchsense_schema_migrations (version, checksum) VALUES ($1, $2);",
+      [migration.version, migration.checksum],
+    );
+  }
+}
+
 async function seedRecordedReplayArchive(input: {
   fixtureId: string;
   manifestHash: string;
@@ -737,6 +754,353 @@ WHERE id = $1;`,
     await expect(
       runtime.featuredReplays.ready("archive-generation-fence"),
     ).resolves.toBeNull();
+  });
+
+  it("rechecks every replay right when finalising a bound output and serving a featured replay", async () => {
+    const runtime = trackedDatabase();
+    await runtime.migrate();
+    const fixtureId = "archive-rights-recheck-fx";
+    const manifestId = "archive-rights-recheck-manifest";
+    const manifestHash = "3".repeat(64);
+    const grantId = `grant-${fixtureId}`;
+    const workerId = "archive-worker-rights";
+    await runtime.archiveImportJobs.enqueue({
+      awayTeamId: "ESP",
+      contextHash: "e".repeat(64),
+      fixtureId,
+      homeTeamId: "FRA",
+      kickoffAt: "2026-07-18T12:00:00.000Z",
+      participant1IsHome: true,
+      reason: "featured_bootstrap",
+      sourceTerminalRecordId: "rights-source-terminal",
+    });
+    const first = await runtime.archiveImportJobs.claim(
+      workerId,
+      new Date("2100-01-01T00:00:00.000Z"),
+    );
+    if (!first) throw new Error("Expected first rights recheck claim");
+    await seedRecordedReplayArchive({
+      fixtureId,
+      manifestHash,
+      manifestId,
+      terminalDeliveryId: "archive-terminal-h1",
+    });
+
+    const restoreReplayRight = async () => {
+      await admin.unsafe(
+        `UPDATE matchsense.rights_grants
+SET active = true,
+    revoked_at = NULL,
+    expires_at = NULL,
+    scopes = ARRAY['raw_retention', 'replay']::text[]
+WHERE id = $1;`,
+        [grantId],
+      );
+    };
+    const refreshArchiveVerification = async () => {
+      await admin.unsafe(
+        `UPDATE matchsense.archive_manifests
+SET verified_at = clock_timestamp(),
+    updated_at = clock_timestamp()
+WHERE id = $1;`,
+        [manifestId],
+      );
+    };
+    const mutations = [
+      {
+        apply: () =>
+          admin.unsafe(
+            `UPDATE matchsense.rights_grants
+SET active = false,
+    revoked_at = clock_timestamp(),
+    expires_at = NULL
+WHERE id = $1;`,
+            [grantId],
+          ),
+        name: "revoked",
+      },
+      {
+        apply: () =>
+          admin.unsafe(
+            `UPDATE matchsense.rights_grants
+SET active = false,
+    revoked_at = NULL,
+    expires_at = NULL
+WHERE id = $1;`,
+            [grantId],
+          ),
+        name: "inactive",
+      },
+      {
+        apply: () =>
+          admin.unsafe(
+            `UPDATE matchsense.rights_grants
+SET active = true,
+    revoked_at = NULL,
+    expires_at = clock_timestamp() - interval '1 second'
+WHERE id = $1;`,
+            [grantId],
+          ),
+        name: "expired",
+      },
+      {
+        apply: () =>
+          admin.unsafe(
+            `UPDATE matchsense.rights_grants
+SET active = true,
+    revoked_at = NULL,
+    expires_at = NULL,
+    scopes = ARRAY['raw_retention']::text[]
+WHERE id = $1;`,
+            [grantId],
+          ),
+        name: "missing replay scope",
+      },
+    ];
+
+    let claim = first;
+    await runtime.archiveImportJobs.bindVerifiedArchiveOutput({
+      archiveManifestHash: manifestHash,
+      archiveManifestId: manifestId,
+      claimGeneration: claim.claimGeneration,
+      fixtureId,
+      workerId,
+    });
+    for (const mutation of mutations) {
+      await mutation.apply();
+      await expect(
+        runtime.archiveImportJobs.markReplayReady({
+          claimGeneration: claim.claimGeneration,
+          fixtureId,
+          workerId,
+        }),
+      ).rejects.toThrow(
+        "Archive import job claim or verified archive output is invalid",
+      );
+      await runtime.archiveImportJobs.markRetry({
+        availableAt: "2000-01-01T00:00:00.000Z",
+        claimGeneration: claim.claimGeneration,
+        error: `rights ${mutation.name}`,
+        fixtureId,
+        workerId,
+      });
+      await restoreReplayRight();
+      const next = await runtime.archiveImportJobs.claim(
+        workerId,
+        new Date("2100-01-01T00:00:00.000Z"),
+      );
+      if (!next) throw new Error("Expected next rights recheck claim");
+      claim = next;
+      await refreshArchiveVerification();
+      await runtime.archiveImportJobs.bindVerifiedArchiveOutput({
+        archiveManifestHash: manifestHash,
+        archiveManifestId: manifestId,
+        claimGeneration: claim.claimGeneration,
+        fixtureId,
+        workerId,
+      });
+    }
+    await runtime.archiveImportJobs.markReplayReady({
+      claimGeneration: claim.claimGeneration,
+      fixtureId,
+      workerId,
+    });
+    await runtime.featuredReplays.configure({
+      archiveManifestId: manifestId,
+      fixtureId,
+      slot: "archive-rights-recheck",
+    });
+    await expect(
+      runtime.featuredReplays.ready("archive-rights-recheck"),
+    ).resolves.toMatchObject({ archiveManifestHash: manifestHash });
+    for (const mutation of mutations) {
+      await mutation.apply();
+      await expect(
+        runtime.featuredReplays.ready("archive-rights-recheck"),
+      ).resolves.toBeNull();
+      await restoreReplayRight();
+      await expect(
+        runtime.featuredReplays.ready("archive-rights-recheck"),
+      ).resolves.toMatchObject({ archiveManifestHash: manifestHash });
+    }
+  });
+
+  it("rejects a bound output when the archive changes before finalisation", async () => {
+    const runtime = trackedDatabase();
+    await runtime.migrate();
+    const fixtureId = "archive-post-bind-stale-fx";
+    const manifestId = "archive-post-bind-stale-manifest";
+    const h1 = "4".repeat(64);
+    const h2 = "5".repeat(64);
+    const workerId = "archive-worker-post-bind";
+    await runtime.archiveImportJobs.enqueue({
+      awayTeamId: "ESP",
+      contextHash: "f".repeat(64),
+      fixtureId,
+      homeTeamId: "FRA",
+      kickoffAt: "2026-07-18T12:00:00.000Z",
+      participant1IsHome: true,
+      reason: "featured_bootstrap",
+      sourceTerminalRecordId: "post-bind-source-terminal",
+    });
+    const first = await runtime.archiveImportJobs.claim(
+      workerId,
+      new Date("2100-01-01T00:00:00.000Z"),
+    );
+    if (!first) throw new Error("Expected first stale archive claim");
+    await seedRecordedReplayArchive({
+      fixtureId,
+      manifestHash: h1,
+      manifestId,
+      terminalDeliveryId: "archive-terminal-h1",
+    });
+    const restoreCurrentArchive = async () => {
+      await admin.unsafe(
+        `UPDATE matchsense.archive_manifests
+SET status = 'REPLAY_READY',
+    delivery_manifest_hash = $2,
+    terminal_delivery_id = 'archive-terminal-h1',
+    invalidation_reason = NULL,
+    invalidated_at = NULL,
+    verified_at = clock_timestamp(),
+    updated_at = clock_timestamp()
+WHERE id = $1;`,
+        [manifestId, h1],
+      );
+    };
+    const mutations = [
+      {
+        apply: () =>
+          admin.unsafe(
+            `UPDATE matchsense.archive_manifests
+SET delivery_manifest_hash = $2,
+    updated_at = clock_timestamp()
+WHERE id = $1;`,
+            [manifestId, h2],
+          ),
+        name: "hash",
+      },
+      {
+        apply: () =>
+          admin.unsafe(
+            `UPDATE matchsense.archive_manifests
+SET status = 'REPLAY_INVALIDATED',
+    invalidation_reason = 'integration stale status',
+    invalidated_at = clock_timestamp(),
+    updated_at = clock_timestamp()
+WHERE id = $1;`,
+            [manifestId],
+          ),
+        name: "status",
+      },
+      {
+        apply: () =>
+          admin.unsafe(
+            `UPDATE matchsense.archive_manifests
+SET verified_at = clock_timestamp() + interval '1 second',
+    updated_at = clock_timestamp()
+WHERE id = $1;`,
+            [manifestId],
+          ),
+        name: "verified timestamp",
+      },
+    ];
+
+    let claim = first;
+    await runtime.archiveImportJobs.bindVerifiedArchiveOutput({
+      archiveManifestHash: h1,
+      archiveManifestId: manifestId,
+      claimGeneration: claim.claimGeneration,
+      fixtureId,
+      workerId,
+    });
+    for (const mutation of mutations) {
+      await mutation.apply();
+      await expect(
+        runtime.archiveImportJobs.markReplayReady({
+          claimGeneration: claim.claimGeneration,
+          fixtureId,
+          workerId,
+        }),
+      ).rejects.toThrow(
+        "Archive import job claim or verified archive output is invalid",
+      );
+      await runtime.archiveImportJobs.markRetry({
+        availableAt: "2000-01-01T00:00:00.000Z",
+        claimGeneration: claim.claimGeneration,
+        error: `stale archive ${mutation.name}`,
+        fixtureId,
+        workerId,
+      });
+      const next = await runtime.archiveImportJobs.claim(
+        workerId,
+        new Date("2100-01-01T00:00:00.000Z"),
+      );
+      if (!next) throw new Error("Expected next stale archive claim");
+      claim = next;
+      await restoreCurrentArchive();
+      await runtime.archiveImportJobs.bindVerifiedArchiveOutput({
+        archiveManifestHash: h1,
+        archiveManifestId: manifestId,
+        claimGeneration: claim.claimGeneration,
+        fixtureId,
+        workerId,
+      });
+    }
+  });
+
+  it("resets a populated v7 claimed job before issuing its first fenced v8 claim", async () => {
+    await seedV7MigrationLedger();
+    await admin.unsafe(
+      `INSERT INTO matchsense.archive_import_jobs (
+  fixture_id, home_team_id, away_team_id, kickoff_at, participant1_is_home,
+  context_hash, reason, state, claimed_by, claim_expires_at,
+  source_terminal_record_id
+)
+VALUES (
+  'v7-claimed-job-fx', 'FRA', 'ESP', '2026-07-18T12:00:00.000Z', true,
+  repeat('9', 64), 'featured_bootstrap', 'claimed', 'legacy-worker',
+  '2100-01-01T00:00:00.000Z', 'legacy-source-terminal'
+);`,
+    );
+    const runtime = trackedDatabase();
+    await expect(runtime.migrate()).resolves.toEqual({
+      appliedVersions: [8],
+      currentVersion: 8,
+    });
+    await expect(
+      admin.unsafe<
+        {
+          claim_expires_at: Date | null;
+          claim_generation: string;
+          claim_started_at: Date | null;
+          claimed_by: string | null;
+          state: string;
+        }[]
+      >(`SELECT state, claimed_by, claim_expires_at, claim_started_at,
+  claim_generation::text AS claim_generation
+FROM matchsense.archive_import_jobs
+WHERE fixture_id = 'v7-claimed-job-fx';`),
+    ).resolves.toEqual([
+      {
+        claim_expires_at: null,
+        claim_generation: "0",
+        claim_started_at: null,
+        claimed_by: null,
+        state: "retry_wait",
+      },
+    ]);
+    await expect(
+      runtime.archiveImportJobs.claim(
+        "v8-worker",
+        new Date("2100-01-01T00:00:00.000Z"),
+      ),
+    ).resolves.toMatchObject({
+      claimGeneration: 1,
+      claimedBy: "v8-worker",
+      fixtureId: "v7-claimed-job-fx",
+      state: "claimed",
+    });
   });
 
   it("upgrades a populated v3 immutable raw row and restores its immutability in v4", async () => {
