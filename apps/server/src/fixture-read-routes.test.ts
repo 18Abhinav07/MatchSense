@@ -41,6 +41,7 @@ function repository(): FixtureReadRepository {
       snapshot: fixture,
       superseded: false,
     })),
+    readTeamCatalog: vi.fn(async () => []),
   };
 }
 

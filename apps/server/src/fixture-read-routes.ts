@@ -51,6 +51,14 @@ export function registerFixtureReadRoutes(
   app: FastifyInstance,
   dependencies: FixtureReadRouteDependencies,
 ) {
+  app.get("/api/v1/catalog", async (_request, reply) =>
+    reply.header("Cache-Control", "no-store").send({
+      provenance: "live_txline",
+      sourceLabel: "TXLINE · WORLD CUP DATA",
+      teams: await dependencies.reads.readTeamCatalog(),
+    }),
+  );
+
   app.get<{ Querystring: { bucket?: string; limit?: string; mode?: string } }>(
     "/api/v1/fixtures",
     async (request, reply) => {

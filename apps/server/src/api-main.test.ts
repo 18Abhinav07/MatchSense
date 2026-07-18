@@ -58,6 +58,84 @@ describe("API-only runtime", () => {
     }
   });
 
+  it("serves the persisted live catalogue and fixtures through the credential-free API role", async () => {
+    const webDistPath = await temporaryWebShell();
+    const fixture = {
+      archiveManifestId: null,
+      bucket: "upcoming" as const,
+      fixtureId: "fixture-arg-fra",
+      lifecycle: "scheduled" as const,
+      metadata: {
+        participant1: { id: "team-arg", name: "Argentina" },
+        participant1IsHome: true,
+        participant2: { id: "team-fra", name: "France" },
+        sourceTimestampMs: 1_784_403_000_000,
+      },
+      mode: "live" as const,
+      projection: null,
+      provenance: "live_txline" as const,
+      replayReady: false,
+      scheduledAt: "2026-07-18T18:00:00.000Z",
+      teams: { away: "FRA", home: "ARG" },
+    };
+    const fixtureReads = {
+      getFixture: vi.fn(async () => fixture),
+      getReplayReady: vi.fn(async () => null),
+      listFixtures: vi.fn(async () => [fixture]),
+      readFixtureFeed: vi.fn(async () => null),
+      readHistory: vi.fn(async () => []),
+      readMemory: vi.fn(async () => null),
+      readMoment: vi.fn(async () => null),
+      readTeamCatalog: vi.fn(async () => [
+        { code: "ARG", name: "Argentina", participantId: "team-arg" },
+        { code: "FRA", name: "France", participantId: "team-fra" },
+      ]),
+    };
+    const database = {
+      check: vi.fn(async () => ({
+        databaseReachable: true,
+        migrationsCurrent: true,
+      })),
+      close: vi.fn(async () => undefined),
+      fans: {},
+      fixtureReads,
+      pushDevices: {},
+    };
+
+    try {
+      const app = await startApi(
+        parseServerEnv({
+          DATABASE_URL: "postgresql://db.example/matchsense",
+          ROLE: "api",
+        }),
+        { databaseRuntime: database as never, listen: false, webDistPath },
+      );
+
+      const [catalogue, fixtures] = await Promise.all([
+        app.inject({ url: "/api/v1/catalog" }),
+        app.inject({ url: "/api/v1/fixtures" }),
+      ]);
+
+      expect(catalogue.statusCode).toBe(200);
+      expect(catalogue.headers["cache-control"]).toBe("no-store");
+      expect(catalogue.json()).toMatchObject({
+        provenance: "live_txline",
+        teams: [
+          { code: "ARG", name: "Argentina", participantId: "team-arg" },
+          { code: "FRA", name: "France", participantId: "team-fra" },
+        ],
+      });
+      expect(fixtures.statusCode).toBe(200);
+      expect(fixtures.headers["cache-control"]).toBe("no-store");
+      expect(fixtures.json()).toEqual({ fixtures: [fixture] });
+      expect(fixtureReads.listFixtures).toHaveBeenCalledWith({ mode: "live" });
+      expect(fixtureReads.readTeamCatalog).toHaveBeenCalledOnce();
+      await app.close();
+    } finally {
+      await rm(webDistPath, { force: true, recursive: true });
+    }
+  });
+
   it("exposes ready live commentary artifacts through the credential-free API role", async () => {
     const webDistPath = await temporaryWebShell();
     const fixtureId = "fixture-arg-fra";

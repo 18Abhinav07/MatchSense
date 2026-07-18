@@ -46,6 +46,13 @@ export interface FixtureReadSnapshot {
   teams: { away: string; home: string };
 }
 
+/** A real team identity derived from a collector-persisted TxLINE schedule. */
+export interface PersistedTeamCatalogEntry {
+  code: string;
+  name: string;
+  participantId: string;
+}
+
 export interface FixtureFeedEvent {
   createdAt: string;
   eventId: string;
@@ -108,6 +115,7 @@ export interface FixtureReadRepository {
     mode: FixtureReadMode;
     revision: number;
   }): Promise<FixtureMomentResolution | null>;
+  readTeamCatalog(): Promise<readonly PersistedTeamCatalogEntry[]>;
 }
 
 const fixtureColumns = `fixture.mode AS fixture_mode,
@@ -277,6 +285,94 @@ function parseMoment(row: QueryRow): FixtureMomentRevision {
     revision: integer(row.revision, "revision"),
     sourceRecordId: string(row, "source_record_id"),
   };
+}
+
+function scheduleParticipant(
+  value: unknown,
+): { id: string; name: string } | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const participant = value as Record<string, unknown>;
+  const id = participant.id;
+  const name = participant.name;
+  return typeof id === "string" &&
+    id.trim() &&
+    typeof name === "string" &&
+    name.trim()
+    ? { id: id.trim(), name: name.trim() }
+    : null;
+}
+
+function scheduleMetadata(value: unknown): Record<string, unknown> | null {
+  let parsed = value;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : null;
+}
+
+function parseTeamCatalog(rows: readonly QueryRow[]) {
+  const teams = new Map<string, PersistedTeamCatalogEntry>();
+  for (const row of rows) {
+    const metadata = scheduleMetadata(row.metadata);
+    if (!metadata) continue;
+    const participant1 = scheduleParticipant(metadata.participant1);
+    const participant2 = scheduleParticipant(metadata.participant2);
+    const participant1IsHome = metadata.participant1IsHome;
+    if (
+      !participant1 ||
+      !participant2 ||
+      typeof participant1IsHome !== "boolean"
+    ) {
+      continue;
+    }
+    const homeCode = string(row, "home_team_id");
+    const awayCode = string(row, "away_team_id");
+    const entries: readonly PersistedTeamCatalogEntry[] = participant1IsHome
+      ? [
+          {
+            code: homeCode,
+            name: participant1.name,
+            participantId: participant1.id,
+          },
+          {
+            code: awayCode,
+            name: participant2.name,
+            participantId: participant2.id,
+          },
+        ]
+      : [
+          {
+            code: awayCode,
+            name: participant1.name,
+            participantId: participant1.id,
+          },
+          {
+            code: homeCode,
+            name: participant2.name,
+            participantId: participant2.id,
+          },
+        ];
+    for (const entry of entries) {
+      const key = `${entry.code}:${entry.participantId}`;
+      const current = teams.get(key);
+      if (!current || entry.name.localeCompare(current.name) < 0) {
+        teams.set(key, entry);
+      }
+    }
+  }
+  return [...teams.values()].sort(
+    (left, right) =>
+      left.code.localeCompare(right.code) ||
+      left.participantId.localeCompare(right.participantId),
+  );
 }
 
 function limit(value: number | undefined) {
@@ -550,5 +646,14 @@ WHERE mode = $1 AND fixture_id = $2 AND moment_id = $3 AND revision = $4;`,
         superseded: revision !== currentRevision,
       };
     },
+    readTeamCatalog: async () =>
+      parseTeamCatalog(
+        await client.unsafe(
+          `SELECT home_team_id, away_team_id, metadata
+FROM matchsense.fixtures
+WHERE mode = 'live' AND provenance = 'live_txline'
+ORDER BY scheduled_at ASC, id ASC;`,
+        ),
+      ),
   };
 }

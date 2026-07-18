@@ -138,6 +138,7 @@ export type {
   FixtureMomentRevision,
   FixtureReadKey,
   FixtureReadMode,
+  PersistedTeamCatalogEntry,
   FixtureReadRepository,
   FixtureReadSnapshot,
   ReplayReadyFixture,

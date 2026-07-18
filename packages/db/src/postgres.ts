@@ -32,6 +32,10 @@ import {
   type RoomAggregateRepository,
 } from "./product-repositories.js";
 import {
+  createFixtureReadRepository,
+  type FixtureReadRepository,
+} from "./fixture-read-repository.js";
+import {
   createDatabaseRuntime,
   type DatabaseRuntime,
   type MigrationStore,
@@ -57,6 +61,7 @@ export interface ApplicationDatabase extends DatabaseRuntime {
   commentaryJobs: CommentaryJobRepository;
   experiences: ExperienceRepository;
   fans: FanRepository;
+  fixtureReads: FixtureReadRepository;
   fixtureTruth: FixtureTruthRepository;
   memories: MemoryRepository;
   outbox: OutboxRepository;
@@ -176,6 +181,7 @@ export function createApplicationDatabase(
     commentaryJobs: createCommentaryJobRepository(client),
     experiences: createExperienceRepository(client),
     fans: createFanRepository(client),
+    fixtureReads: createFixtureReadRepository(client),
     fixtureTruth: createFixtureTruthRepository(client),
     memories: createMemoryRepository(client),
     outbox: createOutboxRepository(client),

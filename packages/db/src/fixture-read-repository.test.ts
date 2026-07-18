@@ -54,6 +54,52 @@ function testClient(
 }
 
 describe("fixture read repository", () => {
+  it("derives a stable team catalogue from every persisted live schedule, including completed fixtures", async () => {
+    const fake = testClient((query) => {
+      if (
+        query.includes("FROM matchsense.fixtures") &&
+        query.includes("provenance = 'live_txline'")
+      ) {
+        return [
+          {
+            away_team_id: "FRA",
+            home_team_id: "ARG",
+            metadata: JSON.stringify({
+              participant1: { id: "team-arg", name: "Argentina" },
+              participant1IsHome: true,
+              participant2: { id: "team-fra", name: "France" },
+            }),
+          },
+          {
+            away_team_id: "ESP",
+            home_team_id: "ARG",
+            metadata: JSON.stringify({
+              participant1: { id: "team-arg", name: "Argentina" },
+              participant1IsHome: true,
+              participant2: { id: "team-esp", name: "Spain" },
+            }),
+          },
+          {
+            away_team_id: "MEX",
+            home_team_id: "BRA",
+            metadata: JSON.stringify(["malformed schedule metadata"]),
+          },
+        ];
+      }
+      return [];
+    });
+    const repository = createFixtureReadRepository(fake.client);
+
+    await expect(repository.readTeamCatalog()).resolves.toEqual([
+      { code: "ARG", name: "Argentina", participantId: "team-arg" },
+      { code: "ESP", name: "Spain", participantId: "team-esp" },
+      { code: "FRA", name: "France", participantId: "team-fra" },
+    ]);
+    expect(fake.queries.at(-1)?.query).toContain("mode = 'live'");
+    expect(fake.queries.at(-1)?.query).toContain("provenance = 'live_txline'");
+    expect(fake.queries.at(-1)?.query).not.toContain("fixture.status");
+  });
+
   it("lists an authorised recorded final by its requested mode rather than hard-coding live", async () => {
     const fake = testClient((query) => {
       if (query.includes("FROM matchsense.fixtures AS fixture")) {
