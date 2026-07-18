@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { readFile } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
 
 import { createCommentaryPipeline } from "@matchsense/commentary";
 import {
@@ -72,6 +71,11 @@ import {
   type ShutdownSignalSource,
 } from "./start.js";
 import { createVapidWebPushSender } from "./web-push-sender.js";
+
+// New production starts must resolve the role before loading either runtime.
+// Keep this export for callers that historically imported the server surface
+// from `main`, while `startServer` below remains an in-memory integration harness.
+export { startByRole } from "./entry.js";
 
 interface ServerDatabaseRuntime extends ReadinessProbe {
   close(): Promise<void>;
@@ -396,6 +400,11 @@ async function settleCleanupStage(
 }
 
 export async function startServer(options: StartServerOptions = {}) {
+  if (options.listen !== false) {
+    throw new Error(
+      "Legacy combined MatchSense server is test-only; use the role entrypoint",
+    );
+  }
   const config = parseServerEnv(options.environment ?? process.env);
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 10_000;
   if (!Number.isSafeInteger(shutdownTimeoutMs) || shutdownTimeoutMs < 1) {
@@ -1282,15 +1291,4 @@ export async function startServer(options: StartServerOptions = {}) {
     }),
   );
   return app!;
-}
-
-const entryPath = process.argv[1];
-const isDirectExecution =
-  entryPath !== undefined && import.meta.url === pathToFileURL(entryPath).href;
-
-if (isDirectExecution) {
-  void startServer().catch(() => {
-    process.stderr.write("MatchSense server failed to start\n");
-    process.exitCode = 1;
-  });
 }

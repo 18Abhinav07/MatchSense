@@ -51,18 +51,15 @@ describe("MatchSense web product", () => {
     expect(markup).toContain("Delete profile");
   });
 
-  it("renders the judged demo as a favorite-team launcher for the production Experience flow", () => {
+  it("does not expose the retired demo route in the public product shell", () => {
     const App = shell.App as FunctionComponent<AppProps>;
     const markup = renderToStaticMarkup(
       createElement(App, { initialFavoriteTeam: "BRA", initialPath: "/demo" }),
     );
 
-    expect(markup).toContain("JUDGED DEMO · REAL PRODUCT FLOW");
-    expect(markup).toContain("BRA");
-    expect(markup).toContain("Enable &amp; test real alerts");
-    expect(markup).toContain("Start the five-minute Experience Match");
-    expect(markup).toContain("Start listening");
-    expect(markup).not.toContain("Scripted Argentina–France match");
-    expect(markup).not.toContain("not OS push notifications");
+    expect(markup).toContain("MatchSense");
+    expect(markup).not.toContain("JUDGED DEMO · REAL PRODUCT FLOW");
+    expect(markup).not.toContain("DEMO MODE");
+    expect(markup).not.toContain("Open Demo Mode");
   });
 });

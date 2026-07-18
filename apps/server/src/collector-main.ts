@@ -6,7 +6,7 @@ import {
 import { createTxlineAuthenticatedClient } from "@matchsense/txline-adapter";
 
 import type { ServerConfig } from "./config.js";
-import { createOutboxWorker, type OutboxWorker } from "./outbox-worker.js";
+import type { OutboxWorker } from "./outbox-worker.js";
 import {
   createShutdownFailureReporter,
   registerShutdownSignals,
@@ -18,11 +18,17 @@ export type CollectorDatabaseRuntime = Pick<
   "close" | "migrate" | "outbox"
 >;
 
+export interface CollectorSourceLifecycle {
+  start(): Promise<void> | void;
+  stop(): Promise<void> | void;
+}
+
 export interface StartCollectorOptions {
   databaseFactory?: (databaseUrl: string) => CollectorDatabaseRuntime;
   databaseRuntime?: CollectorDatabaseRuntime;
   outboxWorker?: OutboxWorker;
   outboxWorkerFactory?: (outbox: OutboxRepository) => OutboxWorker;
+  sourceLifecycle?: CollectorSourceLifecycle;
   signalSource?: ShutdownSignalSource;
   txlineClientFactory?: (options: { apiToken: string }) => unknown;
 }
@@ -39,19 +45,6 @@ function assertCollectorRole(config: ServerConfig) {
   }
 }
 
-function createCollectorOutboxWorker(outbox: OutboxRepository): OutboxWorker {
-  return createOutboxWorker({
-    batchSize: 50,
-    consumer: "collector",
-    // Task 3 assigns archive, push, listening, and Room handlers. Until then
-    // this lifecycle worker deliberately claims no unowned delivery topics.
-    handlers: {},
-    mode: "live",
-    outbox,
-    pollIntervalMs: 250,
-  });
-}
-
 export async function startCollector(
   config: ServerConfig,
   options: StartCollectorOptions = {},
@@ -63,17 +56,28 @@ export async function startCollector(
       "Collector runtime requires ROLE=worker and a TxLINE token",
     );
   }
+  const sourceLifecycle = options.sourceLifecycle;
+  if (
+    !sourceLifecycle ||
+    (!options.outboxWorker && !options.outboxWorkerFactory)
+  ) {
+    throw new Error(
+      "Collector runtime is not wired: provide a source lifecycle and outbox worker",
+    );
+  }
   const databaseRuntime =
     options.databaseRuntime ??
     (options.databaseFactory ?? createPostgresDatabase)(config.databaseUrl);
   let closed = false;
   let unregisterSignals: () => void = () => undefined;
   let outboxWorker: OutboxWorker | null = null;
+  let sourceStarted = false;
 
   const close = async () => {
     if (closed) return;
     closed = true;
     unregisterSignals();
+    if (sourceStarted) await sourceLifecycle.stop();
     await outboxWorker?.stop();
     await databaseRuntime.close();
   };
@@ -86,9 +90,9 @@ export async function startCollector(
     void txlineClient;
     outboxWorker =
       options.outboxWorker ??
-      (options.outboxWorkerFactory ?? createCollectorOutboxWorker)(
-        databaseRuntime.outbox,
-      );
+      options.outboxWorkerFactory!(databaseRuntime.outbox);
+    await sourceLifecycle.start();
+    sourceStarted = true;
     outboxWorker.start();
     unregisterSignals = registerShutdownSignals(
       options.signalSource ?? process,

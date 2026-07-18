@@ -101,6 +101,10 @@ function browserPath() {
   return typeof window === "undefined" ? "/" : window.location.pathname;
 }
 
+function publicProductPath(path: string) {
+  return path === "/demo" || path.startsWith("/demo/") ? "/" : path;
+}
+
 export function roomCreationPath(fixtureId: string) {
   return `/rooms/new/${encodeURIComponent(fixtureId)}`;
 }
@@ -249,9 +253,10 @@ export function App(props: AppProps = {}) {
 }
 
 function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
-  const initialRoute = normalizePath(initialPath ?? browserPath());
+  const initialRoute = publicProductPath(
+    normalizePath(initialPath ?? browserPath()),
+  );
   const [path, setPath] = useState(initialRoute);
-  const isDemo = path === "/demo" || path.startsWith("/demo/");
   const fanApi = useMemo(() => createFanProfileApi(), []);
   const [bootstrap, setBootstrap] = useState<FanBootstrap | null>(() => {
     const fan = previewFan(initialFavoriteTeam ?? null);
@@ -320,7 +325,8 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
   }, [initialFavoriteTeam, loadBootstrap]);
 
   useEffect(() => {
-    const onPop = () => setPath(normalizePath(window.location.pathname));
+    const onPop = () =>
+      setPath(publicProductPath(normalizePath(window.location.pathname)));
     const onInstall = (event: Event) => {
       event.preventDefault();
       setInstallPrompt(event as BeforeInstallPromptEvent);
@@ -506,10 +512,10 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
       </main>
     );
   }
-  if (!isDemo && onboardingStage === "intro") {
+  if (onboardingStage === "intro") {
     return <FirstLaunchIntro onComplete={finishIntro} />;
   }
-  if (!isDemo && onboardingStage === "pick") {
+  if (onboardingStage === "pick") {
     return (
       <TeamPick
         catalog={catalogState.catalog}
@@ -547,7 +553,7 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
       setExperienceState("error");
     }
   };
-  if (!isDemo && onboardingStage === "handle") {
+  if (onboardingStage === "handle") {
     return (
       <HandleStep
         busy={profileBusy}
@@ -557,7 +563,7 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
       />
     );
   }
-  if (!isDemo && onboardingStage === "avatar") {
+  if (onboardingStage === "avatar") {
     return (
       <AvatarStep
         busy={profileBusy}
@@ -568,7 +574,7 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
       />
     );
   }
-  if (!isDemo && onboardingStage === "moment") {
+  if (onboardingStage === "moment") {
     return (
       <SampleMoment
         team={teamFor(supported, catalogState.catalog)}
@@ -576,7 +582,7 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
       />
     );
   }
-  if (!isDemo && onboardingStage === "buzz") {
+  if (onboardingStage === "buzz") {
     return (
       <BuzzSetup
         installPrompt={installPrompt}
@@ -600,19 +606,6 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
       ) : null}
     </>
   );
-
-  if (isDemo) {
-    return withProfileCompletion(
-      <JudgedDemoLauncher
-        catalog={catalogState.catalog}
-        favoriteTeam={supported}
-        installPrompt={installPrompt}
-        launchState={experienceState}
-        onBack={() => navigate("/")}
-        onLaunch={() => void startExperience()}
-      />,
-    );
-  }
 
   if (path === "/experience/with-friends") {
     return withProfileCompletion(
@@ -780,7 +773,6 @@ function ProductApp({ initialFavoriteTeam, initialPath }: AppProps) {
       installPrompt={installPrompt}
       onChangeTeam={() => navigate("/you")}
       onCreateRoom={() => navigate("/rooms/new")}
-      onDemo={() => navigate("/demo")}
       onExperience={() => void startExperience()}
       onExperienceWithFriends={() => navigate("/experience/with-friends")}
       experienceState={experienceState}
@@ -1107,7 +1099,6 @@ function Today({
   installPrompt,
   onChangeTeam,
   onCreateRoom,
-  onDemo,
   onExperience,
   onExperienceWithFriends,
   onHistory,
@@ -1122,7 +1113,6 @@ function Today({
   installPrompt: BeforeInstallPromptEvent | null;
   onChangeTeam(): void;
   onCreateRoom(): void;
-  onDemo(): void;
   onExperience(): void;
   onExperienceWithFriends(): void;
   onHistory(): void;
@@ -1248,7 +1238,7 @@ function Today({
             title="The match wire is offline."
           />
         ) : prioritized.length === 0 ? (
-          <EmptySchedule onDemo={onDemo} />
+          <EmptySchedule />
         ) : (
           <div className="fixture-list">
             {prioritized.map((fixture) => (
@@ -1327,19 +1317,6 @@ function Today({
             Open your history <ArrowIcon />
           </button>
         </article>
-      </section>
-      <section className="demo-entry-card">
-        <span>Judging and testing</span>
-        <div>
-          <h2>Need a match right now?</h2>
-          <p>
-            Demo Mode is a separate, clearly labelled five-minute match. It
-            never leaks simulated cards into the live schedule.
-          </p>
-        </div>
-        <button onClick={onDemo} type="button">
-          Open Demo Mode <ArrowIcon />
-        </button>
       </section>
       <Provenance label={catalog.sourceLabel ?? "TXLINE TOURNAMENT DATA"} />
       {alertTarget !== false ? (
@@ -1465,7 +1442,7 @@ function FixtureLoading() {
   );
 }
 
-function EmptySchedule({ onDemo }: { onDemo(): void }) {
+function EmptySchedule() {
   return (
     <div className="empty-schedule">
       <p className="kicker">No fixtures returned</p>
@@ -1474,9 +1451,6 @@ function EmptySchedule({ onDemo }: { onDemo(): void }) {
         We will show scheduled, live, and completed matches as soon as TxLINE
         publishes them.
       </p>
-      <button className="primary-control" onClick={onDemo} type="button">
-        Experience Demo Mode
-      </button>
     </div>
   );
 }

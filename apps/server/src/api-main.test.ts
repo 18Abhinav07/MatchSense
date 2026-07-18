@@ -49,6 +49,7 @@ describe("API-only runtime", () => {
           })
         ).statusCode,
       ).toBe(404);
+      expect((await app.inject({ url: "/demo" })).statusCode).toBe(404);
       expect(database.migrate).not.toHaveBeenCalled();
       await app.close();
       expect(database.close).toHaveBeenCalledOnce();

@@ -58,6 +58,7 @@ export interface ReadinessProbe {
 }
 
 export interface BuildAppOptions {
+  allowDemoShell?: boolean;
   demo?: DemoSessionRuntime | false;
   durablePush?: DurablePushRouteDependencies;
   durableRooms?: DurableRoomRouteDependencies;
@@ -272,7 +273,9 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     const pathname = new URL(request.url, "http://matchsense.local").pathname;
     const acceptsShell = request.method === "GET" || request.method === "HEAD";
 
-    if (acceptsShell && isCanonicalShellPath(pathname)) {
+    const demoShellBlocked =
+      pathname === "/demo" && options.allowDemoShell === false;
+    if (acceptsShell && !demoShellBlocked && isCanonicalShellPath(pathname)) {
       return sendShell(reply);
     }
 

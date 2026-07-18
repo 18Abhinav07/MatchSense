@@ -70,6 +70,31 @@ describe("server entrypoint", () => {
     expect(entrypoint.startServer).toBeTypeOf("function");
   });
 
+  it("refuses to bind HTTP from the legacy combined runtime", async () => {
+    const startServer =
+      serverModule.startServer as unknown as StartServerContract;
+    const databaseFactory = vi.fn(() => {
+      throw new Error("legacy runtime must fail before creating a database");
+    });
+
+    await expect(
+      startServer({
+        databaseFactory,
+        environment: {
+          DATABASE_URL: "postgresql://db.example/matchsense",
+          DATA_RIGHTS_MODE: "txline_hackathon",
+          TXLINE_API_TOKEN: "collector-only-token",
+        },
+        listen: true,
+        signalSource: new EventEmitter(),
+        webDistPath: "not-used",
+      }),
+    ).rejects.toThrow(
+      "Legacy combined MatchSense server is test-only; use the role entrypoint",
+    );
+    expect(databaseFactory).not.toHaveBeenCalled();
+  });
+
   it("maps verified schedule participants to home/away product fixtures without inventing identity", () => {
     expect(
       serverModule.productFixtureFromTxline({
@@ -757,7 +782,7 @@ describe("server entrypoint", () => {
     }
   });
 
-  it("migrates before HTTP, outbox, and TxLINE startup, then closes in dependency order", async () => {
+  it("migrates before outbox and TxLINE startup in the test-only runtime, then closes in dependency order", async () => {
     const webDistPath = await temporaryWebShell();
     const signalSource = new EventEmitter();
     const order: string[] = [];
@@ -815,10 +840,7 @@ describe("server entrypoint", () => {
           DATA_RIGHTS_MODE: "txline_hackathon",
           TXLINE_API_TOKEN: "fixture-server-only-token",
         },
-        httpListen: async () => {
-          order.push("http.listen");
-        },
-        listen: true,
+        listen: false,
         outboxWorker,
         productRuntime,
         signalSource,
@@ -828,14 +850,12 @@ describe("server entrypoint", () => {
 
       expect(order).toEqual([
         "database.migrate",
-        "http.listen",
         "outbox.start",
         "txline.start",
       ]);
       await app.close();
       expect(order).toEqual([
         "database.migrate",
-        "http.listen",
         "outbox.start",
         "txline.start",
         "txline.abort",

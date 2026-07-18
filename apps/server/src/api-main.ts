@@ -67,6 +67,7 @@ export async function startApi(
   let unregisterSignals: () => void = () => undefined;
   try {
     app = buildApp({
+      allowDemoShell: false,
       demo: false,
       ...(pushRegistration && config.vapidPublicKey
         ? {
