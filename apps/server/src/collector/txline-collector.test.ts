@@ -2,6 +2,7 @@ import type { FixtureTruthRepository } from "@matchsense/db";
 import type { TxlineRawRecord } from "@matchsense/txline-adapter";
 import { describe, expect, it, vi } from "vitest";
 
+import type { ArchiveService } from "./archive-service.js";
 import { createTxlineCollector } from "./txline-collector.js";
 
 const fixture = {
@@ -174,5 +175,93 @@ describe("durable TxLINE collector", () => {
         ],
       }),
     ).resolves.toBe(true);
+  });
+
+  it("passes its held live source fence into archive rebuilds", async () => {
+    const repository: Pick<FixtureTruthRepository, "commitCollectorFrame"> = {
+      commitCollectorFrame: vi.fn(async () => ({
+        deliveries: [
+          {
+            eventSequences: [1],
+            kind: "committed" as const,
+            revisions: [1],
+          },
+        ],
+        kind: "committed" as const,
+      })),
+    };
+    const archive: ArchiveService = {
+      rebuild: vi.fn(async () => ({
+        manifest: null,
+        projectionHash: "a".repeat(64),
+        status: "REPLAY_READY" as const,
+        terminalDeliveryId: "final-2",
+      })),
+    };
+    const collector = createTxlineCollector({
+      archive,
+      fixtureForId: () => fixture,
+      fixtureTruth: repository,
+      rightsGrantId: "grant-1",
+      sourceFence: fence,
+    });
+
+    await expect(
+      collector.ingest(
+        raw({
+          ...goalPayload(),
+          Action: "game_finalised",
+          Id: "final-2",
+          StatusId: 100,
+        }),
+      ),
+    ).resolves.toMatchObject({ kind: "committed" });
+    expect(archive.rebuild).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "live",
+        sourceFence: fence,
+      }),
+    );
+  });
+
+  it("returns fenced when archive rebuild loses the held live source fence", async () => {
+    const repository: Pick<FixtureTruthRepository, "commitCollectorFrame"> = {
+      commitCollectorFrame: vi.fn(async () => ({
+        deliveries: [
+          {
+            eventSequences: [1],
+            kind: "committed" as const,
+            revisions: [1],
+          },
+        ],
+        kind: "committed" as const,
+      })),
+    };
+    const archive: ArchiveService = {
+      rebuild: vi.fn(async () => ({
+        manifest: null,
+        projectionHash: null,
+        status: "FENCED" as never,
+        terminalDeliveryId: null,
+      })),
+    };
+    const collector = createTxlineCollector({
+      archive,
+      fixtureForId: () => fixture,
+      fixtureTruth: repository,
+      rightsGrantId: "grant-1",
+      sourceFence: fence,
+    });
+
+    await expect(
+      collector.ingest(
+        raw({
+          ...goalPayload(),
+          Action: "game_finalised",
+          Id: "final-2",
+          StatusId: 100,
+        }),
+      ),
+    ).resolves.toEqual({ effects: [], kind: "fenced" });
   });
 });

@@ -6,6 +6,7 @@ import type {
   ArchiveMode,
   ArchiveRepository,
   DurableSourceDelivery,
+  SourceFence,
 } from "@matchsense/db";
 import {
   createFixtureProjection,
@@ -26,12 +27,13 @@ export interface ArchiveRebuildInput {
   manifestId: string;
   mode: ArchiveMode;
   rightsGrantId: string;
+  sourceFence: SourceFence;
 }
 
 export interface ArchiveRebuildResult {
   manifest: ArchiveManifest | null;
-  projectionHash: string;
-  status: ArchiveManifestStatus | "TERMINAL_PENDING";
+  projectionHash: string | null;
+  status: ArchiveManifestStatus | "FENCED" | "TERMINAL_PENDING";
   terminalDeliveryId: string | null;
 }
 
@@ -120,11 +122,20 @@ export function createArchiveService(
     async rebuild(input) {
       const provenance = provenanceForArchiveMode(input.mode);
       if (input.correctionObserved) {
-        await options.archive.invalidateArchive({
+        const invalidated = await options.archive.invalidateArchive({
           fixtureId: input.fixture.fixtureId,
           mode: input.mode,
           reason: "canonical correction observed",
+          sourceFence: input.sourceFence,
         });
+        if (invalidated.kind === "fenced") {
+          return {
+            manifest: null,
+            projectionHash: null,
+            status: "FENCED",
+            terminalDeliveryId: null,
+          };
+        }
       }
 
       const deliveries = ordered(
@@ -188,15 +199,25 @@ export function createArchiveService(
         };
       }
 
-      const manifest = await options.archive.verifyArchive({
+      const verified = await options.archive.verifyArchive({
         fixtureId: input.fixture.fixtureId,
         manifestId: input.manifestId,
         mode: input.mode,
         projectionHash,
         reducerVersion: DURABLE_TXLINE_REDUCER_VERSION,
         rightsGrantId: input.rightsGrantId,
+        sourceFence: input.sourceFence,
         terminalDeliveryId: terminal.id,
       });
+      if (verified.kind === "fenced") {
+        return {
+          manifest: null,
+          projectionHash,
+          status: "FENCED",
+          terminalDeliveryId: null,
+        };
+      }
+      const manifest = verified.manifest;
       return {
         manifest,
         projectionHash,

@@ -138,6 +138,7 @@ describe("historical archive importer", () => {
         manifestId: "archive:recorded:fx-history",
         mode: "recorded",
         rightsGrantId: "grant-history",
+        sourceFence: fence,
       }),
     );
     expect(fixtureTruth.commitFencedFixtureUpsert).toHaveBeenNthCalledWith(
@@ -158,6 +159,45 @@ describe("historical archive importer", () => {
         sourceFence: fence,
       }),
     );
+  });
+
+  it("returns fenced when the archive rebuild loses the recorded source fence", async () => {
+    const fixtureTruth: Pick<
+      FixtureTruthRepository,
+      "commitCollectorFrame" | "commitFencedFixtureUpsert" | "get"
+    > = {
+      commitCollectorFrame: vi.fn(async () => ({
+        deliveries: [{ kind: "accepted_no_change" as const }],
+        kind: "committed" as const,
+      })),
+      commitFencedFixtureUpsert: vi.fn(async () => ({
+        fixture: {} as never,
+        kind: "committed" as const,
+      })),
+      get: vi.fn(async () => null),
+    };
+    const archive: ArchiveService = {
+      rebuild: vi.fn(async () => ({
+        manifest: null,
+        projectionHash: "a".repeat(64),
+        status: "FENCED" as never,
+        terminalDeliveryId: null,
+      })),
+    };
+    const importer = createHistoricalArchiveImporter({
+      archive,
+      fixtureTruth,
+      rightsGrantId: "grant-history",
+      sourceFence: fence,
+    });
+
+    await expect(
+      importer.importFixture({ fixture, records: [record(final)] }),
+    ).resolves.toEqual({ kind: "fenced" });
+    expect(archive.rebuild).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceFence: fence }),
+    );
+    expect(fixtureTruth.commitFencedFixtureUpsert).toHaveBeenCalledTimes(1);
   });
 
   it("returns fenced when the historical source fence is lost before final fixture state", async () => {

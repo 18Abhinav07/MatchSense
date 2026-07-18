@@ -169,10 +169,13 @@ function harness(
     renewLeaseError?: Error;
     renewLeaseResult?: SourceLeaseRecord | null;
     readyError?: Error;
+    recoveryError?: Error;
     releaseError?: Error;
   } = {},
 ) {
   const calls: string[] = [];
+  const operationOrder: string[] = [];
+  const recoveryInputs: Date[] = [];
   const retryInputs: Array<{
     availableAt: string;
     claimGeneration: number;
@@ -189,6 +192,7 @@ function harness(
     | "markRejected"
     | "markReplayReady"
     | "markRetry"
+    | "recoverExpiredClaims"
     | "renewClaim"
   > = {
     bindVerifiedArchiveOutput: vi.fn(async (value) => {
@@ -205,6 +209,7 @@ function harness(
     }),
     claim: vi.fn(async () => {
       calls.push("claim");
+      operationOrder.push("claim");
       return input.claim === null ? null : claimed;
     }),
     markBlockedRights: vi.fn(async (value) => {
@@ -256,6 +261,12 @@ function harness(
       return input.renewClaimResult === undefined
         ? claimed
         : input.renewClaimResult;
+    }),
+    recoverExpiredClaims: vi.fn(async (value) => {
+      operationOrder.push("recover");
+      recoveryInputs.push(value);
+      if (input.recoveryError) throw input.recoveryError;
+      return 1;
     }),
   };
   const sourceState: Pick<
@@ -350,10 +361,42 @@ function harness(
     sourceState,
     workerId,
   });
-  return { calls, jobs, retryInputs, runner, sourceState };
+  return {
+    calls,
+    jobs,
+    operationOrder,
+    recoveryInputs,
+    retryInputs,
+    runner,
+    sourceState,
+  };
 }
 
 describe("archive import runner", () => {
+  it("recovers expired claims before claiming and processing due archive work", async () => {
+    const test = harness();
+
+    await expect(test.runner.runOnce(now)).resolves.toEqual({
+      fixtureId,
+      kind: "replay_ready",
+    });
+
+    expect(test.recoveryInputs).toEqual([now]);
+    expect(test.operationOrder).toEqual(["recover", "claim"]);
+  });
+
+  it("fails explicitly without claiming when expired-claim recovery fails", async () => {
+    const test = harness({
+      recoveryError: new Error("durable store unavailable"),
+    });
+
+    await expect(test.runner.runOnce(now)).rejects.toThrow(
+      "Archive import recovery failed: durable store unavailable",
+    );
+    expect(test.operationOrder).toEqual(["recover"]);
+    expect(test.calls).not.toContain("claim");
+  });
+
   it("imports one frozen claimed job through a recorded lease before binding and readying its exact output", async () => {
     const test = harness();
 

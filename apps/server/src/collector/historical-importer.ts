@@ -306,7 +306,9 @@ export function createHistoricalArchiveImporter(
         manifestId: `archive:recorded:${input.fixture.fixtureId}`,
         mode: "recorded",
         rightsGrantId: options.rightsGrantId,
+        sourceFence: options.sourceFence,
       });
+      if (archive.status === "FENCED") return { kind: "fenced" };
       if (archive.status !== "REPLAY_READY") {
         return { archive, kind: "terminal_pending" };
       }

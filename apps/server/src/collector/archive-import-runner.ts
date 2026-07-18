@@ -54,6 +54,7 @@ export interface ArchiveImportRunnerOptions {
     | "markRejected"
     | "markReplayReady"
     | "markRetry"
+    | "recoverExpiredClaims"
     | "renewClaim"
   >;
   client: TxlineAuthenticatedClient;
@@ -225,6 +226,14 @@ export function createArchiveImportRunner(
 
   return {
     async runOnce(now = new Date()) {
+      try {
+        await options.archiveImportJobs.recoverExpiredClaims(now);
+      } catch (error) {
+        throw new Error(
+          `Archive import recovery failed: ${errorMessage(error)}`,
+        );
+      }
+
       const job = await options.archiveImportJobs.claim(options.workerId, now);
       if (!job) return { kind: "idle" };
 

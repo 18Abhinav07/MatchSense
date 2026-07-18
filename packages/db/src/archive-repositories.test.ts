@@ -32,6 +32,18 @@ type DatabaseModuleContract = {
 const db = databaseModule as DatabaseModuleContract;
 
 const fixtureId = "18237038";
+const recordedFence = {
+  fencingToken: 7,
+  holderId: "archive-worker-a",
+  source: "txline",
+  streamKey: "historical:18237038",
+} as const;
+const liveFence = {
+  fencingToken: 4,
+  holderId: "collector-a",
+  source: "txline",
+  streamKey: "scores:mainnet",
+} as const;
 const sourceOnlyDelivery = {
   canonicalEligible: false,
   deliveryIntent: "reconcile",
@@ -97,7 +109,7 @@ function sourceDeliveryRow(
   };
 }
 
-function manifestRow(status: string) {
+function manifestRow(status: string, mode: "live" | "recorded" = "recorded") {
   return {
     created_at: "2026-07-18T12:01:00.000Z",
     delivery_manifest_hash: "1".repeat(64),
@@ -105,7 +117,7 @@ function manifestRow(status: string) {
     id: "manifest-1",
     invalidated_at: null,
     invalidation_reason: null,
-    mode: "recorded",
+    mode,
     projection_hash: "2".repeat(64),
     reducer_version: "txline-reducer-v1",
     rights_grant_id: "txodds-hackathon-2026",
@@ -121,10 +133,14 @@ function testClient(
     query: string,
     parameters: readonly unknown[],
   ) => readonly QueryRow[] | Promise<readonly QueryRow[]>,
+  sourceLease: "current" | "stale" = "current",
 ) {
   const queries: { parameters: readonly unknown[]; query: string }[] = [];
   const unsafe = vi.fn<UnsafeQuery>(async (query, parameters = []) => {
     queries.push({ parameters, query });
+    if (query.includes("FROM matchsense.source_leases")) {
+      return sourceLease === "current" ? [{ fencing_token: 7 }] : [];
+    }
     return resolve(query, parameters);
   });
 
@@ -243,14 +259,21 @@ describe("archive repository", () => {
         projectionHash: "2".repeat(64),
         reducerVersion: "txline-reducer-v1",
         rightsGrantId: "txodds-hackathon-2026",
+        sourceFence: recordedFence,
         terminalDeliveryId: terminalDelivery.id,
       }),
-    ).resolves.toMatchObject({ status: "REPLAY_READY" });
-    await archive?.invalidateArchive({
-      fixtureId,
-      mode: "recorded",
-      reason: "canonical correction",
+    ).resolves.toMatchObject({
+      kind: "verified",
+      manifest: { status: "REPLAY_READY" },
     });
+    await expect(
+      archive?.invalidateArchive({
+        fixtureId,
+        mode: "recorded",
+        reason: "canonical correction",
+        sourceFence: recordedFence,
+      }),
+    ).resolves.toEqual({ kind: "applied" });
     await expect(
       archive?.replayReady({ fixtureId, mode: "recorded" }),
     ).resolves.toBeNull();
@@ -268,6 +291,31 @@ describe("archive repository", () => {
       fixtureId,
       "canonical correction",
     ]);
+    const sourceLeaseQueries = fake.queries.filter(({ query }) =>
+      query.includes("FROM matchsense.source_leases"),
+    );
+    expect(sourceLeaseQueries).toHaveLength(2);
+    expect(sourceLeaseQueries[0]?.parameters).toEqual([
+      "recorded",
+      recordedFence.source,
+      recordedFence.streamKey,
+      recordedFence.holderId,
+      recordedFence.fencingToken,
+    ]);
+    expect(sourceLeaseQueries[0]?.query).toContain(
+      "lease_until > clock_timestamp()",
+    );
+    expect(sourceLeaseQueries[0]?.query).toContain("FOR UPDATE");
+    const firstLeaseLock = fake.queries.findIndex(({ query }) =>
+      query.includes("FROM matchsense.source_leases"),
+    );
+    const firstManifestMutation = fake.queries.findIndex(({ query }) =>
+      /INSERT INTO matchsense\.archive_manifests|UPDATE matchsense\.archive_manifests/u.test(
+        query,
+      ),
+    );
+    expect(firstLeaseLock).toBeGreaterThanOrEqual(0);
+    expect(firstLeaseLock).toBeLessThan(firstManifestMutation);
   });
 
   it("rejects a terminal delivery that is not last in the ordered source stream", async () => {
@@ -308,6 +356,7 @@ describe("archive repository", () => {
         projectionHash: "2".repeat(64),
         reducerVersion: "txline-reducer-v1",
         rightsGrantId: "txodds-hackathon-2026",
+        sourceFence: recordedFence,
         terminalDeliveryId: terminalDelivery.id,
       }),
     ).rejects.toThrow(
@@ -353,6 +402,7 @@ describe("archive repository", () => {
           projectionHash: "2".repeat(64),
           reducerVersion: "txline-reducer-v1",
           rightsGrantId: "txodds-hackathon-2026",
+          sourceFence: recordedFence,
           terminalDeliveryId: terminalDelivery.id,
         }),
       ).rejects.toThrow(
@@ -389,6 +439,7 @@ describe("archive repository", () => {
         projectionHash: "2".repeat(64),
         reducerVersion: "txline-reducer-v1",
         rightsGrantId: "txodds-hackathon-2026",
+        sourceFence: recordedFence,
         terminalDeliveryId: terminalDelivery.id,
       }),
     ).rejects.toThrow(
@@ -422,5 +473,111 @@ describe("archive repository", () => {
     expect(fake.queries[0]?.query).toContain(
       "WHERE mode = $1 AND fixture_id = $2",
     );
+  });
+
+  it("returns fenced and leaves both archive mutations untouched for a stale recorded lease", async () => {
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.rights_grants")) {
+        return [
+          {
+            active: true,
+            expires_at: null,
+            revoked_at: null,
+            scopes: ["raw_retention", "replay"],
+          },
+        ];
+      }
+      if (query.includes("FROM matchsense.raw_source_records")) {
+        return [sourceDeliveryRow(terminalDelivery)];
+      }
+      if (query.includes("INSERT INTO matchsense.archive_manifests")) {
+        return [manifestRow("REPLAY_READY")];
+      }
+      return [];
+    }, "stale");
+    const archive = db.createArchiveRepository?.(fake.client);
+
+    await expect(
+      archive?.verifyArchive({
+        fixtureId,
+        manifestId: "manifest-stale-fence",
+        mode: "recorded",
+        projectionHash: "2".repeat(64),
+        reducerVersion: "txline-reducer-v1",
+        rightsGrantId: "txodds-hackathon-2026",
+        sourceFence: recordedFence,
+        terminalDeliveryId: terminalDelivery.id,
+      }),
+    ).resolves.toEqual({ kind: "fenced" });
+    await expect(
+      archive?.invalidateArchive({
+        fixtureId,
+        mode: "recorded",
+        reason: "canonical correction",
+        sourceFence: recordedFence,
+      }),
+    ).resolves.toEqual({ kind: "fenced" });
+
+    expect(
+      fake.queries.some(({ query }) =>
+        /INSERT INTO matchsense\.archive_manifests|UPDATE matchsense\.archive_manifests|archive_manifest_entries/u.test(
+          query,
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it("publishes a live archive when its exact live lease is current", async () => {
+    const liveTerminalDelivery = {
+      ...terminalDelivery,
+      mode: "live" as const,
+      streamKey: liveFence.streamKey,
+    };
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.rights_grants")) {
+        return [
+          {
+            active: true,
+            expires_at: null,
+            revoked_at: null,
+            scopes: ["raw_retention", "replay"],
+          },
+        ];
+      }
+      if (query.includes("FROM matchsense.raw_source_records")) {
+        return [sourceDeliveryRow(liveTerminalDelivery)];
+      }
+      if (query.includes("INSERT INTO matchsense.archive_manifests")) {
+        return [manifestRow("REPLAY_READY", "live")];
+      }
+      return [];
+    });
+    const archive = db.createArchiveRepository?.(fake.client);
+
+    await expect(
+      archive?.verifyArchive({
+        fixtureId,
+        manifestId: "manifest-live-fence",
+        mode: "live",
+        projectionHash: "2".repeat(64),
+        reducerVersion: "txline-reducer-v1",
+        rightsGrantId: "txodds-hackathon-2026",
+        sourceFence: liveFence,
+        terminalDeliveryId: liveTerminalDelivery.id,
+      }),
+    ).resolves.toMatchObject({
+      kind: "verified",
+      manifest: { mode: "live", status: "REPLAY_READY" },
+    });
+    const sourceLease = fake.queries.find(({ query }) =>
+      query.includes("FROM matchsense.source_leases"),
+    );
+    expect(sourceLease?.parameters).toEqual([
+      "live",
+      liveFence.source,
+      liveFence.streamKey,
+      liveFence.holderId,
+      liveFence.fencingToken,
+    ]);
   });
 });

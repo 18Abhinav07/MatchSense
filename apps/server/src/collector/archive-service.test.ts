@@ -2,6 +2,7 @@ import type {
   ArchiveManifest,
   ArchiveRepository,
   DurableSourceDelivery,
+  SourceFence,
 } from "@matchsense/db";
 import { describe, expect, it, vi } from "vitest";
 
@@ -16,6 +17,20 @@ const fixture: ArchiveFixtureDefinition = {
   homeTeam: "FRA",
   kickoffAt: "2026-07-18T18:00:00.000Z",
   participant1IsHome: true,
+};
+
+const liveFence: SourceFence = {
+  fencingToken: 4,
+  holderId: "collector-a",
+  source: "txline",
+  streamKey: "scores:mainnet",
+};
+
+const recordedFence: SourceFence = {
+  fencingToken: 7,
+  holderId: "archive-worker-a",
+  source: "txline_historical",
+  streamKey: "archive-imports",
 };
 
 function delivery(
@@ -100,14 +115,15 @@ describe("durable archive service", () => {
       ArchiveRepository,
       "orderedDeliveries" | "verifyArchive" | "invalidateArchive"
     > = {
-      invalidateArchive: vi.fn(async () => undefined),
+      invalidateArchive: vi.fn(async () => ({ kind: "applied" as const })),
       orderedDeliveries: vi.fn(async () => [
         delivery("goal-1", "0001", goal),
         delivery("final-2", "0002", final),
       ]),
-      verifyArchive: vi.fn(async (input) =>
-        archiveManifest(input.projectionHash),
-      ),
+      verifyArchive: vi.fn(async (input) => ({
+        kind: "verified" as const,
+        manifest: archiveManifest(input.projectionHash),
+      })),
     };
     const service = createArchiveService({ archive });
 
@@ -116,12 +132,14 @@ describe("durable archive service", () => {
       manifestId: "archive-fx-archive",
       mode: "live",
       rightsGrantId: "grant-archive",
+      sourceFence: liveFence,
     });
     const second = await service.rebuild({
       fixture,
       manifestId: "archive-fx-archive",
       mode: "live",
       rightsGrantId: "grant-archive",
+      sourceFence: liveFence,
     });
 
     expect(first).toMatchObject({
@@ -132,6 +150,7 @@ describe("durable archive service", () => {
     expect(second.projectionHash).toBe(first.projectionHash);
     expect(archive.verifyArchive).toHaveBeenLastCalledWith(
       expect.objectContaining({
+        sourceFence: liveFence,
         terminalDeliveryId: "final-2",
       }),
     );
@@ -145,6 +164,7 @@ describe("durable archive service", () => {
     > = {
       invalidateArchive: vi.fn(async () => {
         calls.push("invalidate");
+        return { kind: "applied" as const };
       }),
       orderedDeliveries: vi.fn(async () => {
         calls.push("deliveries");
@@ -159,7 +179,10 @@ describe("durable archive service", () => {
       }),
       verifyArchive: vi.fn(async (input) => {
         calls.push("verify");
-        return archiveManifest(input.projectionHash);
+        return {
+          kind: "verified" as const,
+          manifest: archiveManifest(input.projectionHash),
+        };
       }),
     };
     const service = createArchiveService({ archive });
@@ -170,9 +193,16 @@ describe("durable archive service", () => {
       manifestId: "archive-fx-archive",
       mode: "live",
       rightsGrantId: "grant-archive",
+      sourceFence: liveFence,
     });
 
     expect(calls).toEqual(["invalidate", "deliveries", "verify"]);
+    expect(archive.invalidateArchive).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceFence: liveFence }),
+    );
+    expect(archive.verifyArchive).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceFence: liveFence }),
+    );
   });
 
   it("rebuilds authorised recorded history as replay-ready without treating it as live", async () => {
@@ -180,14 +210,15 @@ describe("durable archive service", () => {
       ArchiveRepository,
       "orderedDeliveries" | "verifyArchive" | "invalidateArchive"
     > = {
-      invalidateArchive: vi.fn(async () => undefined),
+      invalidateArchive: vi.fn(async () => ({ kind: "applied" as const })),
       orderedDeliveries: vi.fn(async () => [
         delivery("goal-1", "0001", goal, "recorded"),
         delivery("final-2", "0002", final, "recorded"),
       ]),
-      verifyArchive: vi.fn(async (input) =>
-        archiveManifest(input.projectionHash, "recorded"),
-      ),
+      verifyArchive: vi.fn(async (input) => ({
+        kind: "verified" as const,
+        manifest: archiveManifest(input.projectionHash, "recorded"),
+      })),
     };
     const service = createArchiveService({ archive });
 
@@ -197,13 +228,75 @@ describe("durable archive service", () => {
         manifestId: "archive-recorded-fx-archive",
         mode: "recorded",
         rightsGrantId: "grant-archive",
+        sourceFence: recordedFence,
       }),
     ).resolves.toMatchObject({
       status: "REPLAY_READY",
       terminalDeliveryId: "final-2",
     });
     expect(archive.verifyArchive).toHaveBeenCalledWith(
-      expect.objectContaining({ mode: "recorded" }),
+      expect.objectContaining({ mode: "recorded", sourceFence: recordedFence }),
     );
+  });
+
+  it("stops before reading deliveries when correction invalidation loses its source fence", async () => {
+    const archive: Pick<
+      ArchiveRepository,
+      "orderedDeliveries" | "verifyArchive" | "invalidateArchive"
+    > = {
+      invalidateArchive: vi.fn(async () => ({ kind: "fenced" as const })),
+      orderedDeliveries: vi.fn(async () => [
+        delivery("goal-1", "0001", goal),
+        delivery("final-2", "0002", final),
+      ]),
+      verifyArchive: vi.fn(async () => ({ kind: "fenced" as const })),
+    };
+    const service = createArchiveService({ archive });
+
+    await expect(
+      service.rebuild({
+        correctionObserved: true,
+        fixture,
+        manifestId: "archive-fx-archive",
+        mode: "live",
+        rightsGrantId: "grant-archive",
+        sourceFence: liveFence,
+      }),
+    ).resolves.toMatchObject({
+      manifest: null,
+      status: "FENCED",
+      terminalDeliveryId: null,
+    });
+    expect(archive.orderedDeliveries).not.toHaveBeenCalled();
+    expect(archive.verifyArchive).not.toHaveBeenCalled();
+  });
+
+  it("returns FENCED without publishing a manifest when verification loses its source fence", async () => {
+    const archive: Pick<
+      ArchiveRepository,
+      "orderedDeliveries" | "verifyArchive" | "invalidateArchive"
+    > = {
+      invalidateArchive: vi.fn(async () => ({ kind: "applied" as const })),
+      orderedDeliveries: vi.fn(async () => [
+        delivery("goal-1", "0001", goal),
+        delivery("final-2", "0002", final),
+      ]),
+      verifyArchive: vi.fn(async () => ({ kind: "fenced" as const })),
+    };
+    const service = createArchiveService({ archive });
+
+    await expect(
+      service.rebuild({
+        fixture,
+        manifestId: "archive-fx-archive",
+        mode: "live",
+        rightsGrantId: "grant-archive",
+        sourceFence: liveFence,
+      }),
+    ).resolves.toMatchObject({
+      manifest: null,
+      status: "FENCED",
+      terminalDeliveryId: null,
+    });
   });
 });

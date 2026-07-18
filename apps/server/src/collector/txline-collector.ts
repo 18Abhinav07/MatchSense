@@ -214,7 +214,7 @@ export function createTxlineCollector(options: TxlineCollectorOptions) {
   };
 
   const rebuildArchives = async (prepared: readonly PreparedDelivery[]) => {
-    if (!options.archive) return;
+    if (!options.archive) return true;
     const requests = new Map<
       string,
       { correctionObserved: boolean; fixture: CollectorFixtureDefinition }
@@ -231,14 +231,17 @@ export function createTxlineCollector(options: TxlineCollectorOptions) {
       });
     }
     for (const [fixtureId, request] of requests) {
-      await options.archive.rebuild({
+      const archive = await options.archive.rebuild({
         correctionObserved: request.correctionObserved,
         fixture: request.fixture,
         manifestId: `archive:live:${fixtureId}`,
         mode: "live",
         rightsGrantId: options.rightsGrantId,
+        sourceFence: options.sourceFence,
       });
+      if (archive.status === "FENCED") return false;
     }
+    return true;
   };
 
   const effectsFor = (
@@ -272,7 +275,9 @@ export function createTxlineCollector(options: TxlineCollectorOptions) {
     });
     if (result.kind === "fenced") return { effects: [], kind: "fenced" };
     if (result.kind === "conflict") return { effects: [], kind: "conflict" };
-    await rebuildArchives(prepared);
+    if (!(await rebuildArchives(prepared))) {
+      return { effects: [], kind: "fenced" };
+    }
     return {
       effects: effectsFor(prepared, result.deliveries),
       kind: "committed",

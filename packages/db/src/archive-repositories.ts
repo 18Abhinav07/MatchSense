@@ -4,6 +4,7 @@ import type {
   QueryRow,
   RepositoryClient,
   SqlExecutor,
+  SourceFence,
 } from "./repositories.js";
 
 export type ArchiveMode = "live" | "recorded";
@@ -73,6 +74,7 @@ export interface VerifyArchiveInput {
   projectionHash: string;
   reducerVersion: string;
   rightsGrantId: string;
+  sourceFence: SourceFence;
   terminalDeliveryId: string;
 }
 
@@ -83,6 +85,7 @@ export interface ArchiveFixtureKey {
 
 export interface ArchiveInvalidationInput extends ArchiveFixtureKey {
   reason: string;
+  sourceFence: SourceFence;
 }
 
 export interface ArchiveManifest {
@@ -102,15 +105,28 @@ export interface ArchiveManifest {
   verifiedAt: string | null;
 }
 
+/**
+ * Archive mutations are permitted only while the collector's exact source
+ * lease is current. A stale owner must receive this explicit outcome instead
+ * of treating a zero-row mutation as a successful archive transition.
+ */
+export type ArchiveInvalidationResult =
+  { kind: "applied" } | { kind: "fenced" };
+
+export type ArchiveVerificationResult =
+  { kind: "fenced" } | { kind: "verified"; manifest: ArchiveManifest };
+
 export interface ArchiveRepository {
   insertDelivery(input: DurableSourceDelivery): Promise<InsertDeliveryResult>;
-  invalidateArchive(input: ArchiveInvalidationInput): Promise<void>;
+  invalidateArchive(
+    input: ArchiveInvalidationInput,
+  ): Promise<ArchiveInvalidationResult>;
   orderedDeliveries(
     input: ArchiveFixtureKey,
   ): Promise<readonly DurableSourceDelivery[]>;
   replayReady(input: ArchiveFixtureKey): Promise<ArchiveManifest | null>;
   upsertRightsGrant(input: RightsGrantWrite): Promise<RightsGrant>;
-  verifyArchive(input: VerifyArchiveInput): Promise<ArchiveManifest>;
+  verifyArchive(input: VerifyArchiveInput): Promise<ArchiveVerificationResult>;
 }
 
 const sourceDeliveryColumns = `mode, id, fixture_id, source, source_record_id,
@@ -205,6 +221,38 @@ function assertNonempty(value: string, label: string) {
 
 function assertArchiveFixtureKey(input: ArchiveFixtureKey) {
   assertNonempty(input.fixtureId, "Fixture id");
+}
+
+function assertArchiveSourceFence(fence: SourceFence | undefined) {
+  if (!fence) throw new Error("Archive source fence is required");
+  assertNonempty(fence.source, "Archive source fence source");
+  assertNonempty(fence.streamKey, "Archive source fence stream key");
+  assertNonempty(fence.holderId, "Archive source fence holder id");
+  if (!Number.isSafeInteger(fence.fencingToken) || fence.fencingToken <= 0) {
+    throw new Error("Archive source fence token must be a positive integer");
+  }
+}
+
+async function lockCurrentArchiveSourceFence(
+  executor: SqlExecutor,
+  input: { mode: ArchiveMode; sourceFence: SourceFence },
+): Promise<boolean> {
+  const rows = await executor.unsafe(
+    `SELECT fencing_token
+FROM matchsense.source_leases
+WHERE mode = $1 AND source = $2 AND stream_key = $3
+  AND holder_id = $4 AND fencing_token = $5
+  AND lease_until > clock_timestamp()
+FOR UPDATE;`,
+    [
+      input.mode,
+      input.sourceFence.source,
+      input.sourceFence.streamKey,
+      input.sourceFence.holderId,
+      input.sourceFence.fencingToken,
+    ],
+  );
+  return rows[0] !== undefined;
 }
 
 function provenanceFor(mode: ArchiveMode): ArchiveProvenance {
@@ -469,8 +517,17 @@ ORDER BY ordering_key ASC, delivery_key ASC, id ASC;`,
       assertNonempty(input.rightsGrantId, "Rights grant id");
       assertNonempty(input.terminalDeliveryId, "Terminal delivery id");
       assertSha256(input.projectionHash, "Projection hash");
+      assertArchiveSourceFence(input.sourceFence);
 
       return client.begin(async (transaction) => {
+        if (
+          !(await lockCurrentArchiveSourceFence(transaction, {
+            mode: input.mode,
+            sourceFence: input.sourceFence,
+          }))
+        ) {
+          return { kind: "fenced" };
+        }
         const grantRows = await transaction.unsafe(
           `SELECT id
 FROM matchsense.rights_grants
@@ -578,21 +635,33 @@ FROM unnest(
             deliveries.map((delivery) => delivery.responseHash),
           ],
         );
-        return manifest;
+        return { kind: "verified", manifest };
       });
     },
     invalidateArchive: async (input) => {
       assertArchiveFixtureKey(input);
       assertNonempty(input.reason, "Archive invalidation reason");
-      await client.unsafe(
-        `UPDATE matchsense.archive_manifests
+      assertArchiveSourceFence(input.sourceFence);
+      return client.begin(async (transaction) => {
+        if (
+          !(await lockCurrentArchiveSourceFence(transaction, {
+            mode: input.mode,
+            sourceFence: input.sourceFence,
+          }))
+        ) {
+          return { kind: "fenced" };
+        }
+        await transaction.unsafe(
+          `UPDATE matchsense.archive_manifests
 SET status = 'REPLAY_INVALIDATED',
     invalidation_reason = $3,
     invalidated_at = clock_timestamp(),
     updated_at = clock_timestamp()
 WHERE mode = $1 AND fixture_id = $2 AND status = 'REPLAY_READY';`,
-        [input.mode, input.fixtureId, input.reason],
-      );
+          [input.mode, input.fixtureId, input.reason],
+        );
+        return { kind: "applied" };
+      });
     },
     replayReady: async (input) => {
       assertArchiveFixtureKey(input);
