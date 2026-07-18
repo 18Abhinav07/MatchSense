@@ -30,14 +30,20 @@ function reads(): FixtureReadRepository {
     readHistory: vi.fn(async () => []),
     readMemory: vi.fn(async () => null),
     readMoment: vi.fn(async () => null),
-    readTeamCatalog: vi.fn(async () => []),
+  };
+}
+
+function teamCatalog() {
+  return {
+    list: vi.fn(async () => []),
+    upsert: vi.fn(async () => undefined),
   };
 }
 
 describe("durable read API registration", () => {
   it("registers fixture, cursor stream, and recorded replay routes without ProductRuntime", async () => {
     const app = buildApp({
-      fixtureRead: { reads: reads() },
+      fixtureRead: { reads: reads(), teamCatalog: teamCatalog() },
       readinessProbe: {
         check: async () => ({
           databaseReachable: true,

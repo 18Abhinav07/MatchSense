@@ -41,15 +41,54 @@ function repository(): FixtureReadRepository {
       snapshot: fixture,
       superseded: false,
     })),
-    readTeamCatalog: vi.fn(async () => []),
+  };
+}
+
+function teamCatalog() {
+  return {
+    list: vi.fn(async () => []),
+    upsert: vi.fn(async () => undefined),
   };
 }
 
 describe("durable fixture read routes", () => {
+  it("serves the durable tournament roster without exposing repository-only identity fields", async () => {
+    const reads = repository();
+    const teamCatalog = {
+      list: vi.fn(async () => [
+        {
+          code: "ARG",
+          name: "Argentina",
+          participantId: "team-arg",
+          sourceTimestampMs: 1_784_403_000_000,
+        },
+      ]),
+      upsert: vi.fn(async () => undefined),
+    };
+    const app = Fastify();
+    registerFixtureReadRoutes(app, { reads, teamCatalog });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/catalog",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.json()).toEqual({
+      provenance: "live_txline",
+      sourceLabel: "TXLINE · WORLD CUP DATA",
+      teams: [{ code: "ARG", name: "Argentina" }],
+    });
+    expect(teamCatalog.list).toHaveBeenCalledOnce();
+    expect(reads.listFixtures).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it("keeps recorded Memory and history on the explicit recorded mode key", async () => {
     const reads = repository();
     const app = Fastify();
-    registerFixtureReadRoutes(app, { reads });
+    registerFixtureReadRoutes(app, { reads, teamCatalog: teamCatalog() });
 
     const history = await app.inject({ method: "GET", url: "/api/v1/history" });
     const fixtures = await app.inject({
@@ -82,7 +121,7 @@ describe("durable fixture read routes", () => {
   it("defaults live fixture detail to live but forwards an explicit recorded Moment mode", async () => {
     const reads = repository();
     const app = Fastify();
-    registerFixtureReadRoutes(app, { reads });
+    registerFixtureReadRoutes(app, { reads, teamCatalog: teamCatalog() });
 
     const detail = await app.inject({
       method: "GET",
@@ -110,7 +149,10 @@ describe("durable fixture read routes", () => {
 
   it("rejects malformed Moment identities instead of resolving an ambiguous route", async () => {
     const app = Fastify();
-    registerFixtureReadRoutes(app, { reads: repository() });
+    registerFixtureReadRoutes(app, {
+      reads: repository(),
+      teamCatalog: teamCatalog(),
+    });
 
     const response = await app.inject({
       method: "GET",

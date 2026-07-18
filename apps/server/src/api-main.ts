@@ -39,6 +39,7 @@ export type ApiDatabaseRuntime = Pick<
   | "fixtureTruth"
   | "pushDevices"
   | "rooms"
+  | "teamCatalog"
 >;
 
 export interface StartApiOptions {
@@ -166,7 +167,10 @@ export async function startApi(
         repository: databaseRuntime.fans,
         sessions,
       },
-      fixtureRead: { reads: databaseRuntime.fixtureReads },
+      fixtureRead: {
+        reads: databaseRuntime.fixtureReads,
+        teamCatalog: databaseRuntime.teamCatalog,
+      },
       readinessProbe: databaseRuntime,
       webDistPath,
     });

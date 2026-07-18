@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
+import { TEAM_CODE_PATTERN } from "@matchsense/contracts";
 import { RoomsDomainError } from "@matchsense/rooms";
 
 import type { FanSessionService } from "./fan-session.js";
@@ -12,10 +13,7 @@ import type {
 import { RoomServiceError, type RoomServiceErrorCode } from "./room-service.js";
 
 const nickname = z.string().trim().min(1).max(30);
-const teamCode = z
-  .string()
-  .trim()
-  .regex(/^[A-Za-z0-9]{2,12}$/u);
+const teamCode = z.string().trim().regex(TEAM_CODE_PATTERN);
 const roomIdParams = z.object({ roomId: z.string().min(1).max(120) }).strict();
 const createBody = z
   .object({

@@ -31,6 +31,7 @@ type DatabaseModuleContract = {
     pushDevices: { listActiveForFan(input: string): Promise<unknown> };
     rooms: { get(input: string): Promise<unknown> };
     sourceState: { getCursor(input: unknown): Promise<unknown> };
+    teamCatalog: { list(): Promise<unknown> };
   };
   createPostgresDatabase?: (databaseUrl: string) => {
     check(): Promise<{
@@ -114,6 +115,7 @@ describe("PostgreSQL migration store", () => {
     expect(database?.pushDevices).toBeDefined();
     expect(database?.rooms).toBeDefined();
     expect(database?.sourceState).toBeDefined();
+    expect(database?.teamCatalog).toBeDefined();
     await expect(database?.check()).resolves.toEqual({
       databaseReachable: true,
       migrationsCurrent: false,
@@ -128,6 +130,7 @@ describe("PostgreSQL migration store", () => {
         streamKey: "scores:mainnet",
       }),
     ).resolves.toBeNull();
+    await expect(database?.teamCatalog.list()).resolves.toEqual([]);
     await database?.close();
     await database?.close();
 
@@ -136,6 +139,7 @@ describe("PostgreSQL migration store", () => {
       expect.stringContaining("to_regclass"),
       expect.stringContaining("FROM matchsense.fixtures"),
       expect.stringContaining("FROM matchsense.source_cursors"),
+      expect.stringContaining("FROM matchsense.team_catalog_entries"),
     ]);
     expect(fake.end).toHaveBeenCalledTimes(1);
   });

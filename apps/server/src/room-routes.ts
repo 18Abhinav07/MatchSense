@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 
+import { TEAM_CODE_PATTERN } from "@matchsense/contracts";
 import { RoomsDomainError, type RoomsErrorCode } from "@matchsense/rooms";
 
 import {
@@ -12,10 +13,7 @@ import {
 const participantId = z.string().trim().min(1).max(120);
 const nickname = z.string().trim().min(1).max(30);
 const roomName = z.string().trim().min(1).max(60);
-const teamCode = z
-  .string()
-  .trim()
-  .regex(/^[A-Za-z0-9]{2,12}$/u);
+const teamCode = z.string().trim().regex(TEAM_CODE_PATTERN);
 const roomIdParams = z.object({ roomId: z.string().min(1).max(120) }).strict();
 const emptyQuery = z.object({}).strict();
 const streamQuery = z

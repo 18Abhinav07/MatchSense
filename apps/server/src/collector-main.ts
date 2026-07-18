@@ -14,6 +14,7 @@ import {
   createTxlineRawScoreSource,
   fetchTxlineWorldCupSchedule,
   type TxlineAuthenticatedClient,
+  type TxlineScheduleFixture,
 } from "@matchsense/txline-adapter";
 
 import type { ServerConfig } from "./config.js";
@@ -26,6 +27,7 @@ import { createArchiveService } from "./collector/archive-service.js";
 import {
   createScheduleSync,
   durableFixtureFromSchedule,
+  durableTeamCatalogFromSchedule,
 } from "./collector/schedule-sync.js";
 import { createTxlineCollector } from "./collector/txline-collector.js";
 import { transcodeWavToStreamMp3 } from "./audio-transcoder.js";
@@ -65,6 +67,7 @@ export type CollectorDatabaseRuntime = Pick<
   | "pushDevices"
   | "rooms"
   | "sourceState"
+  | "teamCatalog"
 >;
 
 export interface CollectorSourceLifecycle {
@@ -94,6 +97,9 @@ const STREAM_KEY = "scores:mainnet";
 const LEASE_DURATION_MS = 90_000;
 const LEASE_RENEWAL_MS = 30_000;
 const HACKATHON_RIGHTS_GRANT_ID = "txline-world-cup-hackathon-2026";
+const WORLD_CUP_CATALOG_START_EPOCH_DAY = Math.floor(
+  Date.UTC(2026, 5, 11) / 86_400_000,
+);
 const COMMENTARY_MP3_CONTRACT: Mp3Contract = {
   bitrateKbps: 64,
   byteLength: 0,
@@ -105,6 +111,36 @@ const COMMENTARY_MP3_CONTRACT: Mp3Contract = {
   samplesPerFrame: 1_152,
   version: 1,
 };
+
+function newestScheduleFixtures(fixtures: readonly TxlineScheduleFixture[]) {
+  const merged = new Map<string, TxlineScheduleFixture>();
+  for (const fixture of fixtures) {
+    const existing = merged.get(fixture.fixtureId);
+    if (!existing || fixture.sourceTimestampMs > existing.sourceTimestampMs) {
+      merged.set(fixture.fixtureId, fixture);
+    }
+  }
+  return [...merged.values()].sort(
+    (left, right) =>
+      left.startTimeMs - right.startTimeMs ||
+      left.fixtureId.localeCompare(right.fixtureId),
+  );
+}
+
+async function fetchTournamentSchedule(client: TxlineAuthenticatedClient) {
+  const currentEpochDay = Math.floor(Date.now() / 86_400_000);
+  const [catalogue, current] = await Promise.allSettled([
+    fetchTxlineWorldCupSchedule(client, {
+      startEpochDay: WORLD_CUP_CATALOG_START_EPOCH_DAY,
+    }),
+    fetchTxlineWorldCupSchedule(client, { startEpochDay: currentEpochDay }),
+  ]);
+  if (current.status === "rejected") throw current.reason;
+  return {
+    catalogue: catalogue.status === "fulfilled" ? catalogue.value : null,
+    current: newestScheduleFixtures(current.value),
+  };
+}
 
 export interface CollectorOutboxEffects {
   commentary?: Pick<CommentaryJobWorker, "handleOutbox">;
@@ -267,19 +303,35 @@ export function createDurableCollectorLifecycle(input: {
           reference: "TxLINE World Cup Hackathon 2026",
           scopes: ["audio", "raw_retention", "replay"],
         });
-        const schedule = await fetchTxlineWorldCupSchedule(input.txlineClient);
-        if (schedule.length === 0) {
+        const schedule = await fetchTournamentSchedule(input.txlineClient);
+        if (schedule.catalogue && schedule.catalogue.length > 0) {
+          await input.database.teamCatalog.upsert(
+            durableTeamCatalogFromSchedule([
+              ...schedule.catalogue,
+              ...schedule.current,
+            ]),
+          );
+        } else if ((await input.database.teamCatalog.list()).length === 0) {
           throw new Error(
-            "TxLINE returned no World Cup fixtures for collection",
+            "TxLINE tournament roster is unavailable and durable roster is empty",
+          );
+        } else {
+          process.stderr.write(
+            "TxLINE tournament roster refresh unavailable; using durable roster\n",
+          );
+        }
+        if (schedule.current.length === 0) {
+          throw new Error(
+            "TxLINE returned no current World Cup fixtures for live collection",
           );
         }
         await createScheduleSync({
           repository: input.database.fixtureTruth,
           rightsGrantId: HACKATHON_RIGHTS_GRANT_ID,
           sourceFence: fence,
-        }).sync(schedule);
+        }).sync(schedule.current);
         const fixtures = new Map(
-          schedule.map((fixture) => [
+          schedule.current.map((fixture) => [
             fixture.fixtureId,
             durableFixtureFromSchedule(fixture),
           ]),
@@ -293,7 +345,7 @@ export function createDurableCollectorLifecycle(input: {
         });
         const source = createTxlineRawScoreSource({
           client: input.txlineClient,
-          fixtureIds: [...fixtures.keys()],
+          fixtureIds: schedule.current.map(({ fixtureId }) => fixtureId),
           loadCursor: async () =>
             (
               await input.database.sourceState.getCursor({

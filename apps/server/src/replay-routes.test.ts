@@ -43,7 +43,6 @@ function repository(ready = true): FixtureReadRepository {
     readHistory: vi.fn(),
     readMemory: vi.fn(),
     readMoment: vi.fn(),
-    readTeamCatalog: vi.fn(async () => []),
   };
 }
 

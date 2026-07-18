@@ -50,7 +50,7 @@ const prefixCatalog = [
 
 describe("migration catalog and planning", () => {
   it("publishes a deterministic schema-only baseline migration", () => {
-    expect(db.migrationCatalog).toHaveLength(4);
+    expect(db.migrationCatalog).toHaveLength(5);
 
     const migration = db.migrationCatalog?.[0];
     expect(migration).toMatchObject({
@@ -214,7 +214,7 @@ describe("migration catalog and planning", () => {
   it("retires synthetic public modes and adds the authorised archive/job foundation in v4", () => {
     const migration = db.migrationCatalog?.[3];
 
-    expect(db.migrationCatalog).toHaveLength(4);
+    expect(db.migrationCatalog).toHaveLength(5);
     expect(migration).toMatchObject({
       description:
         "retire synthetic public modes and add authorised archive jobs",
@@ -282,6 +282,37 @@ describe("migration catalog and planning", () => {
     expect(sql).toContain(
       "BEFORE UPDATE OR DELETE ON matchsense.raw_source_records",
     );
+  });
+
+  it("adds a live TxLINE team catalogue separate from fixture lifecycle state in v5", () => {
+    const migration = db.migrationCatalog?.[4];
+
+    expect(migration).toMatchObject({
+      description: "create durable live TxLINE team catalogue",
+      version: 5,
+    });
+    expect(migration?.checksum).toBe(
+      createHash("sha256")
+        .update(migration?.sql ?? "")
+        .digest("hex"),
+    );
+    expect(migration?.sql).toMatch(
+      /CREATE TABLE matchsense\.team_catalog_entries \(/u,
+    );
+    expect(migration?.sql).toMatch(/participant_id text NOT NULL/u);
+    expect(migration?.sql).toMatch(/UNIQUE \(code\)/u);
+    expect(migration?.sql).toMatch(/source_timestamp_ms bigint NOT NULL/u);
+    expect(migration?.sql).toContain("CHECK (mode = 'live')");
+    expect(migration?.sql).toContain("CHECK (source = 'txline')");
+    expect(migration?.sql).toContain("PRIMARY KEY (participant_id)");
+    expect(migration?.sql).toContain(
+      "CREATE INDEX team_catalog_entries_code_idx",
+    );
+    expect(migration?.sql).toContain(
+      "DROP CONSTRAINT IF EXISTS fixtures_check1",
+    );
+    expect(migration?.sql).not.toContain("fixture_id");
+    expect(migration?.sql).not.toContain("payload jsonb");
   });
 
   it("orders pending migrations and reports a repeat run as current", () => {

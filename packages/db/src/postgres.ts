@@ -36,6 +36,10 @@ import {
   type FixtureReadRepository,
 } from "./fixture-read-repository.js";
 import {
+  createTeamCatalogRepository,
+  type TeamCatalogRepository,
+} from "./team-catalog-repository.js";
+import {
   createDatabaseRuntime,
   type DatabaseRuntime,
   type MigrationStore,
@@ -68,6 +72,7 @@ export interface ApplicationDatabase extends DatabaseRuntime {
   pushDevices: PushDeviceRepository;
   rooms: RoomAggregateRepository;
   sourceState: SourceStateRepository;
+  teamCatalog: TeamCatalogRepository;
 }
 
 function adaptQueryExecutor(executor: Sql | TransactionSql): QueryExecutor {
@@ -188,6 +193,7 @@ export function createApplicationDatabase(
     pushDevices: createPushDeviceRepository(client),
     rooms: createRoomAggregateRepository(client),
     sourceState: createSourceStateRepository(client),
+    teamCatalog: createTeamCatalogRepository(client),
   });
 }
 

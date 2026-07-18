@@ -18,23 +18,89 @@ export interface ScheduleSync {
   sync(fixtures: readonly TxlineScheduleFixture[]): Promise<ScheduleSyncResult>;
 }
 
-const COUNTRY_CODES = new Map<string, string>([
-  ["argentina", "ARG"],
-  ["australia", "AUS"],
-  ["brazil", "BRA"],
-  ["canada", "CAN"],
-  ["england", "ENG"],
-  ["france", "FRA"],
-  ["germany", "GER"],
-  ["japan", "JPN"],
-  ["mexico", "MEX"],
-  ["morocco", "MAR"],
-  ["netherlands", "NED"],
-  ["portugal", "POR"],
-  ["spain", "ESP"],
-  ["united states", "USA"],
-  ["uruguay", "URU"],
-]);
+/**
+ * A team identity is durable catalogue data, independent from whether one of
+ * its historical fixtures is eligible to enter the live fixture lifecycle.
+ */
+export interface DurableTeamCatalogEntry {
+  code: string;
+  name: string;
+  participantId: string;
+  sourceTimestampMs: number;
+}
+
+const COUNTRY_CODES = new Map<string, string>(
+  Object.entries({
+    Algeria: "ALG",
+    Argentina: "ARG",
+    Australia: "AUS",
+    Austria: "AUT",
+    Belgium: "BEL",
+    Bolivia: "BOL",
+    "Bosnia & Herzegovina": "BIH",
+    Brazil: "BRA",
+    Cameroon: "CMR",
+    Canada: "CAN",
+    "Cape Verde": "CPV",
+    Chile: "CHI",
+    Colombia: "COL",
+    "Congo DR": "COD",
+    "Costa Rica": "CRC",
+    "Cote d'Ivoire": "CIV",
+    "Côte d'Ivoire": "CIV",
+    Croatia: "CRO",
+    Curacao: "CUW",
+    Curaçao: "CUW",
+    "DR Congo": "COD",
+    Denmark: "DEN",
+    "Democratic Republic of the Congo": "COD",
+    Ecuador: "ECU",
+    Egypt: "EGY",
+    England: "ENG",
+    Finland: "FIN",
+    France: "FRA",
+    Germany: "GER",
+    Ghana: "GHA",
+    Haiti: "HAI",
+    Iceland: "ISL",
+    Iran: "IRN",
+    Iraq: "IRQ",
+    "Ivory Coast": "CIV",
+    Jamaica: "JAM",
+    Japan: "JPN",
+    Jordan: "JOR",
+    "Korea Republic": "KOR",
+    Mexico: "MEX",
+    Morocco: "MAR",
+    Netherlands: "NED",
+    "New Zealand": "NZL",
+    Nigeria: "NGA",
+    Norway: "NOR",
+    Panama: "PAN",
+    Paraguay: "PAR",
+    Poland: "POL",
+    Portugal: "POR",
+    Qatar: "QAT",
+    "Saudi Arabia": "KSA",
+    Scotland: "SCO",
+    Senegal: "SEN",
+    Serbia: "SRB",
+    "South Africa": "RSA",
+    "South Korea": "KOR",
+    Spain: "ESP",
+    Sweden: "SWE",
+    Switzerland: "SUI",
+    Tunisia: "TUN",
+    Turkey: "TUR",
+    Türkiye: "TUR",
+    USA: "USA",
+    Ukraine: "UKR",
+    "United States": "USA",
+    Uruguay: "URU",
+    Uzbekistan: "UZB",
+    Wales: "WAL",
+  }).map(([name, code]) => [name.toLowerCase(), code]),
+);
 
 function stableJson(value: unknown): string {
   if (
@@ -62,22 +128,89 @@ function digest(value: unknown) {
   return createHash("sha256").update(stableJson(value)).digest("hex");
 }
 
-function teamCode(name: string) {
+function teamCode(name: string, participantId: string) {
   const known = COUNTRY_CODES.get(name.trim().toLowerCase());
   if (known) return known;
-  const compact = name
-    .normalize("NFKD")
-    .replace(/\p{M}/gu, "")
-    .toUpperCase()
-    .match(/[A-Z0-9]+/g)
-    ?.join("")
-    .slice(0, 3);
-  return compact && compact.length === 3 ? compact : "UNK";
+  const compact =
+    name
+      .normalize("NFKD")
+      .replace(/\p{M}/gu, "")
+      .toUpperCase()
+      .match(/[A-Z0-9]+/g)
+      ?.join("")
+      .slice(0, 3) ?? "UNK";
+  const identifier = participantId.toUpperCase().replace(/[^A-Z0-9]/gu, "");
+  if (identifier.length === 0 || identifier.length > 16) {
+    throw new Error("TxLINE participant id cannot form a stable team code");
+  }
+  // TxLINE parses participant IDs as safe numeric identifiers (at most sixteen
+  // digits), so retaining the whole identifier gives every unknown team a
+  // collision-safe code within the 20-character public team-code contract.
+  return `${compact}-${identifier}`;
+}
+
+function teamCatalogEntry(
+  participant: TxlineScheduleFixture["participant1"],
+  sourceTimestampMs: number,
+): DurableTeamCatalogEntry {
+  return {
+    code: teamCode(participant.name, participant.id),
+    name: participant.name,
+    participantId: participant.id,
+    sourceTimestampMs,
+  };
+}
+
+function replacesCatalogEntry(
+  candidate: DurableTeamCatalogEntry,
+  existing: DurableTeamCatalogEntry,
+) {
+  if (candidate.sourceTimestampMs !== existing.sourceTimestampMs) {
+    return candidate.sourceTimestampMs > existing.sourceTimestampMs;
+  }
+  if (candidate.name !== existing.name || candidate.code !== existing.code) {
+    throw new Error("Team catalogue same timestamp has conflicting identity");
+  }
+  return false;
+}
+
+/**
+ * Builds the durable World Cup team roster from schedule facts alone. This
+ * deliberately does not create fixtures: a past schedule row can contribute
+ * a team identity without being presented as a future live match.
+ */
+export function durableTeamCatalogFromSchedule(
+  fixtures: readonly TxlineScheduleFixture[],
+): readonly DurableTeamCatalogEntry[] {
+  const teams = new Map<string, DurableTeamCatalogEntry>();
+  for (const fixture of fixtures) {
+    for (const participant of [fixture.participant1, fixture.participant2]) {
+      const candidate = teamCatalogEntry(
+        participant,
+        fixture.sourceTimestampMs,
+      );
+      const existing = teams.get(candidate.participantId);
+      if (!existing || replacesCatalogEntry(candidate, existing)) {
+        teams.set(candidate.participantId, candidate);
+      }
+    }
+  }
+  return [...teams.values()].sort(
+    (left, right) =>
+      left.code.localeCompare(right.code) ||
+      left.participantId.localeCompare(right.participantId),
+  );
 }
 
 export function durableFixtureFromSchedule(fixture: TxlineScheduleFixture) {
-  const participant1Code = teamCode(fixture.participant1.name);
-  const participant2Code = teamCode(fixture.participant2.name);
+  const participant1Code = teamCode(
+    fixture.participant1.name,
+    fixture.participant1.id,
+  );
+  const participant2Code = teamCode(
+    fixture.participant2.name,
+    fixture.participant2.id,
+  );
   const homeTeam = fixture.participant1IsHome
     ? participant1Code
     : participant2Code;

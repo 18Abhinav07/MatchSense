@@ -86,9 +86,21 @@ describe("API-only runtime", () => {
       readHistory: vi.fn(async () => []),
       readMemory: vi.fn(async () => null),
       readMoment: vi.fn(async () => null),
-      readTeamCatalog: vi.fn(async () => [
-        { code: "ARG", name: "Argentina", participantId: "team-arg" },
-        { code: "FRA", name: "France", participantId: "team-fra" },
+    };
+    const teamCatalog = {
+      list: vi.fn(async () => [
+        {
+          code: "ARG",
+          name: "Argentina",
+          participantId: "team-arg",
+          sourceTimestampMs: 1_784_403_000_000,
+        },
+        {
+          code: "FRA",
+          name: "France",
+          participantId: "team-fra",
+          sourceTimestampMs: 1_784_403_000_000,
+        },
       ]),
     };
     const database = {
@@ -100,6 +112,7 @@ describe("API-only runtime", () => {
       fans: {},
       fixtureReads,
       pushDevices: {},
+      teamCatalog,
     };
 
     try {
@@ -121,15 +134,23 @@ describe("API-only runtime", () => {
       expect(catalogue.json()).toMatchObject({
         provenance: "live_txline",
         teams: [
-          { code: "ARG", name: "Argentina", participantId: "team-arg" },
-          { code: "FRA", name: "France", participantId: "team-fra" },
+          { code: "ARG", name: "Argentina" },
+          { code: "FRA", name: "France" },
+        ],
+      });
+      expect(catalogue.json()).toEqual({
+        provenance: "live_txline",
+        sourceLabel: "TXLINE · WORLD CUP DATA",
+        teams: [
+          { code: "ARG", name: "Argentina" },
+          { code: "FRA", name: "France" },
         ],
       });
       expect(fixtures.statusCode).toBe(200);
       expect(fixtures.headers["cache-control"]).toBe("no-store");
       expect(fixtures.json()).toEqual({ fixtures: [fixture] });
       expect(fixtureReads.listFixtures).toHaveBeenCalledWith({ mode: "live" });
-      expect(fixtureReads.readTeamCatalog).toHaveBeenCalledOnce();
+      expect(teamCatalog.list).toHaveBeenCalledOnce();
       await app.close();
     } finally {
       await rm(webDistPath, { force: true, recursive: true });

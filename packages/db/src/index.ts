@@ -138,8 +138,12 @@ export type {
   FixtureMomentRevision,
   FixtureReadKey,
   FixtureReadMode,
-  PersistedTeamCatalogEntry,
   FixtureReadRepository,
   FixtureReadSnapshot,
   ReplayReadyFixture,
 } from "./fixture-read-repository.js";
+export { createTeamCatalogRepository } from "./team-catalog-repository.js";
+export type {
+  TeamCatalogEntry,
+  TeamCatalogRepository,
+} from "./team-catalog-repository.js";

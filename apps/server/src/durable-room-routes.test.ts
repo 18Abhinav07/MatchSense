@@ -74,6 +74,36 @@ function serviceStub(overrides = {}) {
 }
 
 describe("durable Call Three Room routes", () => {
+  it("accepts the complete durable team-code contract for a roster team", async () => {
+    const sessions = fanSessions();
+    const host = await sessions.createGuest();
+    const service = serviceStub();
+    const app = Fastify();
+    registerDurableRoomRoutes(app, { service, sessions });
+
+    const response = await app.inject({
+      headers: {
+        cookie: `matchsense_session=${host.sessionToken}`,
+        "x-matchsense-csrf": host.csrfToken,
+      },
+      method: "POST",
+      payload: {
+        fixtureId: "live-fixture-1",
+        host: { nickname: "Abhinav", teamCode: "ALP-PARTICIPANT123" },
+        name: "Roster-safe Room",
+      },
+      url: "/api/v1/rooms",
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(service.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        host: expect.objectContaining({ teamCode: "ALP-PARTICIPANT123" }),
+      }),
+    );
+    await app.close();
+  });
+
   it("owns Room creation and Call Three mutations through the fan session plus CSRF", async () => {
     const sessions = fanSessions();
     const host = await sessions.createGuest();

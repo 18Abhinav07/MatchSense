@@ -5,6 +5,7 @@ import type {
   FixtureBucket,
   FixtureReadMode,
   FixtureReadRepository,
+  TeamCatalogRepository,
 } from "@matchsense/db";
 
 const fixtureId = z
@@ -17,6 +18,7 @@ const mode = z.enum(["live", "recorded"]);
 
 export interface FixtureReadRouteDependencies {
   reads: FixtureReadRepository;
+  teamCatalog: TeamCatalogRepository;
 }
 
 function notFound(reply: FastifyReply) {
@@ -55,7 +57,10 @@ export function registerFixtureReadRoutes(
     reply.header("Cache-Control", "no-store").send({
       provenance: "live_txline",
       sourceLabel: "TXLINE · WORLD CUP DATA",
-      teams: await dependencies.reads.readTeamCatalog(),
+      teams: (await dependencies.teamCatalog.list()).map(({ code, name }) => ({
+        code,
+        name,
+      })),
     }),
   );
 

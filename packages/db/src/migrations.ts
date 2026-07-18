@@ -822,6 +822,28 @@ CREATE TRIGGER commentary_jobs_ready_requires_bytes
 BEFORE INSERT OR UPDATE OF status, artifact_id ON matchsense.commentary_jobs
 FOR EACH ROW EXECUTE FUNCTION matchsense.commentary_ready_requires_bytes();`.trim(),
   ),
+  defineMigration(
+    5,
+    "create durable live TxLINE team catalogue",
+    `ALTER TABLE matchsense.fixtures
+  DROP CONSTRAINT IF EXISTS fixtures_check1;
+
+CREATE TABLE matchsense.team_catalog_entries (
+  participant_id text NOT NULL CHECK (length(btrim(participant_id)) > 0),
+  code text NOT NULL CHECK (code ~ '^[A-Z0-9][A-Z0-9-]{1,19}$'),
+  name text NOT NULL CHECK (length(btrim(name)) > 0),
+  source_timestamp_ms bigint NOT NULL CHECK (source_timestamp_ms >= 0),
+  mode text NOT NULL DEFAULT 'live' CHECK (mode = 'live'),
+  source text NOT NULL DEFAULT 'txline' CHECK (source = 'txline'),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (participant_id),
+  UNIQUE (code)
+);
+
+CREATE INDEX team_catalog_entries_code_idx
+  ON matchsense.team_catalog_entries (code ASC, participant_id ASC);`.trim(),
+  ),
 ]);
 
 export function planMigrations(

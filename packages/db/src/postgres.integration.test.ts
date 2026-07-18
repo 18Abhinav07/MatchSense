@@ -171,8 +171,8 @@ describe.sequential("real PostgreSQL migration runtime", () => {
     const runtime = trackedDatabase();
 
     await expect(runtime.migrate()).resolves.toEqual({
-      appliedVersions: [1, 2, 3, 4],
-      currentVersion: 4,
+      appliedVersions: [1, 2, 3, 4, 5],
+      currentVersion: 5,
     });
     await expect(runtime.check()).resolves.toEqual({
       databaseReachable: true,
@@ -180,7 +180,7 @@ describe.sequential("real PostgreSQL migration runtime", () => {
     });
     await expect(runtime.migrate()).resolves.toEqual({
       appliedVersions: [],
-      currentVersion: 4,
+      currentVersion: 5,
     });
 
     const schemas = await admin.unsafe<{ schema_name: string }[]>(
@@ -192,7 +192,7 @@ describe.sequential("real PostgreSQL migration runtime", () => {
       "SELECT version, checksum, applied_at FROM public.matchsense_schema_migrations ORDER BY version;",
     );
     expect(schemas).toHaveLength(1);
-    expect(ledger).toHaveLength(4);
+    expect(ledger).toHaveLength(5);
     expect(ledger).toEqual([
       expect.objectContaining({
         checksum: migrationCatalog[0]?.checksum,
@@ -210,6 +210,10 @@ describe.sequential("real PostgreSQL migration runtime", () => {
         checksum: migrationCatalog[3]?.checksum,
         version: 4,
       }),
+      expect.objectContaining({
+        checksum: migrationCatalog[4]?.checksum,
+        version: 5,
+      }),
     ]);
     expect(ledger.every(({ applied_at }) => applied_at instanceof Date)).toBe(
       true,
@@ -226,6 +230,87 @@ describe.sequential("real PostgreSQL migration runtime", () => {
   mode, id, provenance, home_team_id, away_team_id, scheduled_at, status
 )
 VALUES ('live', 'fx-crossed', 'recorded_txline_authorised', 'FRA', 'ESP', clock_timestamp(), 'scheduled');`,
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("permits an authorised recorded fixture after the v5 provenance repair", async () => {
+    const runtime = trackedDatabase();
+    await runtime.migrate();
+
+    await expect(
+      admin.unsafe(
+        `INSERT INTO matchsense.fixtures (
+  mode, id, provenance, home_team_id, away_team_id, scheduled_at, status
+)
+VALUES (
+  'recorded', 'recorded-v5-repair', 'recorded_txline_authorised',
+  'FRA', 'ESP', clock_timestamp(), 'scheduled'
+);`,
+      ),
+    ).resolves.toEqual([]);
+  });
+
+  it("keeps live TxLINE team identities outside fixture lifecycle state and only accepts newer observations", async () => {
+    const runtime = trackedDatabase();
+    await runtime.migrate();
+
+    await runtime.teamCatalog.upsert([
+      {
+        code: "ESP",
+        name: "Spain",
+        participantId: "participant-spain",
+        sourceTimestampMs: 1_784_487_500_000,
+      },
+      {
+        code: "ARG",
+        name: "Argentina",
+        participantId: "participant-argentina",
+        sourceTimestampMs: 1_784_487_600_000,
+      },
+    ]);
+    await runtime.teamCatalog.upsert([
+      {
+        code: "ARG",
+        name: "Stale Argentina",
+        participantId: "participant-argentina",
+        sourceTimestampMs: 1_784_487_599_999,
+      },
+    ]);
+    await runtime.teamCatalog.upsert([
+      {
+        code: "ARA",
+        name: "Argentina Football Association",
+        participantId: "participant-argentina",
+        sourceTimestampMs: 1_784_487_600_001,
+      },
+    ]);
+
+    await expect(runtime.teamCatalog.list()).resolves.toEqual([
+      {
+        code: "ARG",
+        name: "Argentina Football Association",
+        participantId: "participant-argentina",
+        sourceTimestampMs: 1_784_487_600_001,
+      },
+      {
+        code: "ESP",
+        name: "Spain",
+        participantId: "participant-spain",
+        sourceTimestampMs: 1_784_487_500_000,
+      },
+    ]);
+    await expect(
+      admin.unsafe<{ count: number }[]>(
+        "SELECT count(*)::int AS count FROM matchsense.fixtures;",
+      ),
+    ).resolves.toEqual([{ count: 0 }]);
+    await expect(
+      admin.unsafe(
+        `INSERT INTO matchsense.team_catalog_entries (
+  participant_id, code, name, source_timestamp_ms, mode, source
+)
+VALUES ('invalid-team', 'INV', 'Invalid Team', 0, 'recorded', 'other');`,
       ),
     ).rejects.toMatchObject({ code: "23514" });
   });
@@ -252,8 +337,8 @@ VALUES (
 
     const runtime = trackedDatabase();
     await expect(runtime.migrate()).resolves.toEqual({
-      appliedVersions: [4],
-      currentVersion: 4,
+      appliedVersions: [4, 5],
+      currentVersion: 5,
     });
 
     const rows = await admin.unsafe<
