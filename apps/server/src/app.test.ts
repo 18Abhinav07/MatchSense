@@ -4,10 +4,24 @@ import path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { buildApp, type ReadinessProbe } from "./app.js";
+import { buildApp, isCanonicalShellPath, type ReadinessProbe } from "./app.js";
 
 const indexShell = "<!doctype html><html><body>MatchSense shell</body></html>";
 let webDistPath: string;
+
+const dotOnlySegments = [".", "..", "%2E", "%2E%2E"] as const;
+const dotOnlyShellPaths = dotOnlySegments.flatMap((segment) => [
+  `/you/${segment}`,
+  `/you/profile/${segment}`,
+  `/matches/${segment}`,
+  `/matches/${segment}/live`,
+  `/matches/${segment}/memory`,
+  `/matches/fixture-1/moments/${segment}`,
+  `/rooms/new/${segment}`,
+  `/rooms/join/${segment}`,
+  `/rooms/${segment}`,
+  `/replays/${segment}`,
+]);
 
 beforeAll(async () => {
   webDistPath = await mkdtemp(path.join(tmpdir(), "matchsense-web-"));
@@ -107,22 +121,20 @@ describe("same-origin web shell", () => {
 
   it.each([
     "/",
-    "/onboarding",
-    "/experience/with-friends",
+    "/you",
+    "/you/profile",
+    "/you/settings/notifications",
     "/matches/fixture-1",
+    "/matches/fixture%3Alive",
     "/matches/fixture-1/live",
     "/matches/fixture-1/moments/moment-9",
     "/matches/fixture-1/memory",
     "/rooms",
-    "/rooms/new",
     "/rooms/new/fixture-1",
     "/rooms/join/invite-code",
     "/rooms/room-1",
-    "/you/profile",
-    "/you/settings/notifications",
-    "/history",
-    "/demo",
-    "/offline",
+    "/replays",
+    "/replays/replay.abc.def",
   ])("serves the SPA shell for %s", async (url) => {
     const app = appWithProbe(readinessProbe);
     const response = await app.inject({ url });
@@ -165,6 +177,13 @@ describe("same-origin web shell", () => {
   );
 
   it.each([
+    "/onboarding",
+    "/experience/with-friends",
+    "/history",
+    "/demo",
+    "/offline",
+    "/rooms/new",
+    "/rooms/join",
     "/today",
     "/settings",
     "/diagnostics",
@@ -175,11 +194,12 @@ describe("same-origin web shell", () => {
     "/health",
     "/health/missing",
     "/missing.png",
-    "/you",
     "/you/",
     "/matches/fixture-1/unknown",
     "/matches/fixture-1/memory/extra",
+    "/matches/fixture-1/moments/moment-9/extra",
     "/rooms/join/invite-code/extra",
+    "/replays/replay.abc.def/extra",
   ])("does not turn %s into the SPA shell", async (url) => {
     const app = appWithProbe(readinessProbe);
     const response = await app.inject({ url });
@@ -192,4 +212,51 @@ describe("same-origin web shell", () => {
     expect(response.body).not.toContain("MatchSense shell");
     await app.close();
   });
+
+  it.each([
+    "/matches/a%2Fb",
+    "/matches/a%2fb",
+    "/matches/a%5Cb",
+    "/matches/a%5cb",
+    "/matches/a%252Fb",
+    "/rooms/new%2Ffixture",
+    "/rooms/new%5Cfixture",
+    "/matches/a%3Fb",
+    "/matches/a%40b",
+    "/matches/a%25b",
+    "/matches/a@b",
+    "/matches/a\\fixture",
+  ])("rejects unsafe encoded shell path %s", async (url) => {
+    const app = appWithProbe(readinessProbe);
+    const response = await app.inject({ url });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.headers["content-type"]).toContain("application/json");
+    expect(response.json()).toEqual({
+      error: { code: "NOT_FOUND", message: "Route not found" },
+    });
+    expect(response.body).not.toContain("MatchSense shell");
+    await app.close();
+  });
+
+  it.each(["/matches/a%ZZb", "/matches/a%", "/matches/a%2"])(
+    "rejects malformed path escape %s before serving the shell",
+    async (url) => {
+      const app = appWithProbe(readinessProbe);
+      const response = await app.inject({ url });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.body).not.toContain("MatchSense shell");
+      await app.close();
+    },
+  );
+
+  it.each(dotOnlyShellPaths)(
+    "does not recognize dot-only route segment %s as a shell path",
+    (url) => {
+      // app.inject parses with WHATWG URL semantics, which resolves dot segments
+      // before Fastify receives them. Exercise the server's shell matcher directly.
+      expect(isCanonicalShellPath(decodeURIComponent(url))).toBe(false);
+    },
+  );
 });

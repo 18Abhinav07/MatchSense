@@ -1,7 +1,11 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 
-import type { FanRepository, FanSessionRecord } from "@matchsense/db";
+import type {
+  FanRepository,
+  FanSessionRecord,
+  FixtureReadRepository,
+} from "@matchsense/db";
 
 import type { FanSessionService } from "./fan-session.js";
 
@@ -36,8 +40,33 @@ const followInput = z
   .strict();
 
 export interface FanRouteDependencies {
+  fixtureReads: Pick<FixtureReadRepository, "getFixture">;
   repository: FanRepository;
   sessions: FanSessionService;
+}
+
+function validFollowFixtureId(fixtureId: string) {
+  return (
+    fixtureId !== "." &&
+    fixtureId !== ".." &&
+    /^[A-Za-z0-9_.:-]{1,120}$/u.test(fixtureId)
+  );
+}
+
+export function isInvalidRawFollowPath(rawUrl: string) {
+  const rawPathname = rawUrl.split(/[?#]/u, 1)[0] ?? "";
+  const match = /^\/api\/v1\/follows\/([^/]+)\/([^/]+)$/u.exec(rawPathname);
+  if (!match) return false;
+  const encodedMode = match[1];
+  const encodedFixtureId = match[2];
+  if (!encodedMode || !encodedFixtureId) return true;
+  try {
+    const mode = decodeURIComponent(encodedMode);
+    const fixtureId = decodeURIComponent(encodedFixtureId);
+    return mode !== "live" || !validFollowFixtureId(fixtureId);
+  } catch {
+    return true;
+  }
 }
 
 function cookieValue(header: string | undefined, name: string) {
@@ -103,6 +132,15 @@ export function registerFanRoutes(
   app: FastifyInstance,
   dependencies: FanRouteDependencies,
 ) {
+  app.addHook("onRequest", async (request, reply) => {
+    if (
+      (request.method === "PUT" || request.method === "DELETE") &&
+      isInvalidRawFollowPath(request.raw.url ?? "")
+    ) {
+      return reply.code(400).send({ error: "follow_invalid" });
+    }
+  });
+
   app.post("/api/v1/session/guest", async (request, reply) => {
     const created = await dependencies.sessions.createGuest();
     const secure = secureRequest(request);
@@ -191,7 +229,7 @@ export function registerFanRoutes(
   });
 
   app.put<{
-    Params: { fixtureId: string; mode: "demo" | "live" };
+    Params: { fixtureId: string; mode: string };
   }>("/api/v1/follows/:mode/:fixtureId", async (request, reply) => {
     const session = await requireFanMutationSession(
       request,
@@ -202,22 +240,34 @@ export function registerFanRoutes(
     const parsed = followInput.safeParse(request.body);
     if (
       !parsed.success ||
-      !["demo", "live"].includes(request.params.mode) ||
-      !/^[A-Za-z0-9_:-]{1,120}$/u.test(request.params.fixtureId)
+      request.params.mode !== "live" ||
+      !validFollowFixtureId(request.params.fixtureId)
     ) {
       return reply.code(400).send({ error: "follow_invalid" });
+    }
+    const fixture = await dependencies.fixtureReads.getFixture({
+      fixtureId: request.params.fixtureId,
+      mode: "live",
+    });
+    if (
+      !fixture ||
+      fixture.mode !== "live" ||
+      fixture.provenance !== "live_txline" ||
+      (fixture.bucket !== "upcoming" && fixture.bucket !== "live")
+    ) {
+      return reply.code(404).send({ error: "follow_fixture_not_found" });
     }
     await dependencies.repository.upsertFollow({
       eventPreferences: parsed.data.eventPreferences,
       fanId: session.fan.id,
       fixtureId: request.params.fixtureId,
-      mode: request.params.mode,
+      mode: "live",
     });
     return reply.code(204).send();
   });
 
   app.delete<{
-    Params: { fixtureId: string; mode: "demo" | "live" };
+    Params: { fixtureId: string; mode: string };
   }>("/api/v1/follows/:mode/:fixtureId", async (request, reply) => {
     const session = await requireFanMutationSession(
       request,
@@ -226,15 +276,15 @@ export function registerFanRoutes(
     );
     if (!session) return;
     if (
-      !["demo", "live"].includes(request.params.mode) ||
-      !/^[A-Za-z0-9_:-]{1,120}$/u.test(request.params.fixtureId)
+      request.params.mode !== "live" ||
+      !validFollowFixtureId(request.params.fixtureId)
     ) {
       return reply.code(400).send({ error: "follow_invalid" });
     }
     await dependencies.repository.removeFollow({
       fanId: session.fan.id,
       fixtureId: request.params.fixtureId,
-      mode: request.params.mode,
+      mode: "live",
     });
     return reply.code(204).send();
   });

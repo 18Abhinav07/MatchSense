@@ -162,4 +162,56 @@ describe("fan profile client", () => {
       }),
     ).rejects.toMatchObject({ code: "handle_unavailable", status: 409 });
   });
+
+  it("hardcodes live follows and does not expose recorded as a follow mode", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const api = createFanProfileApi({
+      cookieSource: () => "matchsense_csrf=csrf",
+      fetcher,
+    });
+
+    const followLiveOnly: (
+      fixtureId: string,
+      eventPreferences?: Record<string, boolean>,
+    ) => Promise<void> = api.followFixture;
+    if (false) {
+      // @ts-expect-error Recorded fixtures are not publicly followable.
+      void api.followFixture("fixture-live", "recorded");
+    }
+
+    await followLiveOnly("fixture-live", {
+      fullTime: false,
+      goals: true,
+      redCards: true,
+    });
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/follows/live/fixture-live",
+      expect.objectContaining({
+        body: JSON.stringify({
+          eventPreferences: { fullTime: false, goals: true, redCards: true },
+        }),
+        method: "PUT",
+      }),
+    );
+  });
+
+  it.each([".", ".."])(
+    "does not dispatch a normalized navigation fixture ID %s",
+    async (fixtureId) => {
+      const fetcher = vi.fn<typeof fetch>();
+      const api = createFanProfileApi({
+        cookieSource: () => "matchsense_csrf=csrf",
+        fetcher,
+      });
+
+      await expect(api.followFixture(fixtureId)).rejects.toMatchObject({
+        code: "follow_invalid",
+        status: 400,
+      });
+      expect(fetcher).not.toHaveBeenCalled();
+    },
+  );
 });

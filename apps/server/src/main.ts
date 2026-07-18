@@ -7,6 +7,7 @@ import {
   createPostgresDatabase,
   type ExperienceRepository,
   type FanRepository,
+  type FixtureReadRepository,
   type FixtureTruthRepository,
   type MemoryRepository,
   type OutboxRepository,
@@ -81,6 +82,7 @@ interface ServerDatabaseRuntime extends ReadinessProbe {
   close(): Promise<void>;
   experiences?: ExperienceRepository;
   fans?: FanRepository;
+  fixtureReads?: Pick<FixtureReadRepository, "getFixture">;
   fixtureTruth?: FixtureTruthRepository;
   memories?: MemoryRepository<MatchMemoryPayload>;
   migrate(): Promise<unknown>;
@@ -959,9 +961,10 @@ export async function startServer(options: StartServerOptions = {}) {
           }
         : {}),
       ...(experienceRuntime ? { experience: experienceRuntime } : {}),
-      ...(databaseRuntime.fans && fanSessions
+      ...(databaseRuntime.fans && databaseRuntime.fixtureReads && fanSessions
         ? {
             fan: {
+              fixtureReads: databaseRuntime.fixtureReads,
               repository: databaseRuntime.fans,
               sessions: fanSessions,
             },

@@ -150,7 +150,6 @@ export async function startApi(
   let unregisterSignals: () => void = () => undefined;
   try {
     app = buildApp({
-      allowDemoShell: false,
       ...(commentaryArtifacts ? { commentaryArtifacts } : {}),
       demo: false,
       ...(durableRooms ? { durableRooms } : {}),
@@ -164,6 +163,7 @@ export async function startApi(
           }
         : {}),
       fan: {
+        fixtureReads: databaseRuntime.fixtureReads,
         repository: databaseRuntime.fans,
         sessions,
       },

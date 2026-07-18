@@ -68,7 +68,6 @@ export interface ReadinessProbe {
 }
 
 export interface BuildAppOptions {
-  allowDemoShell?: boolean;
   commentaryArtifacts?: CommentaryArtifactRouteDependencies;
   demo?: DemoSessionRuntime | false;
   durablePush?: DurablePushRouteDependencies;
@@ -98,15 +97,11 @@ function readinessPayload(result: ReadinessResult) {
   } as const;
 }
 
-const segment = "[A-Za-z0-9_:%-]+";
+const segment = "(?!\\.{1,2}(?:/|$))[A-Za-z0-9_.:-]+";
 
 const canonicalShellRoutes = [
   { pattern: /^\/$/u, template: "/" },
-  { pattern: /^\/onboarding$/u, template: "/onboarding" },
-  {
-    pattern: /^\/experience\/with-friends$/u,
-    template: "/experience/with-friends",
-  },
+  { pattern: /^\/you$/u, template: "/you" },
   {
     pattern: new RegExp(`^/matches/${segment}$`, "u"),
     template: "/matches/:fixtureId",
@@ -124,7 +119,6 @@ const canonicalShellRoutes = [
     template: "/matches/:fixtureId/memory",
   },
   { pattern: /^\/rooms$/u, template: "/rooms" },
-  { pattern: /^\/rooms\/new$/u, template: "/rooms/new" },
   {
     pattern: new RegExp(`^/rooms/new/${segment}$`, "u"),
     template: "/rooms/new/:fixtureId",
@@ -134,20 +128,37 @@ const canonicalShellRoutes = [
     template: "/rooms/join/:inviteCode",
   },
   {
-    pattern: new RegExp(`^/rooms/${segment}$`, "u"),
+    pattern: new RegExp(`^/rooms/(?!new$|join$)${segment}$`, "u"),
     template: "/rooms/:roomId",
   },
   {
     pattern: new RegExp(`^/you/${segment}(?:/${segment})*$`, "u"),
     template: "/you/*",
   },
-  { pattern: /^\/history$/u, template: "/history" },
-  { pattern: /^\/demo$/u, template: "/demo" },
-  { pattern: /^\/offline$/u, template: "/offline" },
+  { pattern: /^\/replays$/u, template: "/replays" },
+  {
+    pattern: new RegExp(`^/replays/${segment}$`, "u"),
+    template: "/replays/:id",
+  },
 ] as const;
 
 export function isCanonicalShellPath(pathname: string) {
   return canonicalShellRoutes.some(({ pattern }) => pattern.test(pathname));
+}
+
+function decodedShellPathname(url: string) {
+  const rawPathname = url.split(/[?#]/u, 1)[0] ?? "";
+  if (/%(?:2f|5c)/iu.test(rawPathname)) return null;
+  try {
+    const pathname = decodeURIComponent(rawPathname);
+    return pathname
+      .split("/")
+      .some((segment) => segment === "." || segment === "..")
+      ? null
+      : pathname;
+  } catch {
+    return null;
+  }
 }
 
 function notFound(reply: FastifyReply) {
@@ -289,12 +300,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
       .sendFile("index.html", { immutable: false, maxAge: 0 });
 
   app.setNotFoundHandler((request, reply) => {
-    const pathname = new URL(request.url, "http://matchsense.local").pathname;
+    const pathname = decodedShellPathname(request.url);
     const acceptsShell = request.method === "GET" || request.method === "HEAD";
 
-    const demoShellBlocked =
-      pathname === "/demo" && options.allowDemoShell === false;
-    if (acceptsShell && !demoShellBlocked && isCanonicalShellPath(pathname)) {
+    if (acceptsShell && pathname && isCanonicalShellPath(pathname)) {
       return sendShell(reply);
     }
 

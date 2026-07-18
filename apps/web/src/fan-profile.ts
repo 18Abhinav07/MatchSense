@@ -14,7 +14,7 @@ export interface FanProfile {
 export interface FanFollow {
   eventPreferences: Record<string, unknown>;
   fixtureId: string;
-  mode: "live" | "recorded";
+  mode: "live";
 }
 
 export interface FanBootstrap {
@@ -28,7 +28,7 @@ function normalizeFollow(value: unknown): FanFollow | null {
   const input = record(value);
   const fixtureId = stringOrNull(input?.fixtureId);
   const mode = input?.mode;
-  if (!fixtureId || (mode !== "live" && mode !== "recorded")) return null;
+  if (!fixtureId || mode !== "live") return null;
   return {
     eventPreferences: object(input?.eventPreferences),
     fixtureId,
@@ -66,6 +66,14 @@ function record(value: unknown): JsonRecord | null {
 
 function stringOrNull(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function validFollowFixtureId(fixtureId: string) {
+  return (
+    fixtureId !== "." &&
+    fixtureId !== ".." &&
+    /^[A-Za-z0-9_.:-]{1,120}$/u.test(fixtureId)
+  );
 }
 
 function object(value: unknown) {
@@ -230,15 +238,17 @@ export function createFanProfileApi(
     },
     followFixture: async (
       fixtureId: string,
-      mode: "live" | "recorded",
       eventPreferences: Record<string, boolean> = {
         fullTime: true,
         goals: true,
         redCards: true,
       },
     ) => {
+      if (!validFollowFixtureId(fixtureId)) {
+        throw new FanProfileError("follow_invalid", 400);
+      }
       const response = await fetcher(
-        `/api/v1/follows/${mode}/${encodeURIComponent(fixtureId)}`,
+        `/api/v1/follows/live/${encodeURIComponent(fixtureId)}`,
         {
           body: JSON.stringify({ eventPreferences }),
           credentials: "same-origin",
