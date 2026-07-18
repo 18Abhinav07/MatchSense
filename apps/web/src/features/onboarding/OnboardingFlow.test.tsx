@@ -27,6 +27,24 @@ describe("OnboardingFlow", () => {
     );
   });
 
+  it("keeps the active handle field borderless and the onboarding header concise", () => {
+    const source = readFileSync(
+      new URL("./OnboardingFlow.tsx", import.meta.url),
+      "utf8",
+    );
+    const stylesheet = readFileSync(
+      new URL("./onboarding.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).not.toContain("supporter identity");
+    expect(source).toContain("Choose handle");
+    expect(stylesheet).toMatch(
+      /\.ms-onboarding-handle-input\s*\{[\s\S]*?border:\s*0;/u,
+    );
+    expect(stylesheet).not.toContain("border-bottom: 2px solid #9fd16e");
+  });
+
   it("makes the real team choice the first durable profile action", () => {
     const markup = renderToStaticMarkup(
       createElement(OnboardingFlow, {

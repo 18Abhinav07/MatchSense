@@ -370,12 +370,44 @@
     background-color 220ms cubic-bezier(0.16, 1, 0.3, 1),
     box-shadow 220ms cubic-bezier(0.16, 1, 0.3, 1);
 }
+.ms-profile-grid select {
+  appearance: none;
+  border-radius: 18px;
+  padding-right: 48px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #aeb8ad 50%),
+    linear-gradient(135deg, #aeb8ad 50%, transparent 50%);
+  background-repeat: no-repeat;
+  background-position:
+    calc(100% - 21px) 24px,
+    calc(100% - 15px) 24px;
+  background-size: 6px 6px;
+  font-size: 16px;
+  -webkit-appearance: none;
+}
+.ms-completion-card select {
+  appearance: none;
+  padding-right: 48px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #aeb8ad 50%),
+    linear-gradient(135deg, #aeb8ad 50%, transparent 50%);
+  background-repeat: no-repeat;
+  background-position:
+    calc(100% - 21px) 24px,
+    calc(100% - 15px) 24px;
+  background-size: 6px 6px;
+  font-size: 16px;
+  -webkit-appearance: none;
+}
+.ms-profile-grid article > label {
+  width: 100%;
+}
 .ms-completion-card input:focus,
 .ms-completion-card select:focus,
 .ms-profile-grid input:focus,
 .ms-profile-grid select:focus {
   border-color: transparent;
-  background: #192019;
+  background-color: #192019;
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 8%),
     0 0 0 2px rgb(159 236 88 / 42%);

@@ -52,6 +52,17 @@ describe("fan identity surfaces", () => {
     expect(source).not.toContain("Tap again to delete everything");
   });
 
+  it("forces profile selects into the full-width rounded MatchSense surface", async () => {
+    const stylesheet = await readFile(
+      new URL("./fan-surfaces.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(stylesheet).toMatch(
+      /\.ms-profile-grid select\s*\{[\s\S]*?appearance:\s*none;[\s\S]*?border-radius:\s*18px;/u,
+    );
+  });
+
   it("asks for a public handle without exposing the immutable fan id", () => {
     const markup = renderToStaticMarkup(
       createElement(HandleStep, {

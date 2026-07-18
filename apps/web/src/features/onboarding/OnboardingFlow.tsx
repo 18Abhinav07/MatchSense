@@ -32,6 +32,41 @@ function teamFor(code: string | null, catalog: ProductCatalog) {
   return catalog.teams.find((team) => team.code === code) ?? null;
 }
 
+function OnboardingHeader({
+  label,
+  onBack,
+  step,
+}: {
+  label: string;
+  onBack?: (() => void) | undefined;
+  step: 1 | 2 | 3;
+}) {
+  return (
+    <header className="ms-onboarding-header">
+      {onBack ? (
+        <button onClick={onBack} type="button">
+          Back
+        </button>
+      ) : (
+        <a
+          aria-label="MatchSense home"
+          className="ms-onboarding-wordmark"
+          href="/"
+        >
+          Match<span>Sense</span>
+        </a>
+      )}
+      <span
+        aria-label={`Step ${step} of 3: ${label}`}
+        className="ms-onboarding-progress"
+      >
+        <b>0{step} / 03</b>
+        <small>{label}</small>
+      </span>
+    </header>
+  );
+}
+
 export function OnboardingFlow({
   catalog,
   catalogState = "ready",
@@ -135,16 +170,7 @@ export function OnboardingFlow({
   if (stage === "team") {
     return (
       <main className="ms-onboarding" id="main-content">
-        <header className="ms-onboarding-header">
-          <a
-            aria-label="MatchSense home"
-            className="ms-onboarding-wordmark"
-            href="/"
-          >
-            Match<span>Sense</span>
-          </a>
-          <span>01 / 03 · supporter identity</span>
-        </header>
+        <OnboardingHeader label="Choose team" step={1} />
         <section
           className="ms-onboarding-team-stage"
           aria-labelledby="team-title"
@@ -213,12 +239,11 @@ export function OnboardingFlow({
   if (stage === "handle") {
     return (
       <main className="ms-onboarding" id="main-content">
-        <header className="ms-onboarding-header">
-          <button onClick={() => setStage("team")} type="button">
-            Back
-          </button>
-          <span>02 / 03 · supporter identity</span>
-        </header>
+        <OnboardingHeader
+          label="Choose handle"
+          onBack={() => setStage("team")}
+          step={2}
+        />
         <section
           className="ms-onboarding-handle-stage"
           aria-labelledby="handle-title"
@@ -274,12 +299,11 @@ export function OnboardingFlow({
 
   return (
     <main className="ms-onboarding" id="main-content">
-      <header className="ms-onboarding-header">
-        <button onClick={() => setStage("handle")} type="button">
-          Back
-        </button>
-        <span>03 / 03 · supporter identity</span>
-      </header>
+      <OnboardingHeader
+        label="Choose avatar"
+        onBack={() => setStage("handle")}
+        step={3}
+      />
       <section
         className="ms-onboarding-avatar-stage"
         aria-labelledby="avatar-title"

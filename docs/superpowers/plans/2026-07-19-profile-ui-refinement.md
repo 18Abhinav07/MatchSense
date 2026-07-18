@@ -36,13 +36,17 @@ tags: [implementation-plan, ui, onboarding, profile]
 
 - Modify: `apps/web/src/features/fan/FanSurfaces.tsx`
 - Modify: `apps/web/src/features/fan/fan-surfaces.css`
+- Modify: `apps/web/src/features/onboarding/OnboardingFlow.tsx`
+- Modify: `apps/web/src/features/onboarding/onboarding.css`
 - Modify: `apps/web/src/features/today/TodayHub.tsx`
 
 - [ ] Render the destructive confirmation as a centered `role="dialog"` overlay.
 - [ ] Keep Delete profile as the opener, Cancel as a pure state reset, and Delete everything as the only API mutation action.
 - [ ] Remove the Today masthead label.
 - [ ] Restyle the onboarding handle surface without a visible border.
+- [ ] Remove the duplicated handle-step header label and use compact step/stage metadata on every onboarding header.
 - [ ] Make profile fields full-width with a minimum 54px height and 16px rounded corners.
+- [ ] Reset native select appearance and supply a consistent CSS chevron so iOS cannot restore the narrow system control.
 - [ ] Style Delete profile as a full red action matching Save profile's dimensions.
 - [ ] Run focused tests, the web suite, typecheck, build, formatting, and `git diff --check`.
 - [ ] Commit and deploy the verified patch.
