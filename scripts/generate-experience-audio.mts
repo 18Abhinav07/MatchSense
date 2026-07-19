@@ -2,31 +2,19 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createCommentaryPipeline } from "../packages/commentary/src/index.js";
+
 import {
   createDockerFfmpegRunner,
+  createGeminiExperienceWavRequester,
   generateExperienceAudioPack,
+  parseExperienceAudioGeneratorArgs,
 } from "../apps/server/src/experience-audio-generation.js";
 
-function selectedDecoder(args: readonly string[]) {
-  if (
-    args.length === 0 ||
-    (args.length === 1 && args[0] === "--decoder=local")
-  ) {
-    return "local" as const;
-  }
-  if (args.length === 1 && args[0] === "--decoder=docker") {
-    return "docker" as const;
-  }
-  throw new Error(
-    "Usage: generate-experience-audio.mts [--decoder=local|--decoder=docker]",
-  );
-}
-
 async function main() {
-  const apiKey = process.env.GROQ_API_KEY?.trim();
-  if (!apiKey) throw new Error("GROQ_API_KEY is required");
-
-  const decoder = selectedDecoder(process.argv.slice(2));
+  const { decoder, provider } = parseExperienceAudioGeneratorArgs(
+    process.argv.slice(2),
+  );
   const projectRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     "..",
@@ -38,11 +26,30 @@ async function main() {
     projectRoot,
     "apps/server/assets/experience/v3/en",
   );
+  const groqApiKey = process.env.GROQ_API_KEY?.trim();
+  const geminiApiKey =
+    process.env.GEMINI_API_KEY?.trim() || process.env.GOOGLE_API_KEY?.trim();
+  if (provider === "groq" && !groqApiKey) {
+    throw new Error("GROQ_API_KEY is required");
+  }
+  if (provider === "gemini" && !geminiApiKey) {
+    throw new Error("GEMINI_API_KEY or GOOGLE_API_KEY is required");
+  }
+  const requestWav =
+    provider === "gemini"
+      ? createGeminiExperienceWavRequester(
+          createCommentaryPipeline({
+            env: { GEMINI_API_KEY: geminiApiKey },
+            ttsTimeoutMs: 60_000,
+          }),
+        )
+      : undefined;
   const result = await generateExperienceAudioPack({
-    apiKey,
     expectedMp3Bytes,
     outputDirectory,
+    ...(groqApiKey ? { apiKey: groqApiKey } : {}),
     ...(decoder === "docker" ? { run: createDockerFfmpegRunner() } : {}),
+    ...(requestWav ? { requestWav } : {}),
   });
 
   process.stdout.write(

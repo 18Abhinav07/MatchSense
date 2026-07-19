@@ -73,11 +73,32 @@ export interface ExperienceAudioManifest {
 type TtsFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 interface GenerateExperienceAudioPackOptions {
-  apiKey: string;
+  apiKey?: string;
   expectedMp3Bytes: Buffer;
   fetchTts?: TtsFetch;
   outputDirectory: string;
+  requestWav?: ExperienceWavRequester;
   run?: ByteCommandRunner;
+}
+
+export type ExperienceWavRequester = (
+  target: ExperienceAudioGenerationTarget,
+) => Promise<Buffer>;
+
+interface ExperienceSpeechSynthesizer {
+  synthesize(
+    transcript: string,
+    voiceName: string,
+  ): Promise<{
+    bytes: Buffer;
+    fallbackReason: string | null;
+    provider: "gemini" | "deterministic-cue";
+  }>;
+}
+
+export interface ExperienceAudioGeneratorOptions {
+  decoder: "docker" | "local";
+  provider: "gemini" | "groq";
 }
 
 const BEAT_METADATA = [
@@ -126,6 +147,36 @@ export const EXPERIENCE_AUDIO_GENERATION_TARGETS: readonly ExperienceAudioGenera
       transcript: EXPERIENCE_MEMORY_INTRO,
     }),
   ]);
+
+const GENERATOR_USAGE =
+  "Usage: generate-experience-audio.mts [--provider=groq|--provider=gemini] [--decoder=local|--decoder=docker]";
+
+export function parseExperienceAudioGeneratorArgs(
+  args: readonly string[],
+): ExperienceAudioGeneratorOptions {
+  let decoder: ExperienceAudioGeneratorOptions["decoder"] = "local";
+  let provider: ExperienceAudioGeneratorOptions["provider"] = "groq";
+  let decoderWasSet = false;
+  let providerWasSet = false;
+
+  for (const argument of args) {
+    if (argument === "--decoder=local" || argument === "--decoder=docker") {
+      if (decoderWasSet) throw new Error(GENERATOR_USAGE);
+      decoder = argument === "--decoder=docker" ? "docker" : "local";
+      decoderWasSet = true;
+      continue;
+    }
+    if (argument === "--provider=groq" || argument === "--provider=gemini") {
+      if (providerWasSet) throw new Error(GENERATOR_USAGE);
+      provider = argument === "--provider=gemini" ? "gemini" : "groq";
+      providerWasSet = true;
+      continue;
+    }
+    throw new Error(GENERATOR_USAGE);
+  }
+
+  return { decoder, provider };
+}
 
 function unicodeLength(value: string) {
   return Array.from(value).length;
@@ -237,6 +288,19 @@ function assertWav(bytes: Buffer) {
   }
 }
 
+export function createGeminiExperienceWavRequester(
+  pipeline: ExperienceSpeechSynthesizer,
+): ExperienceWavRequester {
+  return async (target) => {
+    const speech = await pipeline.synthesize(target.transcript, "Kore");
+    if (speech.provider !== "gemini") {
+      throw new Error(speech.fallbackReason ?? "gemini_deterministic_fallback");
+    }
+    assertWav(speech.bytes);
+    return speech.bytes;
+  };
+}
+
 async function requestGroqWav(
   target: ExperienceAudioGenerationTarget,
   apiKey: string,
@@ -304,10 +368,16 @@ export function createDockerFfmpegRunner(
 export async function generateExperienceAudioPack(
   options: GenerateExperienceAudioPackOptions,
 ) {
-  const apiKey = options.apiKey.trim();
-  if (apiKey.length === 0) throw new Error("GROQ_API_KEY is required");
+  const apiKey = options.apiKey?.trim() ?? "";
+  if (!options.requestWav && apiKey.length === 0) {
+    throw new Error("GROQ_API_KEY is required");
+  }
   validateExperienceAudioGenerationTargets(EXPERIENCE_AUDIO_GENERATION_TARGETS);
   const expected = requireStreamContract(options.expectedMp3Bytes);
+  const requestWav =
+    options.requestWav ??
+    ((target: ExperienceAudioGenerationTarget) =>
+      requestGroqWav(target, apiKey, options.fetchTts ?? fetch));
   await requireOutputDoesNotExist(options.outputDirectory);
 
   const parentDirectory = path.dirname(options.outputDirectory);
@@ -319,11 +389,8 @@ export async function generateExperienceAudioPack(
   try {
     const entries: ExperienceAudioManifestEntry[] = [];
     for (const target of EXPERIENCE_AUDIO_GENERATION_TARGETS) {
-      const wavBytes = await requestGroqWav(
-        target,
-        apiKey,
-        options.fetchTts ?? fetch,
-      );
+      const wavBytes = await requestWav(target);
+      assertWav(wavBytes);
       const mp3Bytes = await transcodeWavToStreamMp3(wavBytes, {
         expected,
         ...(options.run ? { run: options.run } : {}),

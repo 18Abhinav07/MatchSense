@@ -9,7 +9,9 @@ import type { ByteCommandRunner } from "./audio-transcoder.js";
 import {
   EXPERIENCE_AUDIO_GENERATION_TARGETS,
   createDockerFfmpegRunner,
+  createGeminiExperienceWavRequester,
   generateExperienceAudioPack,
+  parseExperienceAudioGeneratorArgs,
   validateExperienceAudioGenerationTargets,
 } from "./experience-audio-generation.js";
 import {
@@ -101,6 +103,22 @@ describe("Experience audio generation plan", () => {
         EXPERIENCE_AUDIO_GENERATION_TARGETS.slice(1),
       ),
     ).toThrow(/partial/i);
+  });
+
+  it("parses Gemini and Docker as composable operator choices", () => {
+    expect(
+      parseExperienceAudioGeneratorArgs([
+        "--provider=gemini",
+        "--decoder=docker",
+      ]),
+    ).toEqual({ decoder: "docker", provider: "gemini" });
+    expect(parseExperienceAudioGeneratorArgs([])).toEqual({
+      decoder: "local",
+      provider: "groq",
+    });
+    expect(() =>
+      parseExperienceAudioGeneratorArgs(["--provider=unknown"]),
+    ).toThrow(/usage/i);
   });
 });
 
@@ -310,5 +328,56 @@ describe("Experience audio pack generator", () => {
       input,
       timeoutMs: 20_000,
     });
+  });
+
+  it("uses an injected WAV requester instead of calling Groq", async () => {
+    const outputDirectory = await temporaryOutputDirectory();
+    const mp3 = await compatibleMp3();
+    const fetchTts = successfulFetch();
+    const requestWav = vi.fn(async () => wavBytes());
+
+    await generateExperienceAudioPack({
+      expectedMp3Bytes: mp3,
+      fetchTts,
+      outputDirectory,
+      requestWav,
+      run: async () => mp3,
+    });
+
+    expect(requestWav).toHaveBeenCalledTimes(
+      EXPERIENCE_AUDIO_GENERATION_TARGETS.length,
+    );
+    expect(fetchTts).not.toHaveBeenCalled();
+  });
+
+  it("accepts only Gemini WAV speech and preserves deterministic fallback reasons", async () => {
+    const geminiSpeech = vi.fn(async () => ({
+      bytes: wavBytes(),
+      fallbackReason: null,
+      provider: "gemini" as const,
+    }));
+    const requestGeminiWav = createGeminiExperienceWavRequester({
+      synthesize: geminiSpeech,
+    });
+
+    await expect(
+      requestGeminiWav(EXPERIENCE_AUDIO_GENERATION_TARGETS[0]!),
+    ).resolves.toEqual(wavBytes());
+    expect(geminiSpeech).toHaveBeenCalledWith(
+      EXPERIENCE_AUDIO_GENERATION_TARGETS[0]?.transcript,
+      "Kore",
+    );
+
+    const fallbackReason = "gemini_http_429";
+    const rejectFallback = createGeminiExperienceWavRequester({
+      synthesize: async () => ({
+        bytes: wavBytes(),
+        fallbackReason,
+        provider: "deterministic-cue" as const,
+      }),
+    });
+    await expect(
+      rejectFallback(EXPERIENCE_AUDIO_GENERATION_TARGETS[0]!),
+    ).rejects.toThrow(new Error(fallbackReason));
   });
 });
