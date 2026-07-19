@@ -17,6 +17,18 @@ export interface FanFollow {
   mode: "live";
 }
 
+export type LiveAlertPreferences = {
+  fullTime: boolean;
+  goals: boolean;
+  redCards: boolean;
+};
+
+const DEFAULT_LIVE_ALERT_PREFERENCES: LiveAlertPreferences = {
+  fullTime: true,
+  goals: true,
+  redCards: true,
+};
+
 export interface FanBootstrap {
   fan: FanProfile;
   follows: readonly FanFollow[];
@@ -78,6 +90,38 @@ function validFollowFixtureId(fixtureId: string) {
 
 function object(value: unknown) {
   return record(value) ?? {};
+}
+
+function booleanPreference(
+  preferences: Record<string, unknown>,
+  canonical: keyof LiveAlertPreferences,
+  legacy: string,
+) {
+  const value = preferences[canonical] ?? preferences[legacy];
+  return typeof value === "boolean"
+    ? value
+    : DEFAULT_LIVE_ALERT_PREFERENCES[canonical];
+}
+
+export function liveAlertPreferences(
+  preferences: Record<string, unknown>,
+): LiveAlertPreferences {
+  return {
+    fullTime: booleanPreference(preferences, "fullTime", "alertsFullTime"),
+    goals: booleanPreference(preferences, "goals", "alertsGoals"),
+    redCards: booleanPreference(preferences, "redCards", "alertsRedCards"),
+  };
+}
+
+export function withLiveAlertPreferences(
+  preferences: Record<string, unknown>,
+  alerts: LiveAlertPreferences,
+) {
+  const normalized = { ...preferences };
+  delete normalized.alertsFullTime;
+  delete normalized.alertsGoals;
+  delete normalized.alertsRedCards;
+  return { ...normalized, ...alerts };
 }
 
 function normalizeFan(value: unknown): FanProfile {
@@ -247,11 +291,7 @@ export function createFanProfileApi(
     },
     followFixture: async (
       fixtureId: string,
-      eventPreferences: Record<string, boolean> = {
-        fullTime: true,
-        goals: true,
-        redCards: true,
-      },
+      eventPreferences: LiveAlertPreferences = DEFAULT_LIVE_ALERT_PREFERENCES,
     ) => {
       if (!validFollowFixtureId(fixtureId)) {
         throw new FanProfileError("follow_invalid", 400);
@@ -268,6 +308,20 @@ export function createFanProfileApi(
       if (!response.ok) throw await failure(response);
     },
     getBootstrap,
+    unfollowFixture: async (fixtureId: string) => {
+      if (!validFollowFixtureId(fixtureId)) {
+        throw new FanProfileError("follow_invalid", 400);
+      }
+      const response = await fetcher(
+        `/api/v1/follows/live/${encodeURIComponent(fixtureId)}`,
+        {
+          credentials: "same-origin",
+          headers: mutationHeaders(false),
+          method: "DELETE",
+        },
+      );
+      if (!response.ok) throw await failure(response);
+    },
     updateProfile: async (input: FanProfileInput) => {
       const response = await fetcher("/api/v1/profile", {
         body: JSON.stringify(input),

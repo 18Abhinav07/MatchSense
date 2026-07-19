@@ -155,4 +155,27 @@ describe("fan identity surfaces", () => {
     expect(markup).toContain("Choose a real team");
     expect(markup).not.toContain("Save profile");
   });
+
+  it("renders canonical delivery preferences instead of defaulting legacy alert names", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ProfileSurface, {
+        api: {} as never,
+        catalog: { teams: [argentina, france] },
+        fan: {
+          ...savedArgentinaFan,
+          preferences: { fullTime: true, goals: false, redCards: true },
+        },
+        onBack: () => undefined,
+        onDeleted: () => undefined,
+        onSaved: () => undefined,
+      }),
+    );
+
+    expect(markup).toMatch(
+      /Goals<\/span><input type="checkbox"\/><i aria-hidden="true"><\/i>/u,
+    );
+    expect(markup).toMatch(
+      /Red cards<\/span><input type="checkbox" checked=""\/><i aria-hidden="true"><\/i>/u,
+    );
+  });
 });

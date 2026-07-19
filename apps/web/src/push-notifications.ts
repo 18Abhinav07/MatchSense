@@ -1,3 +1,5 @@
+import type { LiveAlertPreferences } from "./fan-profile.js";
+
 export interface SerializedPushSubscription {
   endpoint: string;
   expirationTime: number | null;
@@ -123,6 +125,7 @@ export function serializePushSubscription(
 export async function enableMomentPush(options: {
   applicationServerKey: string;
   dependencies?: BrowserPushDependencies;
+  preferences?: LiveAlertPreferences;
 }) {
   const dependencies = options.dependencies ?? defaultDependencies();
   if (!dependencies.notification || !dependencies.serviceWorkerReady) {
@@ -148,7 +151,14 @@ export async function enableMomentPush(options: {
     }));
   const serialized = serializePushSubscription(subscription);
   const response = await dependencies.fetch("/api/v1/push/subscriptions", {
-    body: JSON.stringify({ subscription: serialized }),
+    body: JSON.stringify({
+      preferences: options.preferences ?? {
+        fullTime: true,
+        goals: true,
+        redCards: true,
+      },
+      subscription: serialized,
+    }),
     headers: { "Content-Type": "application/json", ...csrfHeaders() },
     method: "POST",
   });

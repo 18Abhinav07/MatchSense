@@ -3,9 +3,12 @@ import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 import { MemorySourceNotice } from "../MemorySourceNotice.js";
 import {
   createFanProfileApi,
+  liveAlertPreferences,
   profileComplete,
+  type FanFollow,
   type FanProfile,
   type FanProfileApi,
+  type LiveAlertPreferences,
 } from "../fan-profile.js";
 import { ProfileSurface } from "../features/fan/FanSurfaces.js";
 import { MemorySurface } from "../features/memory/MemorySurface.js";
@@ -57,6 +60,7 @@ import {
   type RecordedReplayApi,
   type RecordedReplayTimeline,
 } from "../replay-api.js";
+import { enableMomentPush } from "../push-notifications.js";
 
 import "./app-router.css";
 
@@ -65,8 +69,11 @@ type ResourceState = "loading" | "ready" | "unavailable";
 const EMPTY_CATALOG: ProductCatalog = { teams: [] };
 
 export interface AppRouterProps {
+  enablePushAlerts?:
+    ((preferences: LiveAlertPreferences) => Promise<void>) | undefined;
   initialCatalog?: ProductCatalog | undefined;
   initialFixtures?: readonly LiveSnapshot[] | undefined;
+  initialFollows?: readonly FanFollow[] | undefined;
   initialMemory?: VerifiedFixtureMemory | undefined;
   initialMomentResolution?: MomentResolution | undefined;
   /** Undefined means bootstrap from the server; null is a known guest profile. */
@@ -85,6 +92,26 @@ export interface AppRouterProps {
   profileApi?: FanProfileApi | undefined;
   replayApi?: RecordedReplayApi | undefined;
   roomApi?: CallThreeRoomApi | undefined;
+}
+
+async function enableConfiguredPushAlerts(preferences: LiveAlertPreferences) {
+  const response = await fetch("/api/v1/push/config", {
+    credentials: "same-origin",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new Error("Push notifications are not configured");
+  }
+  const payload = (await response.json()) as {
+    applicationServerKey?: unknown;
+  };
+  if (typeof payload.applicationServerKey !== "string") {
+    throw new Error("Push notifications are not configured");
+  }
+  await enableMomentPush({
+    applicationServerKey: payload.applicationServerKey,
+    preferences,
+  });
 }
 
 function currentPath() {
@@ -222,8 +249,10 @@ function UnsupportedRoute({ onBack }: { onBack(): void }) {
 }
 
 export function AppRouter({
+  enablePushAlerts,
   initialCatalog,
   initialFixtures,
+  initialFollows,
   initialMemory,
   initialMomentResolution,
   initialPath,
@@ -290,6 +319,17 @@ export function AppRouter({
   const [fixturesState, setFixturesState] = useState<ResourceState>(
     initialFixtures === undefined ? "loading" : "ready",
   );
+  const [follows, setFollows] = useState<readonly FanFollow[]>(
+    initialFollows ?? [],
+  );
+  const [followMutation, setFollowMutation] = useState<{
+    fixtureId: string;
+    state: "idle" | "saving" | "error";
+  }>({ fixtureId: "", state: "idle" });
+  const [alertMutation, setAlertMutation] = useState<{
+    fixtureId: string;
+    state: "idle" | "enabling" | "enabled" | "error";
+  }>({ fixtureId: "", state: "idle" });
   const [memory, setMemory] = useState<VerifiedFixtureMemory | null>(
     initialMemory ?? null,
   );
@@ -370,6 +410,7 @@ export function AppRouter({
       .then((bootstrap) => {
         if (!active) return;
         setProfile(bootstrap.fan);
+        setFollows(bootstrap.follows);
         setProfileState("ready");
       })
       .catch(() => {
@@ -893,18 +934,85 @@ export function AppRouter({
   if (selectedFixtureId) {
     const streamed =
       liveMatch.snapshot?.fixtureId === selectedFixtureId ? liveMatch : null;
+    const follow = follows.find(
+      (entry) => entry.fixtureId === selectedFixtureId && entry.mode === "live",
+    );
+    const alertPreferences = liveAlertPreferences(
+      follow?.eventPreferences ?? profile.preferences,
+    );
+    const currentFollowState =
+      followMutation.fixtureId === selectedFixtureId
+        ? followMutation.state
+        : "idle";
+    const currentAlertState =
+      alertMutation.fixtureId === selectedFixtureId
+        ? alertMutation.state
+        : "idle";
+    const followFixture = async () => {
+      setFollowMutation({ fixtureId: selectedFixtureId, state: "saving" });
+      try {
+        await profiles.followFixture(selectedFixtureId, alertPreferences);
+        setFollows((current) => [
+          ...current.filter(
+            (entry) =>
+              entry.fixtureId !== selectedFixtureId || entry.mode !== "live",
+          ),
+          {
+            eventPreferences: alertPreferences,
+            fixtureId: selectedFixtureId,
+            mode: "live",
+          },
+        ]);
+        setFollowMutation({ fixtureId: selectedFixtureId, state: "idle" });
+      } catch {
+        setFollowMutation({ fixtureId: selectedFixtureId, state: "error" });
+      }
+    };
+    const unfollowFixture = async () => {
+      setFollowMutation({ fixtureId: selectedFixtureId, state: "saving" });
+      try {
+        await profiles.unfollowFixture(selectedFixtureId);
+        setFollows((current) =>
+          current.filter(
+            (entry) =>
+              entry.fixtureId !== selectedFixtureId || entry.mode !== "live",
+          ),
+        );
+        setFollowMutation({ fixtureId: selectedFixtureId, state: "idle" });
+        setAlertMutation({ fixtureId: selectedFixtureId, state: "idle" });
+      } catch {
+        setFollowMutation({ fixtureId: selectedFixtureId, state: "error" });
+      }
+    };
+    const activatePushAlerts = async () => {
+      setAlertMutation({ fixtureId: selectedFixtureId, state: "enabling" });
+      try {
+        await (enablePushAlerts ?? enableConfiguredPushAlerts)(
+          alertPreferences,
+        );
+        setAlertMutation({ fixtureId: selectedFixtureId, state: "enabled" });
+      } catch {
+        setAlertMutation({ fixtureId: selectedFixtureId, state: "error" });
+      }
+    };
     return (
       <MatchHub
+        alertState={currentAlertState}
         catalog={catalog}
         favoriteTeam={profile.favoriteTeam}
         fixture={streamed?.snapshot ?? routedFixture}
+        followed={Boolean(follow)}
+        followState={currentFollowState}
         onBack={() => navigate("/")}
+        onEnableAlerts={() => void activatePushAlerts()}
+        onFollow={() => void followFixture()}
         onOpenMoment={(identity) => {
           if (!selectedFixtureId) return;
           navigate(
             `/matches/${encodeURIComponent(selectedFixtureId)}/moments/${encodeURIComponent(identity)}`,
           );
         }}
+        onUnfollow={() => void unfollowFixture()}
         state={exactFixtureState}
         timeline={streamed?.timeline}
         transportHealth={streamed?.transportHealth}

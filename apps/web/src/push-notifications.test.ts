@@ -91,6 +91,7 @@ describe("browser push activation", () => {
       applicationServerKey:
         "BAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A",
       dependencies,
+      preferences: { fullTime: false, goals: true, redCards: true },
     });
 
     expect(result).toEqual({
@@ -102,7 +103,13 @@ describe("browser push activation", () => {
     );
     expect(fetch).toHaveBeenCalledWith(
       "/api/v1/push/subscriptions",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({
+        body: JSON.stringify({
+          preferences: { fullTime: false, goals: true, redCards: true },
+          subscription: serializePushSubscription(source),
+        }),
+        method: "POST",
+      }),
     );
   });
 

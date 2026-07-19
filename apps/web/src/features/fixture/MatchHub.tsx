@@ -15,13 +15,21 @@ import { ListeningControl } from "../listening/ListeningControl.js";
 import "./match-hub.css";
 
 export type MatchHubState = "loading" | "ready" | "unavailable";
+export type MatchHubAlertState = "idle" | "enabling" | "enabled" | "error";
+export type MatchHubFollowState = "idle" | "saving" | "error";
 
 export interface MatchHubProps {
+  alertState?: MatchHubAlertState | undefined;
   catalog: ProductCatalog;
   favoriteTeam: string | null;
   fixture: LiveSnapshot | null;
+  followed?: boolean | undefined;
+  followState?: MatchHubFollowState | undefined;
   onBack?: (() => void) | undefined;
+  onEnableAlerts?: (() => void) | undefined;
+  onFollow?: (() => void) | undefined;
   onOpenMoment?: ((identity: string) => void) | undefined;
+  onUnfollow?: (() => void) | undefined;
   state: MatchHubState;
   timeline?: readonly LiveMoment[] | undefined;
   transportHealth?: LiveViewState["transportHealth"] | undefined;
@@ -88,11 +96,17 @@ function freshnessLabel(
 }
 
 export function MatchHub({
+  alertState = "idle",
   catalog,
   favoriteTeam,
   fixture,
+  followed = false,
+  followState = "idle",
   onBack,
+  onEnableAlerts,
+  onFollow,
   onOpenMoment,
+  onUnfollow,
   state,
   timeline = [],
   transportHealth,
@@ -143,6 +157,11 @@ export function MatchHub({
   const score = fixture.score;
   const scheduled =
     fixture.lifecycle === "SCHEDULED" || fixture.lifecycle === "TRACKING";
+  const followable =
+    fixture.provenance === "live_txline" &&
+    fixture.mode !== "recorded" &&
+    !fixture.fixtureId.startsWith("experience:") &&
+    (scheduled || fixture.lifecycle === "LIVE");
   const perspectiveTeam =
     favoriteTeam === home.code || favoriteTeam === away.code
       ? favoriteTeam
@@ -232,6 +251,61 @@ export function MatchHub({
           <b>{fixture.sourceLabel ?? "TXLINE MATCH DATA"}</b>
         </article>
       </section>
+      {followable && onFollow && onUnfollow && onEnableAlerts ? (
+        <section
+          className="ms-match-hub-follow"
+          aria-labelledby="match-follow-title"
+        >
+          <div>
+            <span>LIVE MATCH ALERTS</span>
+            <h2 id="match-follow-title">Stay with this match</h2>
+            <p>
+              Follow this fixture, then enable factual OS alerts for Goals · red
+              cards · full-time.
+            </p>
+          </div>
+          <div className="ms-match-hub-follow-actions">
+            <button
+              disabled={followState === "saving"}
+              onClick={followed ? onUnfollow : onFollow}
+              type="button"
+            >
+              {followState === "saving"
+                ? "Saving…"
+                : followed
+                  ? "Unfollow match"
+                  : "Follow match"}
+            </button>
+            <button
+              className="ms-match-hub-alert-button"
+              disabled={
+                !followed ||
+                alertState === "enabling" ||
+                alertState === "enabled"
+              }
+              onClick={onEnableAlerts}
+              type="button"
+            >
+              {alertState === "enabling"
+                ? "Enabling…"
+                : alertState === "enabled"
+                  ? "OS alerts enabled"
+                  : "Enable OS alerts"}
+            </button>
+          </div>
+          {followState === "error" || alertState === "error" ? (
+            <p className="ms-match-hub-follow-error" role="status">
+              {followState === "error"
+                ? "MatchSense could not update this follow. Try again."
+                : "OS alerts could not be enabled on this device. Try again."}
+            </p>
+          ) : !followed ? (
+            <small>
+              Follow the match before asking this device for permission.
+            </small>
+          ) : null}
+        </section>
+      ) : null}
       <ListeningControl
         fixtureId={fixture.fixtureId}
         moment={listeningMoment}

@@ -7,7 +7,12 @@ import {
 } from "react";
 
 import { TeamFlag } from "../../components/TeamFlag.js";
-import type { FanProfile, FanProfileApi } from "../../fan-profile.js";
+import {
+  liveAlertPreferences,
+  withLiveAlertPreferences,
+  type FanProfile,
+  type FanProfileApi,
+} from "../../fan-profile.js";
 import type { ProductCatalog, ProductTeam } from "../../live-api.js";
 
 import "./fan-surfaces.css";
@@ -386,15 +391,10 @@ export function ProfileSurface({
   const [voice, setVoice] = useState(() =>
     textPreference(fan.preferences, "commentaryVoice", "stadium"),
   );
-  const [goals, setGoals] = useState(() =>
-    boolPreference(fan.preferences, "alertsGoals", true),
-  );
-  const [reds, setReds] = useState(() =>
-    boolPreference(fan.preferences, "alertsRedCards", true),
-  );
-  const [fullTime, setFullTime] = useState(() =>
-    boolPreference(fan.preferences, "alertsFullTime", true),
-  );
+  const alerts = liveAlertPreferences(fan.preferences);
+  const [goals, setGoals] = useState(alerts.goals);
+  const [reds, setReds] = useState(alerts.redCards);
+  const [fullTime, setFullTime] = useState(alerts.fullTime);
   const [reducedMotion, setReducedMotion] = useState(() =>
     boolPreference(fan.preferences, "reducedMotion", false),
   );
@@ -418,16 +418,16 @@ export function ProfileSurface({
         avatarVariant,
         favoriteTeam: team.code,
         handle: handle.trim(),
-        preferences: {
-          ...fan.preferences,
-          alertsFullTime: fullTime,
-          alertsGoals: goals,
-          alertsRedCards: reds,
-          captions,
-          commentaryLanguage: language,
-          commentaryVoice: voice,
-          reducedMotion,
-        },
+        preferences: withLiveAlertPreferences(
+          {
+            ...fan.preferences,
+            captions,
+            commentaryLanguage: language,
+            commentaryVoice: voice,
+            reducedMotion,
+          },
+          { fullTime, goals, redCards: reds },
+        ),
         profile: fan.profile,
       });
       onSaved(updated);

@@ -265,4 +265,79 @@ describe("MatchHub", () => {
       markup.indexOf("France are down to ten"),
     );
   });
+
+  it("offers follow and OS alerts together on a real live fixture", () => {
+    const markup = renderToStaticMarkup(
+      createElement(MatchHub, {
+        alertState: "idle",
+        catalog,
+        favoriteTeam: "ARG",
+        fixture: {
+          awayTeam: "FRA",
+          fixtureId: "live-alerts-1",
+          freshness: "live",
+          homeTeam: "ARG",
+          lifecycle: "LIVE",
+          minute: "28′",
+          provenance: "live_txline",
+          score: { away: 0, home: 1 },
+        },
+        followState: "idle",
+        followed: true,
+        onEnableAlerts: () => undefined,
+        onFollow: () => undefined,
+        onUnfollow: () => undefined,
+        state: "ready",
+      }),
+    );
+
+    expect(markup).toContain("Stay with this match");
+    expect(markup).toContain("Unfollow match");
+    expect(markup).toContain("Enable OS alerts");
+    expect(markup).toContain("Goals · red cards · full-time");
+  });
+
+  it.each([
+    {
+      fixtureId: "final-alerts-1",
+      lifecycle: "FINAL" as const,
+      mode: "live" as const,
+      provenance: "live_txline" as const,
+    },
+    {
+      fixtureId: "recorded-alerts-1",
+      lifecycle: "SCHEDULED" as const,
+      mode: "recorded" as const,
+      provenance: "live_txline" as const,
+    },
+    {
+      fixtureId: "experience:run-one",
+      lifecycle: "LIVE" as const,
+      mode: "live" as const,
+      provenance: "simulated" as const,
+    },
+  ])("does not expose follow controls for $fixtureId", (fixturePolicy) => {
+    const markup = renderToStaticMarkup(
+      createElement(MatchHub, {
+        catalog,
+        favoriteTeam: "ARG",
+        fixture: {
+          awayTeam: "FRA",
+          homeTeam: "ARG",
+          minute: fixturePolicy.lifecycle === "FINAL" ? "FT" : "—",
+          score:
+            fixturePolicy.lifecycle === "FINAL" ? { away: 1, home: 2 } : null,
+          ...fixturePolicy,
+        },
+        followed: false,
+        onEnableAlerts: () => undefined,
+        onFollow: () => undefined,
+        onUnfollow: () => undefined,
+        state: "ready",
+      }),
+    );
+
+    expect(markup).not.toContain("Follow match");
+    expect(markup).not.toContain("Enable OS alerts");
+  });
 });

@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createFanProfileApi, needsProfileCompletion } from "./fan-profile.js";
+import {
+  createFanProfileApi,
+  liveAlertPreferences,
+  needsProfileCompletion,
+  withLiveAlertPreferences,
+  type LiveAlertPreferences,
+} from "./fan-profile.js";
 
 const fan = {
   avatarVariant: null,
@@ -16,6 +22,33 @@ const fan = {
 };
 
 describe("fan profile client", () => {
+  it("normalizes legacy alert names into the canonical delivery contract", () => {
+    expect(
+      liveAlertPreferences({
+        alertsFullTime: false,
+        alertsGoals: true,
+        alertsRedCards: false,
+      }),
+    ).toEqual({ fullTime: false, goals: true, redCards: false });
+
+    expect(
+      withLiveAlertPreferences(
+        {
+          alertsFullTime: true,
+          alertsGoals: false,
+          alertsRedCards: true,
+          commentaryLanguage: "en",
+        },
+        { fullTime: true, goals: true, redCards: false },
+      ),
+    ).toEqual({
+      commentaryLanguage: "en",
+      fullTime: true,
+      goals: true,
+      redCards: false,
+    });
+  });
+
   it("requests only minimal completion when an incomplete fan deep-links", () => {
     expect(needsProfileCompletion(null, "/matches/final/moments/goal:1")).toBe(
       true,
@@ -221,7 +254,7 @@ describe("fan profile client", () => {
 
     const followLiveOnly: (
       fixtureId: string,
-      eventPreferences?: Record<string, boolean>,
+      eventPreferences?: LiveAlertPreferences,
     ) => Promise<void> = api.followFixture;
     if (false) {
       // @ts-expect-error Recorded fixtures are not publicly followable.
@@ -241,6 +274,29 @@ describe("fan profile client", () => {
           eventPreferences: { fullTime: false, goals: true, redCards: true },
         }),
         method: "PUT",
+      }),
+    );
+  });
+
+  it("removes a live follow through the authenticated fixture route", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const api = createFanProfileApi({
+      cookieSource: () => "matchsense_csrf=csrf",
+      fetcher,
+    });
+
+    await api.unfollowFixture("fixture-live");
+
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/v1/follows/live/fixture-live",
+      expect.objectContaining({
+        credentials: "same-origin",
+        headers: expect.objectContaining({
+          "x-matchsense-csrf": "csrf",
+        }),
+        method: "DELETE",
       }),
     );
   });

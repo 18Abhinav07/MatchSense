@@ -241,6 +241,36 @@ describe("truthful application router", () => {
     expect(markup).not.toContain("Stream unavailable");
   });
 
+  it("retains a bootstrap live follow on the selected Match Hub", () => {
+    const markup = render({
+      initialFollows: [
+        {
+          eventPreferences: {
+            fullTime: false,
+            goals: true,
+            redCards: true,
+          },
+          fixtureId: "arg-fra",
+          mode: "live",
+        },
+      ],
+      initialPath: "/matches/arg-fra",
+    });
+
+    expect(markup).toContain("Unfollow match");
+    expect(markup).toContain("Enable OS alerts");
+  });
+
+  it("offers follow before OS permission on an unfollowed live fixture", () => {
+    const markup = render({
+      initialFollows: [],
+      initialPath: "/matches/arg-fra",
+    });
+
+    expect(markup).toContain("Follow match");
+    expect(markup).toContain("Follow the match before asking this device");
+  });
+
   it("does not expose a public demo route", () => {
     const markup = render({ initialPath: "/demo" });
 
@@ -255,6 +285,8 @@ describe("truthful application router", () => {
     expect(markup).toContain("THE COMPLETE MATCHSENSE LOOP");
     expect(markup).toContain("Start five-minute match");
     expect(markup).toContain("SIMULATED TXLINE-SHAPED DATA");
+    expect(markup).not.toContain("Follow match");
+    expect(markup).not.toContain("Enable OS alerts");
   });
 
   it("opens the Experience Room creator with the chosen fixture", () => {
