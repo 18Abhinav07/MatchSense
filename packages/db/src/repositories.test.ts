@@ -328,6 +328,32 @@ function liveTerminalRaw(sourceTerminalRecordId: string, id: string) {
   };
 }
 
+function archiveImportJobRow(sourceTerminalRecordId: string) {
+  return {
+    archive_manifest_hash: null,
+    archive_manifest_id: null,
+    attempt_count: 0,
+    available_at: "2026-07-18T18:21:00.000Z",
+    away_team_id: "BRV-provider-202",
+    claim_expires_at: null,
+    claim_generation: 0,
+    claim_started_at: null,
+    claimed_by: null,
+    context_hash: liveTerminalSourceContextHash,
+    created_at: "2026-07-18T18:21:00.000Z",
+    fixture_id: "fx-1",
+    home_team_id: "ALP-provider-101",
+    kickoff_at: "2026-07-18T18:00:00.000Z",
+    last_error: null,
+    participant1_is_home: true,
+    reason: "live_terminal",
+    source_context: liveTerminalSourceContext,
+    source_terminal_record_id: sourceTerminalRecordId,
+    state: "queued",
+    updated_at: "2026-07-18T18:21:00.000Z",
+  };
+}
+
 function liveCorrectionRaw(
   action: "action_amend" | "action_discarded" | "score_adjustment",
   id: string,
@@ -899,6 +925,129 @@ describe("fixture truth repository", () => {
       "provider-terminal-1026",
     );
   });
+
+  it("enqueues an authoritative reconciliation terminal without fixture or fan writes when truth is unchanged", async () => {
+    const sourceTerminalRecordId = "provider-terminal-reconciliation";
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [sourceLeaseRow];
+      }
+      if (query.includes("INSERT INTO matchsense.raw_source_records")) {
+        return [{ id: "raw-terminal-reconciliation" }];
+      }
+      if (query.includes("SELECT id") && query.includes("FOR UPDATE")) {
+        return [{ id: "fx-1" }];
+      }
+      if (query.includes("FROM matchsense.fixture_projections")) return [];
+      if (query.includes("INSERT INTO matchsense.archive_import_jobs")) {
+        return [archiveImportJobRow(sourceTerminalRecordId)];
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const raw = {
+      ...liveTerminalRaw(sourceTerminalRecordId, "raw-terminal-reconciliation"),
+      deliveryIntent: "reconcile" as const,
+    };
+
+    await expect(
+      repository?.commitCollectorFrame({
+        deliveries: [
+          {
+            archiveImportJob: liveTerminalArchiveImportJob(
+              sourceTerminalRecordId,
+            ),
+            derive: () => [],
+            fixtureId: "fx-1",
+            raw,
+          },
+        ],
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).resolves.toEqual({
+      deliveries: [{ kind: "accepted_no_change" }],
+      kind: "committed",
+    });
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("INSERT INTO matchsense.archive_import_jobs"),
+      ),
+    ).toBe(true);
+    expect(
+      fake.queries.some(
+        ({ query }) =>
+          query.includes("INSERT INTO matchsense.fixture_events") ||
+          query.includes("INSERT INTO matchsense.moments") ||
+          query.includes("INSERT INTO matchsense.outbox"),
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    {
+      expectedError:
+        "Archive import jobs require a canonical realtime or reconciliation delivery",
+      label: "source-only",
+      raw: {
+        ...liveTerminalRaw(
+          "provider-terminal-source-only-reconciliation",
+          "raw-source-only-reconciliation",
+        ),
+        canonicalEligible: false,
+        deliveryIntent: "reconcile" as const,
+      },
+      sourceTerminalRecordId: "provider-terminal-source-only-reconciliation",
+    },
+    {
+      expectedError:
+        "Archive import job must be confirmed game_finalised with StatusId 100",
+      label: "non-terminal",
+      raw: {
+        ...liveTerminalRaw(
+          "provider-terminal-non-terminal-reconciliation",
+          "raw-non-terminal-reconciliation",
+        ),
+        deliveryIntent: "reconcile" as const,
+        payload: {
+          Action: "goal",
+          FixtureId: "fx-1",
+          Id: "provider-terminal-non-terminal-reconciliation",
+          StatusId: 100,
+        },
+      },
+      sourceTerminalRecordId: "provider-terminal-non-terminal-reconciliation",
+    },
+  ])(
+    "rejects a $label reconciliation archive instruction before transaction work",
+    async ({ expectedError, raw, sourceTerminalRecordId }) => {
+      const fake = testClient(() => {
+        throw new Error(
+          "Invalid reconciliation must not start transaction work",
+        );
+      });
+      const repository = db.createFixtureTruthRepository?.(fake.client);
+
+      await expect(
+        repository?.commitCollectorFrame({
+          deliveries: [
+            {
+              archiveImportJob: liveTerminalArchiveImportJob(
+                sourceTerminalRecordId,
+              ),
+              derive: () => [],
+              fixtureId: "fx-1",
+              raw,
+            },
+          ],
+          mode: "live",
+          sourceFence: liveSourceFence,
+        }),
+      ).rejects.toThrow(expectedError);
+      expect(fake.client.begin).not.toHaveBeenCalled();
+      expect(fake.queries).toHaveLength(0);
+    },
+  );
 
   it("rejects a terminal archive instruction for another fixture before opening a frame transaction", async () => {
     const fake = testClient(() => {
@@ -1723,7 +1872,8 @@ describe("fixture truth repository", () => {
     expect(committed).toEqual([]);
   });
 
-  it("does not enqueue an archive job for a duplicate live terminal raw record", async () => {
+  it("idempotently enqueues archive recovery for a duplicate reconciliation terminal without deriving fan effects", async () => {
+    const sourceTerminalRecordId = "provider-terminal-duplicate";
     const fake = testClient((query) => {
       if (query.includes("FROM matchsense.source_leases")) {
         return [sourceLeaseRow];
@@ -1731,22 +1881,25 @@ describe("fixture truth repository", () => {
       if (query.includes("INSERT INTO matchsense.raw_source_records"))
         return [];
       if (query.includes("INSERT INTO matchsense.archive_import_jobs")) {
-        throw new Error("Duplicate raw must not enqueue an archive import job");
+        return [];
+      }
+      if (query.includes("FROM matchsense.archive_import_jobs")) {
+        return [archiveImportJobRow(sourceTerminalRecordId)];
       }
       return [];
     });
     const repository = db.createFixtureTruthRepository?.(fake.client);
-    const raw = liveTerminalRaw(
-      "provider-terminal-duplicate",
-      "raw-duplicate-terminal",
-    );
+    const raw = {
+      ...liveTerminalRaw(sourceTerminalRecordId, "raw-duplicate-terminal"),
+      deliveryIntent: "reconcile" as const,
+    };
 
     await expect(
       repository?.commitCollectorFrame({
         deliveries: [
           {
             archiveImportJob: liveTerminalArchiveImportJob(
-              "provider-terminal-duplicate",
+              sourceTerminalRecordId,
             ),
             derive: () => {
               throw new Error("Duplicate raw must not derive a projection");
@@ -1765,6 +1918,20 @@ describe("fixture truth repository", () => {
     expect(
       fake.queries.some(({ query }) =>
         query.includes("INSERT INTO matchsense.archive_import_jobs"),
+      ),
+    ).toBe(true);
+    expect(
+      fake.queries.some(({ query }) =>
+        query.includes("FROM matchsense.archive_import_jobs"),
+      ),
+    ).toBe(true);
+    expect(
+      fake.queries.some(
+        ({ query }) =>
+          query.includes("INSERT INTO matchsense.fixture_projections") ||
+          query.includes("INSERT INTO matchsense.fixture_events") ||
+          query.includes("INSERT INTO matchsense.moments") ||
+          query.includes("INSERT INTO matchsense.outbox"),
       ),
     ).toBe(false);
   });

@@ -172,7 +172,8 @@ function archiveImportJobFor(input: {
 }): LiveTerminalArchiveImportJobInput | null {
   if (
     input.raw.canonicalEligible === false ||
-    input.raw.deliveryIntent !== "realtime" ||
+    (input.raw.deliveryIntent !== "realtime" &&
+      input.raw.deliveryIntent !== "reconcile") ||
     input.reduction.kind !== "canonical"
   ) {
     return null;

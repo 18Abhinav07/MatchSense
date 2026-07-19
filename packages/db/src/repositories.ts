@@ -344,8 +344,9 @@ function assertRecordedArchiveInvalidation(
 export interface CollectorFrameDelivery {
   /**
    * A provider-terminal instruction created by the TxLINE collector. It is
-   * written only after its raw row and canonical projection commit inside this
-   * same source-frame transaction.
+   * enqueued after its raw identity is inserted or recovered as a duplicate
+   * inside this same source-frame transaction. Reconciliation may enqueue it
+   * without changing canonical truth.
    */
   archiveImportJob?: LiveTerminalArchiveImportJobInput | undefined;
   /** A closed canonical TxLINE correction category for recorded replay state. */
@@ -1300,10 +1301,11 @@ export function createFixtureTruthRepository(
           }
           if (
             delivery.raw.canonicalEligible === false ||
-            delivery.raw.deliveryIntent !== "realtime"
+            (delivery.raw.deliveryIntent !== "realtime" &&
+              delivery.raw.deliveryIntent !== "reconcile")
           ) {
             throw new Error(
-              "Archive import jobs require a realtime canonical delivery",
+              "Archive import jobs require a canonical realtime or reconciliation delivery",
             );
           }
           if (delivery.archiveImportJob.fixtureId !== delivery.fixtureId) {
@@ -1380,6 +1382,12 @@ export function createFixtureTruthRepository(
             raw: delivery.raw,
           });
           if (!inserted) {
+            if (delivery.archiveImportJob) {
+              await enqueueLiveTerminalArchiveImportJob(
+                transaction,
+                delivery.archiveImportJob,
+              );
+            }
             deliveries.push({ kind: "duplicate" });
             continue;
           }
@@ -1413,7 +1421,11 @@ export function createFixtureTruthRepository(
               },
             );
           }
-          if (delivery.archiveImportJob && applied.kind === "committed") {
+          if (
+            delivery.archiveImportJob &&
+            (applied.kind === "committed" ||
+              delivery.raw.deliveryIntent === "reconcile")
+          ) {
             await enqueueLiveTerminalArchiveImportJob(
               transaction,
               delivery.archiveImportJob,

@@ -2,6 +2,7 @@ import {
   hashArchiveImportSourceContext,
   type ArchiveImportSourceContext,
   type FixtureTruthRepository,
+  type SourceEnvelopeCommitPlan,
 } from "@matchsense/db";
 import type { TxlineRawRecord } from "@matchsense/txline-adapter";
 import { describe, expect, it, vi } from "vitest";
@@ -135,6 +136,64 @@ describe("durable TxLINE collector", () => {
         }),
       ),
     ).resolves.toMatchObject({ kind: "committed" });
+  });
+
+  it("attaches an archive intent for an authoritative reconciliation terminal without fan effects", async () => {
+    const repository: Pick<FixtureTruthRepository, "commitCollectorFrame"> = {
+      commitCollectorFrame: vi.fn(async (input) => {
+        const delivery = input.deliveries[0]!;
+        expect(delivery.raw.deliveryIntent).toBe("reconcile");
+        expect(delivery.archiveImportJob).toEqual({
+          awayTeamId: fixture.awayTeam,
+          contextHash: fixture.archiveImport.contextHash,
+          fixtureId: fixture.fixtureId,
+          homeTeamId: fixture.homeTeam,
+          kickoffAt: fixture.kickoffAt,
+          participant1IsHome: fixture.participant1IsHome,
+          sourceContext: fixture.archiveImport.sourceContext,
+          sourceTerminalRecordId: "provider-terminal-recovery",
+        });
+        const plans = delivery.derive?.(null) ?? [];
+        expect(plans.length).toBeGreaterThan(0);
+        expect(
+          plans.every(
+            (plan: SourceEnvelopeCommitPlan) =>
+              plan.moment === undefined && plan.outbox.length === 0,
+          ),
+        ).toBe(true);
+        return {
+          deliveries: [
+            {
+              eventSequences: [1],
+              kind: "committed" as const,
+              revisions: [1],
+            },
+          ],
+          kind: "committed" as const,
+        };
+      }),
+    };
+    const collector = createTxlineCollector({
+      fixtureForId: () => fixture,
+      fixtureTruth: repository,
+      rightsGrantId: "grant-1",
+      sourceFence: fence,
+    });
+
+    await expect(
+      collector.ingest(
+        raw(
+          {
+            ...goalPayload(),
+            Action: "game_finalised",
+            Confirmed: true,
+            Id: "provider-terminal-recovery",
+            StatusId: 100,
+          },
+          "reconciliation",
+        ),
+      ),
+    ).resolves.toEqual({ effects: [], kind: "committed" });
   });
 
   it("uses a stable recovery identity for an authoritative historical terminal", async () => {
@@ -366,7 +425,7 @@ describe("durable TxLINE collector", () => {
     },
   );
 
-  it("attaches no archive job or recorded invalidation for rejected terminals, reconciliation, or source-only records", async () => {
+  it("attaches no archive job or recorded invalidation for rejected terminals, corrections, or source-only records", async () => {
     const archiveIntents: unknown[] = [];
     const recordedInvalidations: unknown[] = [];
     const repository: Pick<FixtureTruthRepository, "commitCollectorFrame"> = {
@@ -411,7 +470,6 @@ describe("durable TxLINE collector", () => {
       raw({ ...terminal, Action: "halftime_finalised" }),
       raw({ ...terminal, StatusId: 99 }),
       raw({ ...terminal, Id: undefined }),
-      raw(terminal, "reconciliation"),
       raw({ ...terminal, Action: "coverage_update" }),
       raw(
         { ...goalPayload(), Action: "action_amend", Id: "provider-amend-1027" },
@@ -423,7 +481,7 @@ describe("durable TxLINE collector", () => {
         kind: "committed",
       });
     }
-    expect(archiveIntents).toEqual(Array(7).fill(undefined));
-    expect(recordedInvalidations).toEqual(Array(7).fill(undefined));
+    expect(archiveIntents).toEqual(Array(6).fill(undefined));
+    expect(recordedInvalidations).toEqual(Array(6).fill(undefined));
   });
 });
