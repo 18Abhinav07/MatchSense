@@ -3,11 +3,12 @@ import type {
   RoomAggregateRepository,
 } from "@matchsense/db";
 import type { CanonicalMoment, FixtureSnapshot } from "@matchsense/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createDurableRoomService,
   type DurableRoomAggregate,
+  type DurableRoomStreamEvent,
 } from "./durable-room-service.js";
 
 const kickoffAt = Date.parse("2026-07-18T18:00:00.000Z");
@@ -145,6 +146,74 @@ const calls = [
 ];
 
 describe("durable data-qualified Call Three Rooms", () => {
+  it("delivers committed updates across service instances and stops polling after unsubscribe", async () => {
+    vi.useFakeTimers();
+    try {
+      const repository = inMemoryRepository();
+      const serviceOptions = {
+        fixture: async () => scheduledLiveFixture,
+        now: () => kickoffAt - 60_000,
+        repository,
+      };
+      const writer = createDurableRoomService({
+        ...serviceOptions,
+        roomId: () => "room-cross-process-stream",
+      });
+      const reader = createDurableRoomService(serviceOptions);
+      const created = await writer.create({
+        fixtureId: scheduledLiveFixture.fixtureId,
+        host: { fanId: "fan-host", nickname: "Host" },
+        name: "Call Three",
+      });
+      const events: DurableRoomStreamEvent[] = [];
+      const unsubscribe = await reader.subscribe(
+        created.room.id,
+        "fan-host",
+        (event) => events.push(event),
+      );
+
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        event: "room.snapshot",
+        revision: 1,
+      });
+
+      await writer.setCalls({
+        calls,
+        fanId: "fan-host",
+        roomId: created.room.id,
+      });
+      expect(events).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(events).toHaveLength(2);
+      expect(events[1]).toMatchObject({
+        event: "room.updated",
+        revision: 2,
+        room: {
+          myCalls: {
+            calls: {
+              cards: { answer: "NO", confidence: 1 },
+              goals: { answer: "YES", confidence: 2 },
+              result: { answer: "HOME", confidence: 3 },
+            },
+          },
+        },
+      });
+
+      unsubscribe();
+      expect(vi.getTimerCount()).toBe(0);
+      await writer.lockCalls({
+        fanId: "fan-host",
+        roomId: created.room.id,
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(events).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects synthetic, recorded, and already-live fixtures before persistence", async () => {
     const repository = inMemoryRepository();
     const now = () => kickoffAt - 60_000;

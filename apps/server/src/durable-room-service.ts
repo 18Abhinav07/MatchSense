@@ -30,6 +30,7 @@ import {
 import { RoomServiceError } from "./room-service.js";
 
 const MAX_CAS_ATTEMPTS = 4;
+const ROOM_SUBSCRIPTION_POLL_INTERVAL_MS = 1_000;
 const ROOM_FOLLOW_EVENT_PREFERENCES = {
   fullTime: true,
   goals: true,
@@ -407,10 +408,14 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
   const now = options.now ?? Date.now;
   const makeRoomId = options.roomId ?? randomUUID;
   const makeInviteBytes = options.inviteBytes ?? (() => randomBytes(16));
-  const subscribers = new Map<
-    string,
-    Map<string, Set<(event: DurableRoomStreamEvent) => void>>
-  >();
+  type RoomSubscriptionState = {
+    delivery: Promise<void>;
+    fanSubscribers: Map<string, Set<(event: DurableRoomStreamEvent) => void>>;
+    lastVersion: number;
+    pollInFlight: boolean;
+    pollTimer: ReturnType<typeof setInterval> | null;
+  };
+  const subscribers = new Map<string, RoomSubscriptionState>();
 
   const lifetimePointsForFan = async (fanId: string) => {
     const records = await options.repository.listForFan(fanId);
@@ -426,17 +431,63 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
   ) => buildView(record, fanId, await lifetimePointsForFan(fanId));
 
   const publish = async (record: RoomAggregateRecord<DurableRoomAggregate>) => {
-    const roomSubscribers = subscribers.get(record.id);
-    if (!roomSubscribers) return;
-    for (const [fanId, listeners] of roomSubscribers) {
-      const event: DurableRoomStreamEvent = {
-        event: "room.updated",
-        id: `${record.id}:${record.version + 1}`,
-        revision: record.version + 1,
-        room: await viewFor(record, fanId),
-      };
-      for (const listener of listeners) listener(event);
+    const state = subscribers.get(record.id);
+    if (!state) return;
+    const delivery = state.delivery
+      .catch(() => undefined)
+      .then(async () => {
+        if (
+          subscribers.get(record.id) !== state ||
+          record.version <= state.lastVersion
+        ) {
+          return;
+        }
+        for (const [fanId, listeners] of state.fanSubscribers) {
+          const event: DurableRoomStreamEvent = {
+            event: "room.updated",
+            id: `${record.id}:${record.version + 1}`,
+            revision: record.version + 1,
+            room: await viewFor(record, fanId),
+          };
+          for (const listener of listeners) listener(event);
+        }
+        state.lastVersion = record.version;
+      });
+    state.delivery = delivery;
+    await delivery;
+  };
+
+  const pollSubscribedRoom = async (
+    roomId: string,
+    state: RoomSubscriptionState,
+  ) => {
+    if (subscribers.get(roomId) !== state || state.pollInFlight) return;
+    state.pollInFlight = true;
+    try {
+      const record = await options.repository.get(roomId);
+      if (
+        record &&
+        isCallThreeAggregate(record.aggregate) &&
+        record.version > state.lastVersion
+      ) {
+        await publish(record);
+      }
+    } catch {
+      // Keep the SSE connection alive; the next bounded poll retries the read.
+    } finally {
+      state.pollInFlight = false;
     }
+  };
+
+  const startSubscriptionPolling = (
+    roomId: string,
+    state: RoomSubscriptionState,
+  ) => {
+    const timer = setInterval(() => {
+      void pollSubscribedRoom(roomId, state);
+    }, ROOM_SUBSCRIPTION_POLL_INTERVAL_MS);
+    timer.unref?.();
+    state.pollTimer = timer;
   };
 
   const recordFor = async (roomId: string) => {
@@ -691,15 +742,23 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
       listener: (event: DurableRoomStreamEvent) => void,
     ) {
       const record = await recordFor(roomId);
-      let roomSubscribers = subscribers.get(roomId);
-      if (!roomSubscribers) {
-        roomSubscribers = new Map();
-        subscribers.set(roomId, roomSubscribers);
+      let state = subscribers.get(roomId);
+      if (!state) {
+        state = {
+          delivery: Promise.resolve(),
+          fanSubscribers: new Map(),
+          lastVersion: record.version,
+          pollInFlight: false,
+          pollTimer: null,
+        };
+        subscribers.set(roomId, state);
+      } else {
+        await publish(record);
       }
-      let fanSubscribers = roomSubscribers.get(fanId);
+      let fanSubscribers = state.fanSubscribers.get(fanId);
       if (!fanSubscribers) {
         fanSubscribers = new Set();
-        roomSubscribers.set(fanId, fanSubscribers);
+        state.fanSubscribers.set(fanId, fanSubscribers);
       }
       fanSubscribers.add(listener);
       listener({
@@ -708,10 +767,18 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
         revision: record.version + 1,
         room: await viewFor(record, fanId),
       });
+      if (!state.pollTimer) startSubscriptionPolling(roomId, state);
+      let subscribed = true;
       return () => {
+        if (!subscribed) return;
+        subscribed = false;
         fanSubscribers?.delete(listener);
-        if (fanSubscribers?.size === 0) roomSubscribers?.delete(fanId);
-        if (roomSubscribers?.size === 0) subscribers.delete(roomId);
+        if (fanSubscribers?.size === 0) state?.fanSubscribers.delete(fanId);
+        if (state?.fanSubscribers.size === 0) {
+          if (state.pollTimer) clearInterval(state.pollTimer);
+          state.pollTimer = null;
+          if (subscribers.get(roomId) === state) subscribers.delete(roomId);
+        }
       };
     },
 
