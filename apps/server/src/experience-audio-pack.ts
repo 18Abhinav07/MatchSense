@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readFileSync,
+} from "node:fs";
 import path from "node:path";
 
 import type { CanonicalMoment } from "@matchsense/contracts";
@@ -175,17 +181,33 @@ function readBoundedRegularFile(input: {
   maxBytes: number;
 }) {
   const { filePath, label, maxBytes } = input;
-  const stat = lstatSync(filePath);
-  if (!stat.isFile()) {
-    throw new Error(`${label} must be a regular file, not a symlink or device`);
+  let descriptor: number | null = null;
+  try {
+    try {
+      descriptor = openSync(
+        filePath,
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ELOOP") {
+        throw new Error(`${label} must be a regular file, not a symlink`);
+      }
+      throw error;
+    }
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile()) {
+      throw new Error(`${label} must be a regular file, not a device`);
+    }
+    if (stat.size <= 0) {
+      throw new Error(`${label} must not be empty`);
+    }
+    if (stat.size > maxBytes) {
+      throw new Error(`${label} is too large (maximum ${maxBytes} bytes)`);
+    }
+    return readFileSync(descriptor);
+  } finally {
+    if (descriptor !== null) closeSync(descriptor);
   }
-  if (stat.size <= 0) {
-    throw new Error(`${label} must not be empty`);
-  }
-  if (stat.size > maxBytes) {
-    throw new Error(`${label} is too large (maximum ${maxBytes} bytes)`);
-  }
-  return readFileSync(filePath);
 }
 
 function readValidatedAsset(input: {
