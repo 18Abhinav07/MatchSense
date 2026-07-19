@@ -365,6 +365,11 @@ export function createDurableCollectorLifecycle(input: {
       onRawRecord: async (record) => {
         await collector.ingest(record);
       },
+      onState: ({ attempt, state }) => {
+        process.stderr.write(
+          `TxLINE collector source state=${state} attempt=${attempt}\n`,
+        );
+      },
       onWarning: (warning) => {
         process.stderr.write(
           `TxLINE collector ${warning.code}: ${warning.message}\n`,
@@ -401,6 +406,9 @@ export function createDurableCollectorLifecycle(input: {
     if (refreshTask) return refreshTask;
     const task = (async () => {
       const schedule = await fetchTournamentSchedule(input.txlineClient);
+      process.stderr.write(
+        `TxLINE collector schedule current=${schedule.current.length} catalogue=${schedule.catalogue?.length ?? 0}\n`,
+      );
       const lease = activeLease;
       if (stopping || !lease) return;
       if (schedule.catalogue && schedule.catalogue.length > 0) {
@@ -568,6 +576,7 @@ export function createDurableCollectorLifecycle(input: {
         return;
       }
       activeLease = lease;
+      process.stderr.write("TxLINE collector source lease acquired\n");
       renewTimer = setInterval(renewActiveLease, LEASE_RENEWAL_MS);
       try {
         await refreshSchedule();
