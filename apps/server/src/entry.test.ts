@@ -1,10 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { startByRole } from "./entry.js";
+import { startupFailureMessage, startByRole } from "./entry.js";
 
 const databaseUrl = "postgresql://db.example/matchsense";
 
 describe("role-selected server entrypoint", () => {
+  it("reports a useful startup error without exposing connection credentials", () => {
+    expect(
+      startupFailureMessage(
+        new Error(
+          "Collector source lease is held by postgresql://user:secret@db.example/matchsense",
+        ),
+      ),
+    ).toBe(
+      "MatchSense service failed to start: Collector source lease is held by [REDACTED_URL]\n",
+    );
+  });
+
   it("starts the API role without loading the collector", async () => {
     const apiRuntime = { close: vi.fn(async () => undefined) };
     const startApi = vi.fn(async () => apiRuntime);

@@ -30,6 +30,14 @@ export interface RoleStartResult {
 const loadApiModule = () => import("./api-main.js");
 const loadCollectorModule = () => import("./collector-main.js");
 
+export function startupFailureMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  const redacted = message
+    .replace(/\b(?:https?|postgres(?:ql)?):\/\/\S+/giu, "[REDACTED_URL]")
+    .replace(/\b(Bearer\s+)\S+/giu, "$1[REDACTED]");
+  return `MatchSense service failed to start: ${redacted}\n`;
+}
+
 export async function startByRole(
   environment: Record<string, string | undefined> = process.env,
   loaders: RoleEntrypointLoaders = {},
@@ -60,8 +68,8 @@ const isDirectExecution =
   entryPath !== undefined && import.meta.url === pathToFileURL(entryPath).href;
 
 if (isDirectExecution) {
-  void startByRole().catch(() => {
-    process.stderr.write("MatchSense service failed to start\n");
+  void startByRole().catch((error: unknown) => {
+    process.stderr.write(startupFailureMessage(error));
     process.exitCode = 1;
   });
 }
