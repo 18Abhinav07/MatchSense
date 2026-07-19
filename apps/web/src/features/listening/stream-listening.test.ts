@@ -61,6 +61,7 @@ describe("continuous Pocket Listening controller", () => {
     });
 
     const started = controller.startFromGesture();
+    expect(audio.load).toHaveBeenCalledOnce();
     expect(audio.play).toHaveBeenCalledOnce();
     expect(controller.snapshot().state).toBe("connecting");
     emit("playing");
@@ -174,5 +175,42 @@ describe("continuous Pocket Listening controller", () => {
       prepared: true,
       state: "stopped",
     });
+  });
+
+  it("automatically rejoins the live edge after a locked-device stream error", async () => {
+    const { audio, emit } = audioFixture();
+    const scheduled: Array<() => void> = [];
+    const clearSchedule = vi.fn();
+    const schedule = vi.fn((callback: () => void) => {
+      scheduled.push(callback);
+      return 17 as unknown as ReturnType<typeof setTimeout>;
+    });
+    const controller = createStreamListeningController({
+      api: {
+        create: vi.fn(async () => ({ id: "listen-1" })),
+        remove: vi.fn(async () => undefined),
+        streamUrl: (id: string) => `/stream/${id}`,
+      },
+      audio,
+      clearSchedule,
+      schedule,
+    });
+    await controller.prepare(input);
+    const started = controller.startFromGesture();
+    emit("playing");
+    await started;
+    vi.mocked(audio.load).mockClear();
+    vi.mocked(audio.play).mockClear();
+
+    emit("error");
+
+    expect(controller.snapshot().state).toBe("connecting");
+    expect(schedule).toHaveBeenCalledWith(expect.any(Function), 1_500);
+    scheduled[0]!();
+    expect(audio.load).toHaveBeenCalledOnce();
+    expect(audio.play).toHaveBeenCalledOnce();
+    emit("playing");
+    expect(controller.snapshot().state).toBe("listening");
+    expect(clearSchedule).not.toHaveBeenCalled();
   });
 });

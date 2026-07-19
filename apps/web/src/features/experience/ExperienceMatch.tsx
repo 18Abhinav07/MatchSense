@@ -145,11 +145,14 @@ export function ExperienceMatch({
         </p>
       </section>
       <div className="ms-experience-match-grid">
-        <ListeningControl
-          fixtureId={fixture.fixtureId}
-          moment={listeningMoment}
-          perspectiveTeam={perspective}
-        />
+        {!memoryOpen ? (
+          <ListeningControl
+            fixtureId={fixture.fixtureId}
+            moment={listeningMoment}
+            perspectiveTeam={perspective}
+            terminal={isFinal}
+          />
+        ) : null}
         <section className="ms-experience-truth-rail">
           <header>
             <p>TRUTH RAIL</p>

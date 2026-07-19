@@ -51,7 +51,20 @@ describe("continuous listening audio hub", () => {
       hub.inject("moment-1:commentary", ["session-1"], Buffer.from("voice")),
     ).toBe(true);
 
-    expect(Buffer.concat(client.chunks).toString()).toBe("silencevoice");
+    expect(Buffer.concat(client.chunks).toString()).toBe("silencecuevoice");
+  });
+
+  it("starts every attached stream with an audible connection cue", () => {
+    const hub = createAudioHub({
+      cueBytes: Buffer.from("cue"),
+      silenceBytes: Buffer.from("silence"),
+      writeIntervalMs: 1_000,
+    });
+    const client = new WritableClient();
+
+    expect(hub.addClient("session-1", client)).toBe(true);
+
+    expect(Buffer.concat(client.chunks).toString()).toBe("silencecue");
   });
 
   it("does not consume an event identity before its stream is attached", () => {
@@ -66,7 +79,7 @@ describe("continuous listening audio hub", () => {
     expect(hub.status().eventCount).toBe(0);
     hub.addClient("session-1", client);
     expect(hub.inject("moment-1:commentary", ["session-1"])).toBe(true);
-    expect(Buffer.concat(client.chunks).toString()).toBe("silencecue");
+    expect(Buffer.concat(client.chunks).toString()).toBe("silencecuecue");
   });
 
   it("drops a blocked client before backlog can grow without bound", () => {

@@ -2,10 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { TeamFlag } from "../../components/TeamFlag.js";
 import type { ProductCatalog } from "../../live-api.js";
-import {
-  enableMomentPush,
-  triggerTestMomentPush,
-} from "../../push-notifications.js";
+import { enableMomentPush } from "../../push-notifications.js";
 import {
   createExperienceRoomApi,
   type ExperienceCall,
@@ -227,20 +224,9 @@ export function ExperienceRoom({
       ) {
         throw new Error("Push unavailable");
       }
-      const registration = await enableMomentPush({
+      await enableMomentPush({
         applicationServerKey: config.applicationServerKey,
       });
-      if (room) {
-        await triggerTestMomentPush(registration.id, {
-          body: "Your Room alerts are ready. Match facts will arrive here while the PWA is closed.",
-          familyId: "readiness",
-          fixtureId: `experience:${room.experience.runId}`,
-          momentId: "readiness",
-          occurredAt: new Date().toISOString(),
-          revision: 1,
-          title: "EXPERIENCE ROOM — Alerts ready",
-        });
-      }
       setAlerts("enabled");
     } catch {
       setAlerts("unavailable");

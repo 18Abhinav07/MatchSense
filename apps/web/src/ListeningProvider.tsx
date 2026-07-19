@@ -182,11 +182,44 @@ export function ListeningProvider({ children }: { children: ReactNode }) {
   const stop = useCallback(async () => {
     const controller = controllerRef.current;
     if (!controller) return;
+    preparedInputRef.current = null;
     await controller.stop();
-    if (preparedInputRef.current) {
-      await controller.prepare(preparedInputRef.current);
-    }
   }, []);
+
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    const session = navigator.mediaSession;
+    try {
+      session.metadata = new MediaMetadata({
+        album: "World Cup match companion",
+        artist: "MatchSense commentary",
+        artwork: [
+          {
+            sizes: "512x512",
+            src: "/icons/matchsense-icon.svg",
+            type: "image/svg+xml",
+          },
+        ],
+        title: "MatchSense Listening Mode",
+      });
+      session.setActionHandler("play", () => void retry());
+      session.setActionHandler("pause", pause);
+      session.setActionHandler("stop", () => void stop());
+    } catch {
+      // Media Session is a progressive enhancement; the audio contract stays
+      // truthful when a browser declines these optional handlers.
+    }
+    return () => {
+      try {
+        session.setActionHandler("play", null);
+        session.setActionHandler("pause", null);
+        session.setActionHandler("stop", null);
+        session.playbackState = "none";
+      } catch {
+        // Some browsers expose Media Session but reject unsupported actions.
+      }
+    };
+  }, [pause, retry, stop]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
@@ -207,23 +240,17 @@ export function ListeningProvider({ children }: { children: ReactNode }) {
             ? "Live MatchSense commentary"
             : "MatchSense Listening Mode",
       });
-      session.setActionHandler("play", () => void retry());
-      session.setActionHandler("pause", pause);
-      session.setActionHandler("stop", () => void stop());
+      session.playbackState =
+        snapshot.state === "listening" || snapshot.state === "connecting"
+          ? "playing"
+          : snapshot.state === "paused"
+            ? "paused"
+            : "none";
     } catch {
-      // Media Session is a progressive enhancement; the audio contract stays
-      // truthful when a browser declines these optional handlers.
+      // Metadata and playback state are optional enhancements. Crucially this
+      // effect never removes handlers or clears Now Playing between states.
     }
-    return () => {
-      try {
-        session.setActionHandler("play", null);
-        session.setActionHandler("pause", null);
-        session.setActionHandler("stop", null);
-      } catch {
-        // Some browsers expose Media Session but reject unsupported actions.
-      }
-    };
-  }, [pause, retry, snapshot.state, stop]);
+  }, [snapshot.state]);
 
   const value = useMemo<ListeningContextValue>(
     () => ({ ...snapshot, announce, pause, prepare, retry, start, stop }),

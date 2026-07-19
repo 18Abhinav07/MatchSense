@@ -6,6 +6,11 @@ import type {
   CanonicalMoment,
   FixtureStreamEvent,
 } from "@matchsense/contracts";
+import {
+  createFixtureProjection,
+  reduceSourceFact,
+  toFixtureSnapshot,
+} from "@matchsense/event-engine";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -80,6 +85,125 @@ describe("canonical Moment to shared commentary", () => {
         kind: "phase.full_time",
       }),
     ).toBe(true);
+  });
+
+  it("retains real Experience speech for Match Memory and prepares its spoken intro", async () => {
+    const fixtureId = "experience:memory-audio";
+    const pipeline = createCommentaryPipeline({ env: {}, fetchImpl: vi.fn() });
+    const generateArtifact = pipeline.generate.bind(pipeline);
+    vi.spyOn(pipeline, "generate").mockImplementation(async (input) => {
+      const generated = await generateArtifact(input);
+      return {
+        ...generated,
+        artifact: {
+          ...generated.artifact,
+          provenance: {
+            ...generated.artifact.provenance,
+            speechFallbackReason: null,
+            speechProvider: "gemini" as const,
+          },
+        },
+      };
+    });
+    vi.spyOn(pipeline, "synthesize").mockResolvedValue({
+      bytes: Buffer.from("intro-wav"),
+      fallbackReason: null,
+      mimeType: "audio/wav",
+      model: "gemini-3.1-flash-tts-preview",
+      provider: "gemini",
+    });
+    const transcodeCommentary = vi.fn(async (bytes: Buffer) =>
+      Buffer.from(`mp3:${bytes.toString()}`),
+    );
+    const runtime = createProductRuntime({
+      commentaryPipeline: pipeline,
+      cueBytes: Buffer.from("goal-cue"),
+      fixture: {
+        awayTeam: "FRA",
+        fixtureId,
+        homeTeam: "ARG",
+        kickoffAt: "2026-07-16T18:00:00.000Z",
+        provenance: "synthetic_txline_shaped",
+      },
+      silenceBytes: Buffer.from("silence"),
+      transcodeCommentary,
+      writeIntervalMs: 60_000,
+    });
+    runtime.subscribeFixture(fixtureId, () => undefined);
+
+    expect(
+      runtime.acceptSourceFact(
+        canonicalFact(fixtureId, "memory-goal", {
+          provenance: "synthetic_txline_shaped",
+        }),
+      ).kind,
+    ).toBe("accepted");
+    await runtime.waitForCommentary();
+
+    expect(
+      runtime.commentaryAudio(fixtureId, "memory-goal:1")?.toString(),
+    ).toMatch(/^mp3:/u);
+    expect((await runtime.memoryIntroAudio(fixtureId))?.toString()).toBe(
+      "mp3:intro-wav",
+    );
+    expect(pipeline.synthesize).toHaveBeenCalledWith(
+      "Here is your MatchSense match summary.",
+      "Kore",
+    );
+    await runtime.close();
+
+    const restoredFact = canonicalFact(fixtureId, "restored-goal", {
+      provenance: "synthetic_txline_shaped",
+    });
+    const restored = reduceSourceFact(
+      createFixtureProjection({
+        awayTeam: "FRA",
+        fixtureId,
+        homeTeam: "ARG",
+        kickoffAt: "2026-07-16T18:00:00.000Z",
+        observedAt: restoredFact.receivedAt,
+        provenance: "synthetic_txline_shaped",
+      }),
+      restoredFact,
+    );
+    expect(restored.moment).not.toBeNull();
+    const restoredEvent: FixtureStreamEvent = {
+      event: "moment.created",
+      id: `${fixtureId}:revision:1`,
+      moment: restored.moment!,
+      snapshot: toFixtureSnapshot(restored.projection),
+    };
+    const recovered = createProductRuntime({
+      commentaryPipeline: pipeline,
+      cueBytes: Buffer.from("goal-cue"),
+      fixture: {
+        awayTeam: "FRA",
+        fixtureId,
+        homeTeam: "ARG",
+        kickoffAt: "2026-07-16T18:00:00.000Z",
+        provenance: "synthetic_txline_shaped",
+      },
+      silenceBytes: Buffer.from("silence"),
+      transcodeCommentary,
+      writeIntervalMs: 60_000,
+    });
+
+    recovered.registerFixture(
+      {
+        awayTeam: "FRA",
+        fixtureId,
+        homeTeam: "ARG",
+        kickoffAt: "2026-07-16T18:00:00.000Z",
+        provenance: "synthetic_txline_shaped",
+      },
+      { events: [restoredEvent], projection: restored.projection },
+    );
+    await recovered.waitForCommentary();
+
+    expect(
+      recovered.commentaryAudio(fixtureId, "restored-goal:1")?.toString(),
+    ).toMatch(/^mp3:/u);
+    await recovered.close();
   });
 
   it("prepares once, fans one generated call to every listener, and publishes its transcript", async () => {

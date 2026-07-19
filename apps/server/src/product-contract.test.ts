@@ -246,8 +246,8 @@ describe("first vertical product contract", () => {
     });
     expect(runtime.fixture("arg-fra-demo")).toEqual(firstSnapshot);
     expect(runtime.fixtureEvents("arg-fra-demo")).toHaveLength(1);
-    expect(requestingClient.chunks).toEqual(["silence", "cue", "cue"]);
-    expect(unrelatedClient.chunks).toEqual(["silence", "cue"]);
+    expect(requestingClient.chunks).toEqual(["silence", "cue", "cue", "cue"]);
+    expect(unrelatedClient.chunks).toEqual(["silence", "cue", "cue"]);
     runtime.close();
   });
 

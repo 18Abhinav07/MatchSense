@@ -986,6 +986,8 @@ describe("exact Moment resolver and Experience HTTP contract", () => {
       "/api/v1/experience/runs/route-run",
       "/api/v1/experience/runs/route-run/fixture",
       "/api/v1/experience/runs/route-run/moments/missing",
+      "/api/v1/experience/runs/route-run/moments/missing/audio",
+      "/api/v1/experience/runs/route-run/memory/intro.mp3",
       "/api/v1/experience/runs/route-run/stream",
       `/api/v1/listening-sessions/${listeningSessionId}`,
       `/api/v1/listening-sessions/${listeningSessionId}/stream.mp3`,

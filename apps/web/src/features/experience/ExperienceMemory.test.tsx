@@ -2,7 +2,136 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
-import { ExperienceMemory } from "./ExperienceMemory.js";
+import {
+  createExperienceMemoryReplayState,
+  experienceMemoryArtifactPath,
+  experienceMemoryIntroPath,
+  experienceMemoryReplayIsActive,
+  experienceMemoryReplayReducer,
+  ExperienceMemory,
+} from "./ExperienceMemory.js";
+
+describe("Experience Match Memory audio replay", () => {
+  it("advances cards only after the current commentary artifact ends", () => {
+    const ready = createExperienceMemoryReplayState(2);
+    const introLoading = experienceMemoryReplayReducer(ready, {
+      type: "start",
+    });
+    const introPlaying = experienceMemoryReplayReducer(introLoading, {
+      type: "audio_started",
+    });
+    const loading = experienceMemoryReplayReducer(introPlaying, {
+      type: "audio_ended",
+    });
+    const playing = experienceMemoryReplayReducer(loading, {
+      type: "audio_started",
+    });
+    const paused = experienceMemoryReplayReducer(playing, { type: "pause" });
+    const resumed = experienceMemoryReplayReducer(paused, { type: "resume" });
+
+    expect(introLoading).toEqual({
+      index: null,
+      phase: "loading",
+      segment: "intro",
+      total: 2,
+    });
+    expect(introPlaying).toMatchObject({
+      index: null,
+      phase: "playing",
+      segment: "intro",
+    });
+    expect(loading).toMatchObject({
+      index: 0,
+      phase: "loading",
+      segment: "moment",
+    });
+    expect(playing).toMatchObject({ index: 0, phase: "playing" });
+    expect(paused).toMatchObject({ index: 0, phase: "paused" });
+    expect(
+      experienceMemoryReplayReducer(paused, { type: "audio_unavailable" }),
+    ).toMatchObject({ index: 0, phase: "unavailable" });
+    expect(resumed).toMatchObject({ index: 0, phase: "playing" });
+    expect(
+      experienceMemoryReplayReducer(resumed, { type: "audio_ended" }),
+    ).toMatchObject({ index: 1, phase: "loading", segment: "moment" });
+  });
+
+  it("holds an unavailable artifact until the fan retries or explicitly skips it", () => {
+    const ready = createExperienceMemoryReplayState(2);
+    const intro = experienceMemoryReplayReducer(ready, { type: "start" });
+    const first = experienceMemoryReplayReducer(intro, { type: "skip" });
+    const unavailable = experienceMemoryReplayReducer(first, {
+      type: "audio_unavailable",
+    });
+
+    expect(unavailable).toMatchObject({
+      index: 0,
+      phase: "unavailable",
+      segment: "moment",
+      total: 2,
+    });
+    expect(
+      experienceMemoryReplayReducer(unavailable, { type: "retry" }),
+    ).toMatchObject({ index: 0, phase: "loading", segment: "moment" });
+    expect(
+      experienceMemoryReplayReducer(unavailable, { type: "skip" }),
+    ).toMatchObject({ index: 1, phase: "loading", segment: "moment" });
+  });
+
+  it("finishes only after the final artifact ends and can replay from the start", () => {
+    const last = {
+      index: 1,
+      phase: "playing" as const,
+      segment: "moment" as const,
+      total: 2,
+    };
+    const complete = experienceMemoryReplayReducer(last, {
+      type: "audio_ended",
+    });
+
+    expect(complete).toEqual({
+      index: null,
+      phase: "complete",
+      segment: null,
+      total: 2,
+    });
+    expect(experienceMemoryReplayReducer(complete, { type: "start" })).toEqual({
+      index: null,
+      phase: "loading",
+      segment: "intro",
+      total: 2,
+    });
+    expect(experienceMemoryReplayReducer(complete, { type: "close" })).toEqual({
+      index: null,
+      phase: "idle",
+      segment: null,
+      total: 2,
+    });
+  });
+
+  it("does not allow replay to restart while narration is active", () => {
+    expect(
+      experienceMemoryReplayIsActive({
+        index: 0,
+        phase: "playing",
+        segment: "moment",
+        total: 2,
+      }),
+    ).toBe(true);
+    expect(
+      experienceMemoryReplayIsActive(createExperienceMemoryReplayState(2)),
+    ).toBe(false);
+  });
+
+  it("uses the Experience server artifacts for the intro and each canonical revision", () => {
+    expect(experienceMemoryIntroPath("experience:run one")).toBe(
+      "/api/v1/experience/runs/run%20one/memory/intro.mp3",
+    );
+    expect(
+      experienceMemoryArtifactPath("experience:run one", "goal:one:3"),
+    ).toBe("/api/v1/experience/runs/run%20one/moments/goal%3Aone%3A3/audio");
+  });
+});
 
 describe("Experience Match Memory", () => {
   it("keeps the final facts, revisions, transcript and restart path together", () => {
@@ -60,5 +189,7 @@ describe("Experience Match Memory", () => {
     expect(markup).toContain("overturned · revision 2");
     expect(markup).toContain("No goal. The decision is overturned.");
     expect(markup).toContain("Start a new Experience");
+    expect(markup).toContain("Here is your MatchSense match summary.");
+    expect(markup).not.toContain("speechSynthesis");
   });
 });

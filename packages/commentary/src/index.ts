@@ -477,9 +477,17 @@ export function createCommentaryPipeline(options?: {
     return store.getOrCreate(cacheKey, () => generateArtifact(input, cacheKey));
   };
 
+  const synthesize = (transcript: string, voiceName = "Kore") =>
+    synthesizeGeminiSpeech(requiredText(transcript, "transcript"), voiceName, {
+      apiKey: env.GEMINI_API_KEY || env.GOOGLE_API_KEY,
+      fetchImpl,
+      timeoutMs: ttsTimeoutMs,
+    });
+
   return {
     find: (commentaryId: string) => store.findById(commentaryId),
     generate,
+    synthesize,
     status: () => store.status(),
   };
 }

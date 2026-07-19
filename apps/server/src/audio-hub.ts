@@ -135,7 +135,13 @@ export function createAudioHub(options: {
     });
     client.once?.("close", disconnect);
     client.once?.("error", disconnect);
+    // Send one complete silent frame group before the audible connection cue
+    // so decoders lock onto the stream contract before sound begins. The cue
+    // is intentional: iOS promotes an actually-audible HTML audio stream to
+    // Now Playing / lock-screen media controls, while an indefinitely silent
+    // stream can remain invisible even though bytes are being consumed.
     write(sessionId, options.silenceBytes);
+    write(sessionId, options.cueBytes);
     return true;
   };
 

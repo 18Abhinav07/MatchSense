@@ -554,6 +554,46 @@ function registerExperienceProductRoutes(
         : notFound(reply);
     },
   );
+  app.get<{ Params: { runId: string; identity: string } }>(
+    "/api/v1/experience/runs/:runId/moments/:identity/audio",
+    async (request, reply) => {
+      if (!(await requireRunAccess(request, reply, request.params.runId))) {
+        return;
+      }
+      const fixtureId = experienceFixtureId(request.params.runId);
+      const bytes = fixtureId
+        ? runtime.commentaryAudio(fixtureId, request.params.identity)
+        : null;
+      return bytes
+        ? reply
+            .header("Cache-Control", "no-store")
+            .header("Content-Disposition", "inline")
+            .header("Content-Type", "audio/mpeg")
+            .header("X-Content-Type-Options", "nosniff")
+            .send(bytes)
+        : reply.code(404).send({ error: "commentary_not_ready" });
+    },
+  );
+  app.get<{ Params: { runId: string } }>(
+    "/api/v1/experience/runs/:runId/memory/intro.mp3",
+    async (request, reply) => {
+      if (!(await requireRunAccess(request, reply, request.params.runId))) {
+        return;
+      }
+      const fixtureId = experienceFixtureId(request.params.runId);
+      const bytes = fixtureId
+        ? await runtime.memoryIntroAudio(fixtureId)
+        : null;
+      return bytes
+        ? reply
+            .header("Cache-Control", "private, max-age=300")
+            .header("Content-Disposition", "inline")
+            .header("Content-Type", "audio/mpeg")
+            .header("X-Content-Type-Options", "nosniff")
+            .send(bytes)
+        : reply.code(404).send({ error: "commentary_not_ready" });
+    },
+  );
   app.get<{ Params: { runId: string } }>(
     "/api/v1/experience/runs/:runId/timeline",
     async (request, reply) => {

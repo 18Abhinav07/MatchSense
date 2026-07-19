@@ -45,7 +45,14 @@ export interface StreamListeningController {
 export function createStreamListeningController(dependencies: {
   api: ListeningApi;
   audio: StreamAudioElement;
+  clearSchedule?: (timer: ReturnType<typeof setTimeout>) => void;
+  schedule?: (
+    callback: () => void,
+    delayMs: number,
+  ) => ReturnType<typeof setTimeout>;
 }): StreamListeningController {
+  const schedule = dependencies.schedule ?? setTimeout;
+  const clearSchedule = dependencies.clearSchedule ?? clearTimeout;
   const listeners = new Set<(snapshot: StreamListeningSnapshot) => void>();
   let error: string | null = null;
   let inputKey: string | null = null;
@@ -54,6 +61,9 @@ export function createStreamListeningController(dependencies: {
   let sessionId: string | null = null;
   let state: StreamListeningState = "stopped";
   let preparation = 0;
+  let reconnectAttempt = 0;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let wantsPlayback = false;
 
   const snapshot = (): StreamListeningSnapshot => ({
     commentaryPending: state === "connecting",
@@ -75,21 +85,42 @@ export function createStreamListeningController(dependencies: {
     notify();
   };
 
-  const onPlaying = () => setState("listening");
+  const cancelReconnect = () => {
+    if (reconnectTimer !== null) clearSchedule(reconnectTimer);
+    reconnectTimer = null;
+  };
+  const onPlaying = () => {
+    cancelReconnect();
+    reconnectAttempt = 0;
+    setState("listening");
+  };
   const onPause = () => {
+    if (state === "connecting" && wantsPlayback) return;
     if (state !== "stopped" && state !== "blocked") setState("paused");
   };
+  const reconnect = () => {
+    if (!wantsPlayback || reconnectTimer !== null) return;
+    setState("connecting");
+    const delayMs = Math.min(1_500 * 2 ** reconnectAttempt, 10_000);
+    reconnectAttempt += 1;
+    reconnectTimer = schedule(() => {
+      reconnectTimer = null;
+      if (!wantsPlayback) return;
+      void play(true, true);
+    }, delayMs);
+  };
   const onError = () => {
-    if (state !== "stopped") {
+    if (state === "stopped") return;
+    if (wantsPlayback) reconnect();
+    else
       setState("blocked", "The listening stream was interrupted. Tap resume.");
-    }
   };
 
   dependencies.audio.addEventListener("playing", onPlaying);
   dependencies.audio.addEventListener("pause", onPause);
   dependencies.audio.addEventListener("error", onError);
 
-  const play = async (reload: boolean) => {
+  const play = async (reload: boolean, automatic = false) => {
     if (!prepared || !sessionId || !dependencies.audio.getAttribute("src")) {
       setState("blocked", "Listening is not ready for this match yet.");
       return;
@@ -99,6 +130,11 @@ export function createStreamListeningController(dependencies: {
     try {
       await dependencies.audio.play();
     } catch (reason) {
+      if (automatic && wantsPlayback) {
+        reconnect();
+        return;
+      }
+      wantsPlayback = false;
       setState(
         "blocked",
         reason instanceof Error
@@ -117,6 +153,8 @@ export function createStreamListeningController(dependencies: {
 
     pause() {
       if (state === "stopped") return;
+      wantsPlayback = false;
+      cancelReconnect();
       dependencies.audio.pause();
       setState("paused");
     },
@@ -159,16 +197,24 @@ export function createStreamListeningController(dependencies: {
     },
 
     resumeFromGesture() {
+      wantsPlayback = true;
       return play(true);
     },
 
     snapshot,
 
     startFromGesture() {
-      return play(false);
+      // Reload synchronously inside the user's tap before play(). This keeps
+      // iOS' media activation tied to the gesture and joins the live stream
+      // from its current edge instead of a stale prepared connection.
+      wantsPlayback = true;
+      return play(true);
     },
 
     async stop() {
+      wantsPlayback = false;
+      cancelReconnect();
+      reconnectAttempt = 0;
       ++preparation;
       const released = sessionId;
       sessionId = null;

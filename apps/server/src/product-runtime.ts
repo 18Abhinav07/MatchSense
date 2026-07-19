@@ -114,7 +114,8 @@ export interface ProductSourceHealth {
 }
 
 export interface ProductRuntimeOptions {
-  commentaryPipeline?: Pick<CommentaryPipeline, "generate">;
+  commentaryPipeline?: Pick<CommentaryPipeline, "generate"> &
+    Partial<Pick<CommentaryPipeline, "synthesize">>;
   silenceBytes: Buffer;
   cueBytes: Buffer;
   fixture?: ProductFixture;
@@ -193,6 +194,11 @@ function createSingleFixtureRuntime(
     Promise<{ artifact: CommentaryArtifact; mp3Bytes: Buffer | null }>
   >();
   const commentaryMp3 = new Map<string, Buffer>();
+  const commentaryAudioByMomentIdentity = new Map<
+    string,
+    { bytes: Buffer; provider: "gemini" | "deterministic" }
+  >();
+  let memoryIntroPreparation: Promise<Buffer | null> | null = null;
   const pendingCommentary = new Set<Promise<void>>();
   let commentaryDeliveryTail: Promise<void> = Promise.resolve();
   let closed = false;
@@ -276,6 +282,15 @@ function createSingleFixtureRuntime(
           } catch {
             mp3Bytes = null;
           }
+        }
+        if (mp3Bytes) {
+          commentaryAudioByMomentIdentity.set(moment.identity, {
+            bytes: mp3Bytes,
+            provider:
+              artifact.provenance.speechProvider === "gemini"
+                ? "gemini"
+                : "deterministic",
+          });
         }
         return { artifact, mp3Bytes };
       });
@@ -364,6 +379,54 @@ function createSingleFixtureRuntime(
     trackCommentary(task);
   };
 
+  const prepareMemoryIntro = () => {
+    if (memoryIntroPreparation) return memoryIntroPreparation;
+    if (
+      !options.commentaryPipeline?.synthesize ||
+      !options.transcodeCommentary
+    ) {
+      memoryIntroPreparation = Promise.resolve(null);
+      return memoryIntroPreparation;
+    }
+    memoryIntroPreparation = options.commentaryPipeline
+      .synthesize("Here is your MatchSense match summary.", "Kore")
+      .then(async (speech) => {
+        if (speech.provider !== "gemini") return null;
+        return options.transcodeCommentary!(speech.bytes);
+      })
+      .catch(() => null);
+    return memoryIntroPreparation;
+  };
+
+  const isMemoryReplayMoment = (moment: CanonicalMoment) =>
+    moment.celebratesGoal ||
+    moment.kind.startsWith("var.") ||
+    moment.kind === "card.red" ||
+    moment.kind === "phase.full_time";
+
+  const rehydrateMemoryAudio = (events: readonly FixtureStreamEvent[]) => {
+    const seen = new Set<string>();
+    for (const event of events) {
+      const moment = event.moment;
+      if (
+        !moment ||
+        seen.has(moment.identity) ||
+        !isMemoryReplayMoment(moment)
+      ) {
+        continue;
+      }
+      seen.add(moment.identity);
+      const preparation = prepareCommentary(moment);
+      if (!preparation) continue;
+      trackCommentary(preparation.then(() => undefined).catch(() => undefined));
+    }
+    if (seen.size > 0) void prepareMemoryIntro();
+  };
+
+  if (options.initialEvents?.length) {
+    rehydrateMemoryAudio(options.initialEvents);
+  }
+
   const fixture = (fixtureId: string): FixtureSnapshot | null =>
     fixtureId === projection.fixtureId ? snapshot() : null;
 
@@ -385,6 +448,7 @@ function createSingleFixtureRuntime(
     };
     listeningSessions.set(session.id, session);
     prewarmReplayCommentary();
+    void prepareMemoryIntro();
     return session;
   };
 
@@ -895,6 +959,11 @@ function createSingleFixtureRuntime(
       closed = true;
       return audioHub.stop();
     },
+    commentaryAudio: (fixtureId: string, identity: string) => {
+      if (fixtureId !== projection.fixtureId) return null;
+      const audio = commentaryAudioByMomentIdentity.get(identity);
+      return audio?.provider === "gemini" ? Buffer.from(audio.bytes) : null;
+    },
     commandReplay,
     createListeningSession,
     createReplaySession: (fixtureId: string) => {
@@ -911,6 +980,12 @@ function createSingleFixtureRuntime(
     fixtures: () => [snapshot()],
     listeningSession: (sessionId: string) =>
       listeningSessions.get(sessionId) ?? null,
+    memoryIntroAudio: (fixtureId: string) =>
+      fixtureId === projection.fixtureId
+        ? prepareMemoryIntro().then((bytes) =>
+            bytes ? Buffer.from(bytes) : null,
+          )
+        : Promise.resolve(null),
     publishPersistedEvent: (
       event: FixtureStreamEvent,
       _delivery: { celebratesGoal?: boolean } = {},
@@ -958,6 +1033,7 @@ function createSingleFixtureRuntime(
         projection.fixtureId,
         events.map((event) => structuredClone(event)),
       );
+      rehydrateMemoryAudio(events);
     },
     resolveMoment,
     waitForCommentary: async () => {
@@ -1086,6 +1162,9 @@ export function createProductRuntime(options: ProductRuntimeOptions) {
         [...runtimes.values()].map((runtime) => runtime.close()),
       );
     },
+    commentaryAudio: (fixtureId: string, identity: string) =>
+      runtimeForFixture(fixtureId)?.commentaryAudio(fixtureId, identity) ??
+      null,
     commandReplay: (sessionId: string, command: ReplayCommand) =>
       replayOwners.get(sessionId)?.commandReplay(sessionId, command) ?? {
         kind: "missing" as const,
@@ -1123,6 +1202,9 @@ export function createProductRuntime(options: ProductRuntimeOptions) {
         .sort((left, right) => left.kickoffAt.localeCompare(right.kickoffAt)),
     listeningSession: (sessionId: string) =>
       listeningOwners.get(sessionId)?.listeningSession(sessionId) ?? null,
+    memoryIntroAudio: (fixtureId: string) =>
+      runtimeForFixture(fixtureId)?.memoryIntroAudio(fixtureId) ??
+      Promise.resolve(null),
     onFixtureRegistered: (subscriber: (fixtureId: string) => void) => {
       fixtureRegistrationSubscribers.add(subscriber);
       return () => fixtureRegistrationSubscribers.delete(subscriber);

@@ -1,10 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ProductCatalog } from "../../live-api.js";
-import {
-  enableMomentPush,
-  triggerTestMomentPush,
-} from "../../push-notifications.js";
+import { enableMomentPush } from "../../push-notifications.js";
 import type { LiveMoment, LiveSnapshot } from "../../product-state.js";
 import {
   createExperienceApi,
@@ -108,9 +105,6 @@ export function ExperienceJourney({
   const [pushState, setPushState] = useState<
     "idle" | "enabling" | "enabled" | "unavailable"
   >("idle");
-  const [pushRegistrationId, setPushRegistrationId] = useState<string | null>(
-    null,
-  );
 
   useEffect(() => {
     if (!runId) return;
@@ -266,10 +260,9 @@ export function ExperienceJourney({
       ) {
         throw new Error("Push is unavailable");
       }
-      const registration = await enableMomentPush({
+      await enableMomentPush({
         applicationServerKey: config.applicationServerKey,
       });
-      setPushRegistrationId(registration.id);
       setPushState("enabled");
     } catch {
       setPushState("unavailable");
@@ -282,17 +275,6 @@ export function ExperienceJourney({
     try {
       const next = await client.start(teams);
       setRun(next);
-      if (pushRegistrationId) {
-        await triggerTestMomentPush(pushRegistrationId, {
-          body: "Your five-minute match is starting. Real match events follow next.",
-          familyId: "readiness",
-          fixtureId: next.fixtureId,
-          momentId: "readiness",
-          occurredAt: new Date().toISOString(),
-          revision: 1,
-          title: "EXPERIENCE TEST ALERT — MatchSense is ready",
-        }).catch(() => undefined);
-      }
       onOpenRun(next.id);
     } catch (reason) {
       setError(
