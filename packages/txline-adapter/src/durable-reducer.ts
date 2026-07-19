@@ -268,6 +268,17 @@ export function productFactsFromTxlineUpdate(
       status: "confirmed",
       team: null,
     });
+  } else if (update.action === "kickoff" && current.phase === "half_time") {
+    facts.push({
+      ...common(update),
+      familyId,
+      kind: "phase.second_half_start",
+      minute,
+      player: null,
+      sourceEnvelopeId: sourceEnvelopeId(update),
+      status: "confirmed",
+      team: null,
+    });
   } else if (update.action === "var") {
     facts.push({
       ...common(update),

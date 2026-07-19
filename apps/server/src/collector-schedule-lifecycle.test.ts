@@ -446,6 +446,71 @@ describe("durable collector tournament schedule", () => {
     }
   });
 
+  it("restarts the source so history is reconciled when a fixture game state changes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-18T12:00:00.000Z"));
+    const scheduled = fixture({
+      fixtureId: "fixture-finishes",
+      gameState: 1,
+      sourceTimestampMs: 10,
+    });
+    const finished = fixture({
+      fixtureId: "fixture-finishes",
+      gameState: 3,
+      sourceTimestampMs: 10,
+    });
+    let currentScheduleReads = 0;
+    adapter.fetchSchedule.mockImplementation(
+      async (_client, options?: { startEpochDay?: number }) => {
+        if (options?.startEpochDay === tournamentStartEpochDay) {
+          return [finished];
+        }
+        currentScheduleReads += 1;
+        return currentScheduleReads === 1 ? [scheduled] : [finished];
+      },
+    );
+    const firstSource = abortableSource();
+    const secondSource = abortableSource();
+    adapter.createRawScoreSource
+      .mockReturnValueOnce(firstSource)
+      .mockReturnValueOnce(secondSource);
+    const database = {
+      archive: {},
+      fixtureTruth: {
+        observeFixtureSchedule: vi.fn(async () => ({
+          fixture: {} as never,
+          kind: "committed" as const,
+          metadataUpdated: true,
+        })),
+      },
+      sourceState: {
+        acquireLease: vi.fn(async () => liveLease()),
+        getCursor: vi.fn(async () => null),
+        releaseLease: vi.fn(async () => undefined),
+        renewLease: vi.fn(async () => liveLease()),
+      },
+      teamCatalog: { upsert: vi.fn(async () => undefined) },
+    };
+    const lifecycle = createDurableCollectorLifecycle({
+      database: database as never,
+      scheduleRefreshIntervalMs: 100,
+      txlineClient: {} as never,
+    });
+
+    try {
+      await lifecycle.start();
+      expect(adapter.createRawScoreSource).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(adapter.createRawScoreSource).toHaveBeenCalledTimes(2);
+      expect(firstSource.run).toHaveBeenCalledOnce();
+      expect(secondSource.run).toHaveBeenCalledOnce();
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
   it("does not overlap live lease renewals while a prior renewal is in flight", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-18T12:00:00.000Z"));

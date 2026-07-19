@@ -123,6 +123,34 @@ describe("durable TxLINE reduction", () => {
     });
   });
 
+  it("moves a half-time fixture into the second half on the next kickoff", () => {
+    const result = reduceDurableTxlineDelivery({
+      current: { ...current, minute: "HT", phase: "half_time" },
+      fixture,
+      metadata: {
+        delivery: "live",
+        provenance: "live_txline",
+        receivedAt: "2026-07-18T19:06:00.000Z",
+        sseEventId: "stream:13",
+      },
+      payload: scorePayload("kickoff", {
+        Clock: { Seconds: 2_700 },
+        Id: "second-half-kickoff",
+        Seq: "13",
+      }),
+    });
+
+    expect(result).toMatchObject({
+      facts: [
+        expect.objectContaining({
+          kind: "phase.second_half_start",
+          minute: "45'",
+        }),
+      ],
+      kind: "canonical",
+    });
+  });
+
   it("marks an amendment as an archive-invalidating canonical correction", () => {
     const result = reduceDurableTxlineDelivery({
       current,

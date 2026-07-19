@@ -327,6 +327,7 @@ export function createDurableCollectorLifecycle(input: {
           fixture.participant2.id,
           fixture.participant1IsHome ? "home" : "away",
           fixture.startTimeMs,
+          fixture.gameState,
         ].join(":"),
       )
       .join("|");
