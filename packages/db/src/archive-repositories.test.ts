@@ -648,10 +648,11 @@ describe("archive repository", () => {
     const replayQuery = fake.queries.find(({ query }) =>
       query.includes("FROM matchsense.archive_manifests"),
     );
-    expect(replayQuery?.query).toContain("grant.active = true");
-    expect(replayQuery?.query).toContain("grant.revoked_at IS NULL");
+    expect(replayQuery?.query).not.toContain("AS grant");
+    expect(replayQuery?.query).toContain("rights_grant.active = true");
+    expect(replayQuery?.query).toContain("rights_grant.revoked_at IS NULL");
     expect(replayQuery?.query).toContain(
-      "grant.scopes @> ARRAY['replay']::text[]",
+      "rights_grant.scopes @> ARRAY['replay']::text[]",
     );
   });
 

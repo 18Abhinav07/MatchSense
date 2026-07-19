@@ -762,7 +762,7 @@ SELECT job.fixture_id, job.claim_generation, job.claim_started_at,
   archive.verified_at
 FROM matchsense.archive_import_jobs AS job
 JOIN matchsense.archive_manifests AS archive ON archive.id = $1
-JOIN matchsense.rights_grants AS grant ON grant.id = archive.rights_grant_id
+JOIN matchsense.rights_grants AS rights_grant ON rights_grant.id = archive.rights_grant_id
 WHERE job.fixture_id = $3
   AND job.state = 'claimed'
   AND job.claimed_by = $4
@@ -775,10 +775,10 @@ WHERE job.fixture_id = $3
   AND archive.status = 'REPLAY_READY'
   AND archive.verified_at IS NOT NULL
   AND archive.verified_at >= job.claim_started_at
-  AND grant.active = true
-  AND grant.revoked_at IS NULL
-  AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())
-  AND grant.scopes @> ARRAY['replay']::text[]
+  AND rights_grant.active = true
+  AND rights_grant.revoked_at IS NULL
+  AND (rights_grant.expires_at IS NULL OR rights_grant.expires_at > clock_timestamp())
+  AND rights_grant.scopes @> ARRAY['replay']::text[]
 ON CONFLICT (fixture_id, claim_generation) DO UPDATE
 SET archive_manifest_id = output.archive_manifest_id
 WHERE output.claim_started_at = EXCLUDED.claim_started_at
@@ -819,7 +819,7 @@ SET state = 'replay_ready',
 FROM matchsense.archive_import_job_outputs AS output
 JOIN matchsense.archive_manifests AS archive
   ON archive.id = output.archive_manifest_id
-JOIN matchsense.rights_grants AS grant ON grant.id = archive.rights_grant_id
+JOIN matchsense.rights_grants AS rights_grant ON rights_grant.id = archive.rights_grant_id
 WHERE job.fixture_id = $1
   AND job.state = 'claimed'
   AND job.claimed_by = $2
@@ -837,10 +837,10 @@ WHERE job.fixture_id = $1
   AND archive.terminal_delivery_id = output.archive_terminal_delivery_id
   AND archive.verified_at = output.archive_verified_at
   AND archive.verified_at >= job.claim_started_at
-  AND grant.active = true
-  AND grant.revoked_at IS NULL
-  AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())
-  AND grant.scopes @> ARRAY['replay']::text[]
+  AND rights_grant.active = true
+  AND rights_grant.revoked_at IS NULL
+  AND (rights_grant.expires_at IS NULL OR rights_grant.expires_at > clock_timestamp())
+  AND rights_grant.scopes @> ARRAY['replay']::text[]
 RETURNING ${jobSelectColumns()};`,
         [input.fixtureId, input.workerId, input.claimGeneration],
       );
@@ -935,7 +935,7 @@ export function createFeaturedReplayRepository(
 )
 SELECT $1, $2, manifest.id, manifest.delivery_manifest_hash, $3
 FROM matchsense.archive_manifests AS manifest
-JOIN matchsense.rights_grants AS grant ON grant.id = manifest.rights_grant_id
+JOIN matchsense.rights_grants AS rights_grant ON rights_grant.id = manifest.rights_grant_id
 WHERE manifest.id = $4
   AND manifest.fixture_id = $2
   AND manifest.mode = 'recorded'
@@ -953,10 +953,10 @@ WHERE manifest.id = $4
       AND archive_job.archive_manifest_id = manifest.id
       AND archive_job.archive_manifest_hash = manifest.delivery_manifest_hash
   )
-  AND grant.active = true
-  AND grant.revoked_at IS NULL
-  AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())
-  AND grant.scopes @> ARRAY['replay']::text[]
+  AND rights_grant.active = true
+  AND rights_grant.revoked_at IS NULL
+  AND (rights_grant.expires_at IS NULL OR rights_grant.expires_at > clock_timestamp())
+  AND rights_grant.scopes @> ARRAY['replay']::text[]
 ON CONFLICT (slot) DO UPDATE
 SET fixture_id = EXCLUDED.fixture_id,
     archive_manifest_id = EXCLUDED.archive_manifest_id,
@@ -994,7 +994,7 @@ JOIN matchsense.archive_import_job_outputs AS output
   AND output.archive_manifest_hash = job.archive_manifest_hash
 JOIN matchsense.archive_manifests AS archive
   ON archive.id = config.archive_manifest_id
-JOIN matchsense.rights_grants AS grant ON grant.id = archive.rights_grant_id
+JOIN matchsense.rights_grants AS rights_grant ON rights_grant.id = archive.rights_grant_id
 WHERE config.slot = $1
   AND config.enabled = true
   AND job.state = 'replay_ready'
@@ -1004,10 +1004,10 @@ WHERE config.slot = $1
   AND archive.mode = 'recorded'
   AND archive.status = 'REPLAY_READY'
   AND archive.delivery_manifest_hash = config.archive_manifest_hash
-  AND grant.active = true
-  AND grant.revoked_at IS NULL
-  AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())
-  AND grant.scopes @> ARRAY['replay']::text[];`,
+  AND rights_grant.active = true
+  AND rights_grant.revoked_at IS NULL
+  AND (rights_grant.expires_at IS NULL OR rights_grant.expires_at > clock_timestamp())
+  AND rights_grant.scopes @> ARRAY['replay']::text[];`,
         [slot],
       );
       const row = rows[0];

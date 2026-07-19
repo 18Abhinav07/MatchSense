@@ -739,12 +739,12 @@ describe("archive import job repository", () => {
       "archive.terminal_delivery_id = output.archive_terminal_delivery_id",
     );
     expect(replayReady?.query).toContain(
-      "JOIN matchsense.rights_grants AS grant",
+      "JOIN matchsense.rights_grants AS rights_grant",
     );
-    expect(replayReady?.query).toContain("grant.active = true");
-    expect(replayReady?.query).toContain("grant.revoked_at IS NULL");
+    expect(replayReady?.query).toContain("rights_grant.active = true");
+    expect(replayReady?.query).toContain("rights_grant.revoked_at IS NULL");
     expect(replayReady?.query).toContain(
-      "grant.scopes @> ARRAY['replay']::text[]",
+      "rights_grant.scopes @> ARRAY['replay']::text[]",
     );
   });
 
@@ -1009,15 +1009,15 @@ describe("featured replay repository", () => {
       "archive.delivery_manifest_hash = config.archive_manifest_hash",
     );
     expect(readiness?.query).toContain(
-      "JOIN matchsense.rights_grants AS grant",
+      "JOIN matchsense.rights_grants AS rights_grant",
     );
-    expect(readiness?.query).toContain("grant.active = true");
-    expect(readiness?.query).toContain("grant.revoked_at IS NULL");
+    expect(readiness?.query).toContain("rights_grant.active = true");
+    expect(readiness?.query).toContain("rights_grant.revoked_at IS NULL");
     expect(readiness?.query).toContain(
-      "(grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())",
+      "(rights_grant.expires_at IS NULL OR rights_grant.expires_at > clock_timestamp())",
     );
     expect(readiness?.query).toContain(
-      "grant.scopes @> ARRAY['replay']::text[]",
+      "rights_grant.scopes @> ARRAY['replay']::text[]",
     );
   });
 
@@ -1047,13 +1047,13 @@ describe("featured replay repository", () => {
     expect(configure?.query).toContain("manifest.fixture_id = $2");
     expect(configure?.query).toContain("manifest.mode = 'recorded'");
     expect(configure?.query).toContain("manifest.status = 'REPLAY_READY'");
-    expect(configure?.query).toContain("grant.active = true");
-    expect(configure?.query).toContain("grant.revoked_at IS NULL");
+    expect(configure?.query).toContain("rights_grant.active = true");
+    expect(configure?.query).toContain("rights_grant.revoked_at IS NULL");
     expect(configure?.query).toContain(
-      "(grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())",
+      "(rights_grant.expires_at IS NULL OR rights_grant.expires_at > clock_timestamp())",
     );
     expect(configure?.query).toContain(
-      "grant.scopes @> ARRAY['replay']::text[]",
+      "rights_grant.scopes @> ARRAY['replay']::text[]",
     );
   });
 });

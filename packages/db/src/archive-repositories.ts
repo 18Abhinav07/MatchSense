@@ -804,15 +804,15 @@ WHERE mode = $1 AND fixture_id = $2 AND status = 'REPLAY_READY';`,
       const rows = await client.unsafe(
         `SELECT ${manifestSelectColumns}
 FROM matchsense.archive_manifests AS manifest
-JOIN matchsense.rights_grants AS grant ON grant.id = manifest.rights_grant_id
+JOIN matchsense.rights_grants AS rights_grant ON rights_grant.id = manifest.rights_grant_id
 WHERE manifest.mode = $1
   AND manifest.fixture_id = $2
   AND manifest.status = 'REPLAY_READY'
   AND (${currentRecordedArchiveImportBinding()})
-  AND grant.active = true
-  AND grant.revoked_at IS NULL
-  AND (grant.expires_at IS NULL OR grant.expires_at > clock_timestamp())
-  AND grant.scopes @> ARRAY['replay']::text[]
+  AND rights_grant.active = true
+  AND rights_grant.revoked_at IS NULL
+  AND (rights_grant.expires_at IS NULL OR rights_grant.expires_at > clock_timestamp())
+  AND rights_grant.scopes @> ARRAY['replay']::text[]
 ORDER BY manifest.verified_at DESC, manifest.id ASC
 LIMIT 1;`,
         [input.mode, input.fixtureId],
