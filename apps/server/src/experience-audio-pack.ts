@@ -1,11 +1,5 @@
 import { createHash } from "node:crypto";
-import {
-  closeSync,
-  constants,
-  fstatSync,
-  openSync,
-  readFileSync,
-} from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import path from "node:path";
 
 import type { CanonicalMoment } from "@matchsense/contracts";
@@ -204,7 +198,26 @@ function readBoundedRegularFile(input: {
     if (stat.size > maxBytes) {
       throw new Error(`${label} is too large (maximum ${maxBytes} bytes)`);
     }
-    return readFileSync(descriptor);
+    const bytes = Buffer.allocUnsafe(maxBytes + 1);
+    let bytesRead = 0;
+    while (bytesRead < bytes.length) {
+      const count = readSync(
+        descriptor,
+        bytes,
+        bytesRead,
+        bytes.length - bytesRead,
+        null,
+      );
+      if (count === 0) break;
+      bytesRead += count;
+    }
+    if (bytesRead === 0) {
+      throw new Error(`${label} must not be empty`);
+    }
+    if (bytesRead > maxBytes) {
+      throw new Error(`${label} is too large (maximum ${maxBytes} bytes)`);
+    }
+    return Buffer.from(bytes.subarray(0, bytesRead));
   } finally {
     if (descriptor !== null) closeSync(descriptor);
   }
