@@ -137,6 +137,45 @@ describe("durable TxLINE collector", () => {
     ).resolves.toMatchObject({ kind: "committed" });
   });
 
+  it("uses a stable recovery identity for an authoritative historical terminal", async () => {
+    const identities: Array<{ dedupeKey: string; id: string }> = [];
+    const repository: Pick<FixtureTruthRepository, "commitCollectorFrame"> = {
+      commitCollectorFrame: vi.fn(async (input) => {
+        const delivery = input.deliveries[0]!;
+        identities.push({
+          dedupeKey: delivery.raw.dedupeKey,
+          id: delivery.raw.id,
+        });
+        return {
+          deliveries: [{ kind: "accepted_no_change" as const }],
+          kind: "committed" as const,
+        };
+      }),
+    };
+    const collector = createTxlineCollector({
+      fixtureForId: () => fixture,
+      fixtureTruth: repository,
+      rightsGrantId: "grant-1",
+      sourceFence: fence,
+    });
+    const terminal = {
+      ...goalPayload(),
+      Action: "game_finalised",
+      Confirmed: undefined,
+      Id: "provider-terminal-1026",
+      StatusId: 100,
+    };
+
+    await collector.ingest(raw(terminal));
+    await collector.ingest(raw(terminal, "reconciliation"));
+    await collector.ingest(raw(terminal, "reconciliation"));
+
+    expect(identities[0]).not.toEqual(identities[1]);
+    expect(identities[1]).toEqual(identities[2]);
+    expect(identities[1]?.id).toContain("terminal-recovery");
+    expect(identities[1]?.dedupeKey).toContain("terminal-recovery");
+  });
+
   it("persists a realtime raw goal before deriving its fan-facing canonical outbox work", async () => {
     const repository: Pick<FixtureTruthRepository, "commitCollectorFrame"> = {
       commitCollectorFrame: vi.fn(async (input) => {

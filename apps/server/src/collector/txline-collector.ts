@@ -89,17 +89,21 @@ function rawFor(
   },
   fixture: CollectorFixtureDefinition,
   options: TxlineCollectorOptions,
+  identityLane?: "terminal-recovery",
 ): RawSourceRecordWrite {
   const key = [
     fixture.fixtureId,
     source.observedSeq ?? source.actionId ?? "no-provider-id",
     source.payloadHash,
+    ...(identityLane ? [identityLane] : []),
   ].join(":");
   return {
     canonicalEligible: true,
     dedupeKey: key,
     deliveryIntent: deliveryIntent(record),
-    id: `txline:delivery:${fixture.fixtureId}:${source.payloadHash}`,
+    id: `txline:delivery:${fixture.fixtureId}:${source.payloadHash}${
+      identityLane ? `:${identityLane}` : ""
+    }`,
     occurredAt: occurredAt(source.sourceTimestampMs),
     orderingKey: orderingKey(source),
     payload: record.payload,
@@ -115,6 +119,22 @@ function rawFor(
     sourceSequence: source.observedSeq,
     streamKey: options.sourceFence.streamKey,
   };
+}
+
+function identityLaneFor(
+  record: TxlineRawRecord,
+  reduction: DurableTxlineReduction,
+): "terminal-recovery" | undefined {
+  if (
+    record.metadata.delivery === "reconciliation" &&
+    reduction.kind === "canonical" &&
+    reduction.update.action === "game_finalised" &&
+    reduction.update.statusId === 100 &&
+    reduction.update.confirmed !== false
+  ) {
+    return "terminal-recovery";
+  }
+  return undefined;
 }
 
 function sourceFor(reduction: DurableTxlineReduction, payload: unknown) {
@@ -247,6 +267,7 @@ export function createTxlineCollector(options: TxlineCollectorOptions) {
       sourceFor(reduction, record.payload),
       fixture,
       options,
+      identityLaneFor(record, reduction),
     );
     raw.canonicalEligible = reduction.kind !== "source_only";
 
