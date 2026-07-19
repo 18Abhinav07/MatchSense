@@ -61,6 +61,8 @@ export function createStreamListeningController(dependencies: {
   let sessionId: string | null = null;
   let state: StreamListeningState = "stopped";
   let preparation = 0;
+  let abortRetryAttempt = 0;
+  let abortRetryTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempt = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let wantsPlayback = false;
@@ -89,8 +91,14 @@ export function createStreamListeningController(dependencies: {
     if (reconnectTimer !== null) clearSchedule(reconnectTimer);
     reconnectTimer = null;
   };
+  const cancelAbortRetry = () => {
+    if (abortRetryTimer !== null) clearSchedule(abortRetryTimer);
+    abortRetryTimer = null;
+  };
   const onPlaying = () => {
+    cancelAbortRetry();
     cancelReconnect();
+    abortRetryAttempt = 0;
     reconnectAttempt = 0;
     setState("listening");
   };
@@ -100,13 +108,15 @@ export function createStreamListeningController(dependencies: {
   };
   const reconnect = () => {
     if (!wantsPlayback || reconnectTimer !== null) return;
+    cancelAbortRetry();
+    abortRetryAttempt = 0;
     setState("connecting");
     const delayMs = Math.min(1_500 * 2 ** reconnectAttempt, 10_000);
     reconnectAttempt += 1;
     reconnectTimer = schedule(() => {
       reconnectTimer = null;
       if (!wantsPlayback) return;
-      void play(true, true);
+      void play(true);
     }, delayMs);
   };
   const onError = () => {
@@ -127,7 +137,13 @@ export function createStreamListeningController(dependencies: {
   dependencies.audio.addEventListener("ended", reconnect);
   dependencies.audio.addEventListener("waiting", onWaiting);
 
-  const play = async (reload: boolean, automatic = false) => {
+  const isAbortError = (reason: unknown) =>
+    typeof reason === "object" &&
+    reason !== null &&
+    "name" in reason &&
+    reason.name === "AbortError";
+
+  const play = async (reload: boolean) => {
     if (!prepared || !sessionId || !dependencies.audio.getAttribute("src")) {
       setState("blocked", "Listening is not ready for this match yet.");
       return;
@@ -137,8 +153,17 @@ export function createStreamListeningController(dependencies: {
     try {
       await dependencies.audio.play();
     } catch (reason) {
-      if (automatic && wantsPlayback) {
-        reconnect();
+      if (
+        isAbortError(reason) &&
+        wantsPlayback &&
+        abortRetryAttempt < 1 &&
+        abortRetryTimer === null
+      ) {
+        abortRetryAttempt += 1;
+        abortRetryTimer = schedule(() => {
+          abortRetryTimer = null;
+          if (wantsPlayback) void play(false);
+        }, 250);
         return;
       }
       wantsPlayback = false;
@@ -161,6 +186,7 @@ export function createStreamListeningController(dependencies: {
     pause() {
       if (state === "stopped") return;
       wantsPlayback = false;
+      cancelAbortRetry();
       cancelReconnect();
       dependencies.audio.pause();
       setState("paused");
@@ -170,6 +196,8 @@ export function createStreamListeningController(dependencies: {
       const nextKey = `${input.fixtureId}:${input.perspectiveTeam}`;
       if (prepared && inputKey === nextKey) return;
       const token = ++preparation;
+      cancelAbortRetry();
+      abortRetryAttempt = 0;
       const previousSession = sessionId;
       sessionId = null;
       prepared = false;
@@ -220,6 +248,7 @@ export function createStreamListeningController(dependencies: {
 
     async stop() {
       wantsPlayback = false;
+      cancelAbortRetry();
       cancelReconnect();
       reconnectAttempt = 0;
       ++preparation;

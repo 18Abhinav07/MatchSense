@@ -168,10 +168,10 @@ describe("Experience audio pack generator", () => {
       homeTeam: "ARG",
       locale: "en",
       stream: {
-        bitrateKbps: 64,
+        bitrateKbps: 48,
         channels: 1,
         codec: "mp3",
-        sampleRateHz: 44_100,
+        sampleRateHz: 24_000,
       },
       templateId: "five-minute-match",
       templateVersion: 3,

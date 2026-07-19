@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  createFixtureListeningLease,
   createArtifactListeningController,
   type ArtifactAudioElement,
 } from "./ListeningProvider.js";
@@ -195,5 +196,31 @@ describe("artifact listening controller", () => {
 
     expect(audio.play).toHaveBeenCalledOnce();
     expect(controller.snapshot().state).toBe("speaking");
+  });
+});
+
+describe("persistent stream ownership", () => {
+  it("does not stop during a same-fixture StrictMode or route remount", async () => {
+    const deferredReleases: Array<() => void> = [];
+    const prepare = vi.fn(async () => undefined);
+    const stop = vi.fn(async () => undefined);
+    const lease = createFixtureListeningLease({
+      defer: (release) => deferredReleases.push(release),
+      prepare,
+      stop,
+    });
+    const input = { fixtureId: "arg-fra", perspectiveTeam: "ARG" };
+
+    const firstRelease = lease.acquire(input);
+    firstRelease();
+    const finalRelease = lease.acquire(input);
+    deferredReleases.shift()!();
+
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(stop).not.toHaveBeenCalled();
+
+    finalRelease();
+    deferredReleases.shift()!();
+    expect(stop).toHaveBeenCalledOnce();
   });
 });

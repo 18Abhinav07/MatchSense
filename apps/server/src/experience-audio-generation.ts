@@ -66,10 +66,10 @@ export interface ExperienceAudioManifest {
   homeTeam: "ARG";
   locale: "en";
   stream: {
-    bitrateKbps: 64;
+    bitrateKbps: 48;
     channels: 1;
     codec: "mp3";
-    sampleRateHz: 44_100;
+    sampleRateHz: 24_000;
   };
   templateId: "five-minute-match";
   templateVersion: 3;
@@ -242,12 +242,12 @@ export function validateExperienceAudioGenerationTargets(
 function requireStreamContract(bytes: Buffer) {
   const contract = inspectMp3(bytes);
   if (
-    contract.bitrateKbps !== 64 ||
+    contract.bitrateKbps !== 48 ||
     contract.channels !== 1 ||
-    contract.sampleRateHz !== 44_100
+    contract.sampleRateHz !== 24_000
   ) {
     throw new Error(
-      "Experience audio reference must be mono 44.1 kHz 64 kbps MP3",
+      "Experience audio reference must be mono 24 kHz 48 kbps MP3",
     );
   }
   return contract;
@@ -499,10 +499,10 @@ export async function generateExperienceAudioPack(
       homeTeam: EXPERIENCE_HOME_TEAM as "ARG",
       locale: "en",
       stream: {
-        bitrateKbps: 64,
+        bitrateKbps: 48,
         channels: 1,
         codec: "mp3",
-        sampleRateHz: 44_100,
+        sampleRateHz: 24_000,
       },
       templateId: EXPERIENCE_TEMPLATE_ID,
       templateVersion: EXPERIENCE_TEMPLATE_VERSION,

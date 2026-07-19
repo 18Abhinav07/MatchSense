@@ -129,15 +129,15 @@ const WORLD_CUP_CATALOG_START_EPOCH_DAY = Math.floor(
   Date.UTC(2026, 5, 11) / 86_400_000,
 );
 const COMMENTARY_MP3_CONTRACT: Mp3Contract = {
-  bitrateKbps: 64,
+  bitrateKbps: 48,
   byteLength: 0,
   channels: 1,
   durationMs: 0,
   frameCount: 0,
   layer: 3,
-  sampleRateHz: 44_100,
-  samplesPerFrame: 1_152,
-  version: 1,
+  sampleRateHz: 24_000,
+  samplesPerFrame: 576,
+  version: 2,
 };
 
 function newestScheduleFixtures(fixtures: readonly TxlineScheduleFixture[]) {

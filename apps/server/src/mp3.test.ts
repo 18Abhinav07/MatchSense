@@ -20,8 +20,8 @@ describe("generated MP3 fixtures", () => {
     const cue = inspectMp3(cueBytes);
 
     expect(silence.channels).toBe(1);
-    expect(silence.bitrateKbps).toBe(64);
-    expect(silence.sampleRateHz).toBe(44_100);
+    expect(silence.bitrateKbps).toBe(48);
+    expect(silence.sampleRateHz).toBe(24_000);
     expect(silence.durationMs).toBeGreaterThan(900);
     expect(() => assertCompatibleMp3Streams(silence, cue)).not.toThrow();
     expect(resolveMp3WriteIntervalMs(silence)).toBe(

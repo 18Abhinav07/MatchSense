@@ -24,7 +24,8 @@ describe("ListeningControl", () => {
       ),
     );
 
-    expect(markup).toContain("Start listening");
     expect(markup).toContain("Audio starts only after you tap");
+    expect(markup).toContain("disabled=\"\"");
+    expect(markup).toContain("Start listening");
   });
 });

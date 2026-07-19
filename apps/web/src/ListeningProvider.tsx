@@ -85,7 +85,56 @@ export function decidePreparationRelease(input: {
   };
 }
 
+interface FixtureListeningLease {
+  acquire(input: {
+    fixtureId: string;
+    perspectiveTeam: string;
+  }): () => void;
+}
+
+export function createFixtureListeningLease(dependencies: {
+  defer?: (release: () => void) => void;
+  prepare(input: {
+    fixtureId: string;
+    perspectiveTeam: string;
+  }): Promise<void>;
+  stop(): Promise<void>;
+}): FixtureListeningLease {
+  const defer = dependencies.defer ?? queueMicrotask;
+  const holders = new Map<string, number>();
+  let activeKey: string | null = null;
+
+  return {
+    acquire(input) {
+      const key = `${input.fixtureId}:${input.perspectiveTeam}`;
+      const alreadyActive = activeKey === key;
+      const existing = holders.get(key) ?? 0;
+      holders.set(key, existing + 1);
+      activeKey = key;
+      if (!alreadyActive) void dependencies.prepare(input);
+
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        holders.set(key, Math.max((holders.get(key) ?? 1) - 1, 0));
+        defer(() => {
+          if ((holders.get(key) ?? 0) > 0) return;
+          holders.delete(key);
+          if (activeKey !== key) return;
+          activeKey = null;
+          void dependencies.stop();
+        });
+      };
+    },
+  };
+}
+
 interface ListeningContextValue extends StreamListeningSnapshot {
+  acquire(input: {
+    fixtureId: string;
+    perspectiveTeam: string;
+  }): () => void;
   announce(moment: ListeningMoment): void;
   pause(): void;
   prepare(input: { fixtureId: string; perspectiveTeam: string }): Promise<void>;
@@ -104,6 +153,7 @@ const STOPPED_SNAPSHOT: StreamListeningSnapshot = {
 
 const DEFAULT_CONTEXT: ListeningContextValue = {
   ...STOPPED_SNAPSHOT,
+  acquire: () => () => undefined,
   announce: () => undefined,
   pause: () => undefined,
   prepare: async () => undefined,
@@ -132,6 +182,10 @@ function asStreamAudioElement(audio: HTMLAudioElement): StreamAudioElement {
 export function ListeningProvider({ children }: { children: ReactNode }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const controllerRef = useRef<StreamListeningController | null>(null);
+  const fixtureLeaseRef = useRef<FixtureListeningLease | null>(null);
+  const mediaSessionConfiguredRef = useRef(false);
+  const mediaSessionGenerationRef = useRef(0);
+  const providerGenerationRef = useRef(0);
   const preparedInputRef = useRef<{
     fixtureId: string;
     perspectiveTeam: string;
@@ -140,21 +194,43 @@ export function ListeningProvider({ children }: { children: ReactNode }) {
     useState<StreamListeningSnapshot>(STOPPED_SNAPSHOT);
 
   useLayoutEffect(() => {
+    const generation = ++providerGenerationRef.current;
     const audio = audioRef.current;
     if (!audio) return;
-    const controller = createStreamListeningController({
-      api: createListeningApi(),
-      audio: asStreamAudioElement(audio),
+    const controller =
+      controllerRef.current ??
+      createStreamListeningController({
+        api: createListeningApi(),
+        audio: asStreamAudioElement(audio),
+      });
+    controllerRef.current ??= controller;
+    fixtureLeaseRef.current ??= createFixtureListeningLease({
+      prepare: (input) => {
+        preparedInputRef.current = input;
+        return controller.prepare(input);
+      },
+      stop: async () => {
+        preparedInputRef.current = null;
+        await controller.stop();
+      },
     });
-    controllerRef.current = controller;
     const unsubscribe = controller.subscribe(setSnapshot);
     return () => {
       unsubscribe();
-      void controller.stop();
-      controllerRef.current = null;
+      queueMicrotask(() => {
+        if (providerGenerationRef.current !== generation) return;
+        void controller.stop();
+        controllerRef.current = null;
+        fixtureLeaseRef.current = null;
+      });
     };
   }, []);
 
+  const acquire = useCallback(
+    (input: { fixtureId: string; perspectiveTeam: string }) =>
+      fixtureLeaseRef.current?.acquire(input) ?? (() => undefined),
+    [],
+  );
   const announce = useCallback((moment: ListeningMoment) => {
     controllerRef.current?.announce(moment);
   }, []);
@@ -188,73 +264,50 @@ export function ListeningProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
+    const generation = ++mediaSessionGenerationRef.current;
     const session = navigator.mediaSession;
-    try {
-      session.metadata = new MediaMetadata({
-        album: "World Cup match companion",
-        artist: "MatchSense commentary",
-        artwork: [
-          {
-            sizes: "512x512",
-            src: "/icons/matchsense-icon.svg",
-            type: "image/svg+xml",
-          },
-        ],
-        title: "MatchSense Listening Mode",
-      });
-      session.setActionHandler("play", () => void retry());
-      session.setActionHandler("pause", pause);
-      session.setActionHandler("stop", () => void stop());
-    } catch {
-      // Media Session is a progressive enhancement; the audio contract stays
-      // truthful when a browser declines these optional handlers.
+    if (!mediaSessionConfiguredRef.current) {
+      try {
+        session.metadata = new MediaMetadata({
+          album: "World Cup match companion",
+          artist: "MatchSense commentary",
+          artwork: [
+            {
+              sizes: "512x512",
+              src: "/icons/matchsense-icon.svg",
+              type: "image/svg+xml",
+            },
+          ],
+          title: "MatchSense Listening Mode",
+        });
+        session.setActionHandler("play", () => void retry());
+        session.setActionHandler("pause", pause);
+        session.setActionHandler("stop", () => void stop());
+        mediaSessionConfiguredRef.current = true;
+      } catch {
+        // Media Session is a progressive enhancement; the audio contract stays
+        // truthful when a browser declines these optional handlers.
+      }
     }
     return () => {
-      try {
-        session.setActionHandler("play", null);
-        session.setActionHandler("pause", null);
-        session.setActionHandler("stop", null);
-        session.playbackState = "none";
-      } catch {
-        // Some browsers expose Media Session but reject unsupported actions.
-      }
+      queueMicrotask(() => {
+        if (mediaSessionGenerationRef.current !== generation) return;
+        try {
+          session.setActionHandler("play", null);
+          session.setActionHandler("pause", null);
+          session.setActionHandler("stop", null);
+          session.playbackState = "none";
+          mediaSessionConfiguredRef.current = false;
+        } catch {
+          // Some browsers expose Media Session but reject unsupported actions.
+        }
+      });
     };
   }, [pause, retry, stop]);
 
-  useEffect(() => {
-    if (!("mediaSession" in navigator)) return;
-    const session = navigator.mediaSession;
-    try {
-      session.metadata = new MediaMetadata({
-        album: "World Cup match companion",
-        artist: "MatchSense commentary",
-        artwork: [
-          {
-            sizes: "512x512",
-            src: "/icons/matchsense-icon.svg",
-            type: "image/svg+xml",
-          },
-        ],
-        title:
-          snapshot.state === "listening"
-            ? "Live MatchSense commentary"
-            : "MatchSense Listening Mode",
-      });
-      session.playbackState =
-        snapshot.state === "listening" || snapshot.state === "connecting"
-          ? "playing"
-          : snapshot.state === "paused"
-            ? "paused"
-            : "none";
-    } catch {
-      // Metadata and playback state are optional enhancements. Crucially this
-      // effect never removes handlers or clears Now Playing between states.
-    }
-  }, [snapshot.state]);
-
   const value = useMemo<ListeningContextValue>(
-    () => ({ ...snapshot, announce, pause, prepare, retry, start, stop }),
-    [announce, pause, prepare, retry, snapshot, start, stop],
+    () => ({ ...snapshot, acquire, announce, pause, prepare, retry, start, stop }),
+    [acquire, announce, pause, prepare, retry, snapshot, start, stop],
   );
 
   return (

@@ -5,7 +5,7 @@ import {
   type StreamAudioElement,
 } from "./stream-listening.js";
 
-function audioFixture() {
+function audioFixture(options: { play?: () => Promise<void> } = {}) {
   const listeners = new Map<string, Set<() => void>>();
   let source: string | null = null;
   const audio: StreamAudioElement = {
@@ -17,7 +17,7 @@ function audioFixture() {
     getAttribute: (name) => (name === "src" ? source : null),
     load: vi.fn(),
     pause: vi.fn(),
-    play: vi.fn(async () => undefined),
+    play: vi.fn(options.play ?? (async () => undefined)),
     removeAttribute: vi.fn((name) => {
       if (name === "src") source = null;
     }),
@@ -270,5 +270,87 @@ describe("continuous Pocket Listening controller", () => {
     expect(controller.snapshot().state).toBe("connecting");
     emit("playing");
     expect(controller.snapshot().state).toBe("listening");
+  });
+
+  it("keeps playback intent and retries one WebKit AbortError on the same element", async () => {
+    const abort = Object.assign(new Error("The operation was aborted"), {
+      name: "AbortError",
+    });
+    const play = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(abort)
+      .mockResolvedValueOnce(undefined);
+    const { audio, emit } = audioFixture({ play });
+    const scheduled: Array<() => void> = [];
+    const schedule = vi.fn((callback: () => void) => {
+      scheduled.push(callback);
+      return 23 as unknown as ReturnType<typeof setTimeout>;
+    });
+    const controller = createStreamListeningController({
+      api: {
+        create: vi.fn(async () => ({ id: "listen-1" })),
+        remove: vi.fn(async () => undefined),
+        streamUrl: (id: string) => `/stream/${id}`,
+      },
+      audio,
+      schedule,
+    });
+    await controller.prepare(input);
+    vi.mocked(audio.setAttribute).mockClear();
+
+    await controller.startFromGesture();
+
+    expect(controller.snapshot()).toMatchObject({
+      error: null,
+      state: "connecting",
+    });
+    expect(schedule).toHaveBeenCalledOnce();
+    expect(audio.load).not.toHaveBeenCalled();
+    expect(audio.setAttribute).not.toHaveBeenCalled();
+
+    scheduled[0]!();
+    await vi.waitFor(() => expect(play).toHaveBeenCalledTimes(2));
+    emit("playing");
+
+    expect(controller.snapshot().state).toBe("listening");
+    expect(audio.load).not.toHaveBeenCalled();
+    expect(audio.setAttribute).not.toHaveBeenCalled();
+  });
+
+  it("bounds the same-element AbortError retry instead of looping forever", async () => {
+    const abort = Object.assign(new Error("The operation was aborted"), {
+      name: "AbortError",
+    });
+    const { audio } = audioFixture({
+      play: vi.fn(async () => Promise.reject(abort)),
+    });
+    const scheduled: Array<() => void> = [];
+    const schedule = vi.fn((callback: () => void) => {
+      scheduled.push(callback);
+      return 29 as unknown as ReturnType<typeof setTimeout>;
+    });
+    const controller = createStreamListeningController({
+      api: {
+        create: vi.fn(async () => ({ id: "listen-1" })),
+        remove: vi.fn(async () => undefined),
+        streamUrl: (id: string) => `/stream/${id}`,
+      },
+      audio,
+      schedule,
+    });
+    await controller.prepare(input);
+
+    await controller.startFromGesture();
+    scheduled[0]!();
+    await vi.waitFor(() =>
+      expect(controller.snapshot().state).toBe("blocked"),
+    );
+
+    expect(audio.play).toHaveBeenCalledTimes(2);
+    expect(schedule).toHaveBeenCalledOnce();
+    expect(controller.snapshot()).toMatchObject({
+      error: "The operation was aborted",
+      state: "blocked",
+    });
   });
 });

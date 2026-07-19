@@ -20,6 +20,12 @@ interface ClientState {
   disconnect: (() => void) | null;
 }
 
+interface ClientEntry {
+  client: AudioWritable;
+  sessionId: string;
+  state: ClientState;
+}
+
 export function createAudioHub(options: {
   silenceBytes: Buffer;
   cueBytes: Buffer;
@@ -27,10 +33,10 @@ export function createAudioHub(options: {
   createMediaChunks?: (bytes: Buffer) => readonly Buffer[];
   maxClientBacklogBytes?: number;
 }) {
-  const clients = new Map<
-    string,
-    { client: AudioWritable; state: ClientState }
-  >();
+  // The proven Spike 0 contract tracks the outgoing response itself. A mobile
+  // reconnect can open a replacement response before the prior response emits
+  // close, so sessionId is a fan-out group, never a uniqueness key.
+  const clients = new Map<AudioWritable, ClientEntry>();
   const acceptedEventIds = new Set<string>();
   const maxBacklog = options.maxClientBacklogBytes ?? 512 * 1024;
   const createMediaChunks =
@@ -38,11 +44,11 @@ export function createAudioHub(options: {
     ((bytes: Buffer) => createPacedMp3Chunks(bytes, options.silenceBytes));
   let timer: ReturnType<typeof setInterval> | null = null;
 
-  const detachClient = (sessionId: string) => {
-    const entry = clients.get(sessionId);
+  const detachResponse = (client: AudioWritable) => {
+    const entry = clients.get(client);
     if (!entry) return false;
-    clients.delete(sessionId);
-    const { client, state } = entry;
+    clients.delete(client);
+    const { state } = entry;
     if (state.disconnect) {
       client.removeListener?.("close", state.disconnect);
       client.removeListener?.("error", state.disconnect);
@@ -55,29 +61,26 @@ export function createAudioHub(options: {
     return true;
   };
 
-  const removeClient = (sessionId: string) => {
-    const entry = clients.get(sessionId);
-    if (!entry || !detachClient(sessionId)) return false;
+  const closeResponse = (client: AudioWritable) => {
+    if (!detachResponse(client)) return false;
     try {
-      if (entry.client.end) entry.client.end();
-      else entry.client.destroy?.();
+      if (client.end) client.end();
+      else client.destroy?.();
     } catch {
-      entry.client.destroy?.();
+      client.destroy?.();
     }
     return true;
   };
 
-  const dropClient = (sessionId: string) => {
-    const entry = clients.get(sessionId);
-    if (!entry) return;
-    detachClient(sessionId);
-    entry.client.destroy?.();
+  const dropResponse = (client: AudioWritable) => {
+    if (!detachResponse(client)) return;
+    client.destroy?.();
   };
 
-  const flush = (sessionId: string) => {
-    const entry = clients.get(sessionId);
+  const flush = (client: AudioWritable) => {
+    const entry = clients.get(client);
     if (!entry) return;
-    const { client, state } = entry;
+    const { state } = entry;
     while (!state.blocked && state.queued.length > 0) {
       const bytes = state.queued.shift();
       if (!bytes) return;
@@ -85,35 +88,35 @@ export function createAudioHub(options: {
       try {
         if (!client.write(bytes)) {
           state.blocked = true;
-          attachDrain(sessionId);
+          attachDrain(client);
         }
       } catch {
-        dropClient(sessionId);
+        dropResponse(client);
       }
     }
   };
 
-  const attachDrain = (sessionId: string) => {
-    const entry = clients.get(sessionId);
-    if (!entry || entry.state.drain || !entry.client.once) return;
+  const attachDrain = (client: AudioWritable) => {
+    const entry = clients.get(client);
+    if (!entry || entry.state.drain || !client.once) return;
     const drain = () => {
-      const current = clients.get(sessionId);
+      const current = clients.get(client);
       if (!current) return;
       current.state.drain = null;
       current.state.blocked = false;
-      flush(sessionId);
+      flush(client);
     };
     entry.state.drain = drain;
-    entry.client.once("drain", drain);
+    client.once("drain", drain);
   };
 
-  const write = (sessionId: string, bytes: Buffer) => {
-    const entry = clients.get(sessionId);
+  const write = (client: AudioWritable, bytes: Buffer) => {
+    const entry = clients.get(client);
     if (!entry) return;
-    const { client, state } = entry;
+    const { state } = entry;
     if (state.blocked) {
       if (state.queuedBytes + bytes.length > maxBacklog) {
-        dropClient(sessionId);
+        dropResponse(client);
         return;
       }
       state.queued.push(bytes);
@@ -123,18 +126,19 @@ export function createAudioHub(options: {
     try {
       if (!client.write(bytes)) {
         state.blocked = true;
-        attachDrain(sessionId);
+        attachDrain(client);
       }
     } catch {
-      dropClient(sessionId);
+      dropResponse(client);
     }
   };
 
   const addClient = (sessionId: string, client: AudioWritable) => {
-    if (clients.has(sessionId)) return false;
-    const disconnect = () => detachClient(sessionId);
-    clients.set(sessionId, {
+    if (clients.has(client)) return false;
+    const disconnect = () => detachResponse(client);
+    clients.set(client, {
       client,
+      sessionId,
       state: {
         blocked: false,
         disconnect,
@@ -147,13 +151,10 @@ export function createAudioHub(options: {
     });
     client.once?.("close", disconnect);
     client.once?.("error", disconnect);
-    // Send one complete silent frame group before the audible connection cue
-    // so decoders lock onto the stream contract before sound begins. The cue
-    // is intentional: iOS promotes an actually-audible HTML audio stream to
-    // Now Playing / lock-screen media controls, while an indefinitely silent
-    // stream can remain invisible even though bytes are being consumed.
-    write(sessionId, options.silenceBytes);
-    write(sessionId, options.cueBytes);
+    // Give the decoder valid bytes immediately, then an audible cue so iOS
+    // promotes the stream to Now Playing before later commentary arrives.
+    write(client, options.silenceBytes);
+    write(client, options.cueBytes);
     return true;
   };
 
@@ -163,16 +164,17 @@ export function createAudioHub(options: {
     bytes = options.cueBytes,
   ) => {
     if (acceptedEventIds.has(eventId)) return false;
-    const attached = sessionIds.filter((sessionId) => clients.has(sessionId));
+    const targetSessions = new Set(sessionIds);
+    const attached = [...clients.values()].filter((entry) =>
+      targetSessions.has(entry.sessionId),
+    );
     if (attached.length === 0) return false;
     acceptedEventIds.add(eventId);
     const chunks = createMediaChunks(bytes);
-    for (const sessionId of attached) {
-      const entry = clients.get(sessionId);
-      if (!entry) continue;
+    for (const entry of attached) {
       for (const chunk of chunks) {
         if (entry.state.mediaBytes + chunk.length > maxBacklog) {
-          dropClient(sessionId);
+          dropResponse(entry.client);
           break;
         }
         entry.state.media.push(Buffer.from(chunk));
@@ -183,11 +185,21 @@ export function createAudioHub(options: {
   };
 
   const writeSilence = () => {
-    for (const [sessionId, entry] of clients) {
+    for (const entry of [...clients.values()]) {
       const media = entry.state.media.shift();
       if (media) entry.state.mediaBytes -= media.length;
-      write(sessionId, media ?? options.silenceBytes);
+      write(entry.client, media ?? options.silenceBytes);
     }
+  };
+
+  const removeClient = (sessionId: string) => {
+    let removed = false;
+    for (const entry of [...clients.values()]) {
+      if (entry.sessionId === sessionId) {
+        removed = closeResponse(entry.client) || removed;
+      }
+    }
+    return removed;
   };
 
   const start = () => {
@@ -204,8 +216,8 @@ export function createAudioHub(options: {
       timer = null;
       changed = true;
     }
-    for (const sessionId of [...clients.keys()]) {
-      changed = removeClient(sessionId) || changed;
+    for (const client of [...clients.keys()]) {
+      changed = closeResponse(client) || changed;
     }
     return changed;
   };

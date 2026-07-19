@@ -3,201 +3,201 @@
   "entries": [
     {
       "beatKey": "kickoff",
-      "durationMs": 7027,
+      "durationMs": 7080,
       "kind": "phase.kickoff",
       "minute": "0'",
       "mp3Path": "kickoff.mp3",
-      "sha256": "a2e9ebeecc568344a0db95fa1ca881f8b8b932c95adfbde03e6eed78957cb4aa",
+      "sha256": "bc2fee431e6c7c5700f329c056e90726492570d385d91e18de64221e4b9fd5c3",
       "transcript": "The final is under way. Argentina in sky blue and white, France in deep blue. Five minutes of MatchSense starts now."
     },
     {
       "beatKey": "opening-goal",
-      "durationMs": 4780,
+      "durationMs": 4848,
       "kind": "goal",
       "minute": "12'",
       "mp3Path": "opening-goal.mp3",
-      "sha256": "288ef5c99d54b2198d0bca49e92ab5e8ff787fab6298365a26cc2f97e03c9570",
+      "sha256": "25772b2a660199825bdc0772668fb75248b472eaa342dbd9ebf270b12e64ab45",
       "transcript": "Argentina have the ball in the net, but hold the celebration. The goal is still provisional."
     },
     {
       "beatKey": "opening-goal-var-review",
-      "durationMs": 3918,
+      "durationMs": 3984,
       "kind": "var.started",
       "minute": "13'",
       "mp3Path": "opening-goal-var-review.mp3",
-      "sha256": "ada38b16e479834540389b8e9bd54a567c7b708510a9968f1e4abc3f40f32c69",
+      "sha256": "8d6625dbc31933c89c7db775e1a95c30ef63a5c414d89c8d9f5cb0a1c9a6f671",
       "transcript": "VAR is checking Argentina's goal. The score has not been confirmed."
     },
     {
       "beatKey": "opening-goal-var-stands",
-      "durationMs": 4467,
+      "durationMs": 4536,
       "kind": "var.stands",
       "minute": "13'",
       "mp3Path": "opening-goal-var-stands.mp3",
-      "sha256": "a5784b00b001b1b5903dc9a56fdc876178df3e2a0308de454d230baa4add1ca1",
+      "sha256": "d01381975b6eb87202e7a02a986fef4495401ca9382d9edd3f857862300025b9",
       "transcript": "The check is complete. The goal stands. Argentina lead France one nil."
     },
     {
       "beatKey": "home-yellow",
-      "durationMs": 2717,
+      "durationMs": 2784,
       "kind": "card.yellow",
       "minute": "24'",
       "mp3Path": "home-yellow.mp3",
-      "sha256": "6f7fd67efbce66364e42e8213eab176e543952013c7baef99cdf553dfe1876cd",
+      "sha256": "964a6f690a9c73a36b15ef0a07a6125d73dd0fb8bd840c779a4f38ebb7f18904",
       "transcript": "Yellow card for Argentina in the twenty-fourth minute."
     },
     {
       "beatKey": "away-yellow-first-half",
-      "durationMs": 3553,
+      "durationMs": 3624,
       "kind": "card.yellow",
       "minute": "31'",
       "mp3Path": "away-yellow-first-half.mp3",
-      "sha256": "e1313e48c69fcbe8f49f0f0d61870ef67f2f3450c08d50d4684ff0e2dcdfc638",
+      "sha256": "0a114bcaac216d61054a0dc60112d99456d63501e98f6cc2ea93091dd069f430",
       "transcript": "France now see yellow. One card for each side in this final."
     },
     {
       "beatKey": "away-penalty-awarded",
-      "durationMs": 4336,
+      "durationMs": 4392,
       "kind": "penalty.awarded",
       "minute": "40'",
       "mp3Path": "away-penalty-awarded.mp3",
-      "sha256": "8068987d60b9884affe9b62bd8b5c65a2c71f73876350d0cafedcaf29ad1c5e4",
+      "sha256": "fb849f5adb93144d9c013d9d9b1b53473c5e3823f1a58ebc190c402bd96a8765",
       "transcript": "Penalty to France. A huge chance to level the match before half-time."
     },
     {
       "beatKey": "away-penalty-scored",
-      "durationMs": 4180,
+      "durationMs": 4248,
       "kind": "penalty.scored",
       "minute": "41'",
       "mp3Path": "away-penalty-scored.mp3",
-      "sha256": "a511954f97ec7ac9a04d15a3a82fe41b70761350de58ecc497a91dab2c645d8f",
+      "sha256": "7f2d7e0f8dc1c3af23a667257ab3c5d002416d8e68cc637ee2b6e2dd89d643c0",
       "transcript": "France score from the penalty spot. Argentina one, France one."
     },
     {
       "beatKey": "half-time",
-      "durationMs": 4989,
+      "durationMs": 5040,
       "kind": "phase.half_time",
       "minute": "HT",
       "mp3Path": "half-time.mp3",
-      "sha256": "42825cf490dfbaeadcc1953285ce74214bb64bbe5eed223c9b53c17d3fb3cd1f",
+      "sha256": "218e95ce903f854a2d7880d5aca4a83bdce94e3d883915f512239bceb57f474a",
       "transcript": "Half-time in the final. Argentina one, France one. Everything is still open."
     },
     {
       "beatKey": "second-half",
-      "durationMs": 5747,
+      "durationMs": 5808,
       "kind": "phase.second_half_start",
       "minute": "46'",
       "mp3Path": "second-half.mp3",
-      "sha256": "c0a5c68732c3bdb8e8ef0d1412ebf613c2d04bc44723ae82210c0533727a88de",
+      "sha256": "6a5120482862c282c3a63978e9a18ca93270c654454120e2dcd4ee5e44e7e9f5",
       "transcript": "The second half begins. Forty-five minutes in the match, two and a half minutes in this Experience."
     },
     {
       "beatKey": "away-red",
-      "durationMs": 4206,
+      "durationMs": 4272,
       "kind": "card.red",
       "minute": "58'",
       "mp3Path": "away-red.mp3",
-      "sha256": "a10f74b79747cffc33b632a524d5d75826bcec1edfaff945cc90b8b48961ec62",
+      "sha256": "d11a18cf96f3c3129813a16e321404e7c6fe84e81e7e339825b7aa4f5fa321b5",
       "transcript": "Red card for France. They are down to ten with the match level at one each."
     },
     {
       "beatKey": "home-yellow-second-half",
-      "durationMs": 3082,
+      "durationMs": 3144,
       "kind": "card.yellow",
       "minute": "67'",
       "mp3Path": "home-yellow-second-half.mp3",
-      "sha256": "2fb82847ce0e19d8970af7ed353a691cc8eb5ae00561a56828c65b14bcc987f4",
+      "sha256": "e15b5c294492ff8b21cc4ba528fbabd4f2c5f93a7ac3c976f9208634869ba343",
       "transcript": "Another yellow card for Argentina as the pressure rises."
     },
     {
       "beatKey": "away-yellow-second-half",
-      "durationMs": 3631,
+      "durationMs": 3696,
       "kind": "card.yellow",
       "minute": "67'",
       "mp3Path": "away-yellow-second-half.mp3",
-      "sha256": "e2822441f96e0e9a67f7d6a31f1d0ab2f8c20c1dca8dfe37b3c28b6e248bee7d",
+      "sha256": "3e530a8ab2b9e3ee6b7f8b28d2c6e3d701a8f341fddb0333e225f0cc470dfee9",
       "transcript": "France receive another yellow. Two cards arrive almost together."
     },
     {
       "beatKey": "winning-goal",
-      "durationMs": 3944,
+      "durationMs": 4008,
       "kind": "goal",
       "minute": "78'",
       "mp3Path": "winning-goal.mp3",
-      "sha256": "860e8db0bf0a6d3d43f1fa9da469217a054abff1c43d21171294bf42fc5d441f",
+      "sha256": "1df012f9399789ee2e7f5e0b30e7f8a0fb5fd6eb604ce6d03d6c417029e64104",
       "transcript": "Goal for Argentina! They strike late and lead France two goals to one."
     },
     {
       "beatKey": "apparent-equalizer",
-      "durationMs": 4807,
+      "durationMs": 4872,
       "kind": "goal",
       "minute": "88'",
       "mp3Path": "apparent-equalizer.mp3",
-      "sha256": "b7cb10a8a60974b80439905b57325ddf2dd14cb8cdc2019dd16c9c92f39fdb53",
+      "sha256": "fa6b8696509edcc2d73de76044c4bb628c9415b0483384941bd09a59ef9c72b3",
       "transcript": "France have the ball in the net, but the equaliser is provisional. Celebration is held."
     },
     {
       "beatKey": "equalizer-var-review",
-      "durationMs": 5120,
+      "durationMs": 5184,
       "kind": "var.started",
       "minute": "89'",
       "mp3Path": "equalizer-var-review.mp3",
-      "sha256": "db2066bd672bfbd96ca3db41a94a08621692b52ec24a562be5e85391d465f732",
+      "sha256": "603c229a418b3b174e119f2edb8487fb6c03f84faae863ef3b0e3da3991a0f14",
       "transcript": "VAR is reviewing France's apparent equaliser. MatchSense is holding the score at two one."
     },
     {
       "beatKey": "equalizer-var-overturned",
-      "durationMs": 4833,
+      "durationMs": 4896,
       "kind": "var.overturned",
       "minute": "89'",
       "mp3Path": "equalizer-var-overturned.mp3",
-      "sha256": "deedbda8077a6c9e28133f78ced02c7158dbb96d41ac5b2fde1be6b15d916fc5",
+      "sha256": "40fdf6fe1ac0d3a9088b885130d7e0ed33a818c332d9640ee6a1cb90d1d29d1f",
       "transcript": "No goal. VAR overturns the equaliser. Argentina still lead France two one."
     },
     {
       "beatKey": "late-corner",
-      "durationMs": 4049,
+      "durationMs": 4104,
       "kind": "corner",
       "minute": "90+2'",
       "mp3Path": "late-corner.mp3",
-      "sha256": "5c3ded13a261fa29b0a67731220f7391066ac4a8bf3293a0b126a957dfeb45ac",
+      "sha256": "d8a81d5cad776b899f55d869e31558da9586dbc6565970beb42635d494152e93",
       "transcript": "Late corner for Argentina. They can take precious seconds out of the match."
     },
     {
       "beatKey": "regulation-end",
-      "durationMs": 3657,
+      "durationMs": 3720,
       "kind": "phase.regulation_end",
       "minute": "90+4'",
       "mp3Path": "regulation-end.mp3",
-      "sha256": "115a5d1337f480059f884da29adba68537f3c2c9a8df21ccf085779f0f8a54cb",
+      "sha256": "09afe5cb1cd9eec733bb957946b41a702758f3a1329bf81c8e069a0e2c46311a",
       "transcript": "The final whistle is moments away. Argentina remain two one ahead."
     },
     {
       "beatKey": "full-time",
-      "durationMs": 5564,
+      "durationMs": 5616,
       "kind": "phase.full_time",
       "minute": "FT",
       "mp3Path": "full-time.mp3",
-      "sha256": "2b92b140e0d10d09e6753d3f2b4b5b1db19439243bddab581eaedfa85e7b735d",
+      "sha256": "804a2fa4df280c9b6dc022bb95b225281a35ed95852da94bf16218c64965e5f0",
       "transcript": "Full-time. Argentina beat France two goals to one after two VAR reviews and a dramatic finish."
     },
     {
       "beatKey": "memory-intro",
-      "durationMs": 5381,
+      "durationMs": 5448,
       "kind": "memory.intro",
       "minute": "MEMORY",
       "mp3Path": "memory-intro.mp3",
-      "sha256": "d62df09c6d19c8957929268ce7e4b8cb00b813ef449ff7475184305426a81050",
+      "sha256": "5e3bbf45e0f3e13a18b1cb55bc335e3df408b2f342d45c4c8683414e0e5849fd",
       "transcript": "Here is your MatchSense match summary. Relive the decisive calls from Argentina against France."
     }
   ],
   "homeTeam": "ARG",
   "locale": "en",
   "stream": {
-    "bitrateKbps": 64,
+    "bitrateKbps": 48,
     "channels": 1,
     "codec": "mp3",
-    "sampleRateHz": 44100
+    "sampleRateHz": 24000
   },
   "templateId": "five-minute-match",
   "templateVersion": 3

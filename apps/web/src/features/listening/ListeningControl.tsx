@@ -29,11 +29,8 @@ export function ListeningControl({
 
   useEffect(() => {
     announced.current = null;
-    void listening.prepare({ fixtureId, perspectiveTeam });
-    return () => {
-      void listening.stop();
-    };
-  }, [fixtureId, listening.prepare, listening.stop, perspectiveTeam]);
+    return listening.acquire({ fixtureId, perspectiveTeam });
+  }, [fixtureId, listening.acquire, perspectiveTeam]);
 
   useEffect(() => {
     if (
@@ -47,12 +44,9 @@ export function ListeningControl({
     listening.announce(moment);
   }, [listening.announce, listening.state, moment]);
 
-  const start = async () => {
-    if (!listening.prepared) {
-      await listening.prepare({ fixtureId, perspectiveTeam });
-    }
-    await listening.start();
-    if (!moment || listening.state === "blocked") return;
+  const start = () => {
+    void listening.start();
+    if (!moment) return;
     announced.current = identity(moment);
     listening.announce(moment);
   };
@@ -91,7 +85,11 @@ export function ListeningControl({
         {listening.lastCueText ??
           "Audio starts only after you tap, and MatchSense only speaks a confirmed update."}
       </p>
-      <button onClick={action} type="button">
+      <button
+        disabled={listening.state === "stopped" && !listening.prepared}
+        onClick={action}
+        type="button"
+      >
         {actionLabel}
       </button>
       {terminal && listening.state !== "stopped" ? (

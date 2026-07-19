@@ -24,10 +24,10 @@ const EXPERIENCE_BEAT_DELIMITER = ":beat:";
 const MAX_MANIFEST_BYTES = 256 * 1_024;
 const MAX_MP3_BYTES = 2 * 1_024 * 1_024;
 const EXPECTED_STREAM = Object.freeze({
-  bitrateKbps: 64,
+  bitrateKbps: 48,
   channels: 1,
   codec: "mp3",
-  sampleRateHz: 44_100,
+  sampleRateHz: 24_000,
 } as const);
 const EXPECTED_BEAT_KEYS = Object.freeze(
   Object.keys(EXPERIENCE_AUDIO_SCRIPT) as ExperienceBeatKey[],

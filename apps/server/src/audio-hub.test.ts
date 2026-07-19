@@ -203,4 +203,45 @@ describe("continuous listening audio hub", () => {
     expect(client.destroyed).toBe(false);
     expect(hub.status().listenerCount).toBe(0);
   });
+
+  it("keeps overlapping responses for one session independent during reconnect", () => {
+    const hub = createTextAudioHub({
+      cueBytes: Buffer.from("cue"),
+      silenceBytes: Buffer.from("silence"),
+      writeIntervalMs: 1_000,
+    });
+    const oldResponse = new WritableClient();
+    const newResponse = new WritableClient();
+
+    expect(hub.addClient("session-1", oldResponse)).toBe(true);
+    expect(hub.addClient("session-1", newResponse)).toBe(true);
+    expect(hub.status().listenerCount).toBe(2);
+
+    oldResponse.emit("close");
+    expect(hub.status().listenerCount).toBe(1);
+    expect(hub.inject("moment-1:commentary", ["session-1"])).toBe(true);
+    hub.writeSilence();
+
+    expect(Buffer.concat(newResponse.chunks).toString()).toContain("cuesile");
+    expect(Buffer.concat(oldResponse.chunks).toString()).not.toContain(
+      "cuesile",
+    );
+  });
+
+  it("closes every response attached to a deleted listening session", () => {
+    const hub = createTextAudioHub({
+      cueBytes: Buffer.from("cue"),
+      silenceBytes: Buffer.from("silence"),
+      writeIntervalMs: 1_000,
+    });
+    const first = new WritableClient();
+    const second = new WritableClient();
+    hub.addClient("session-1", first);
+    hub.addClient("session-1", second);
+
+    expect(hub.removeClient("session-1")).toBe(true);
+    expect(first.end).toHaveBeenCalledOnce();
+    expect(second.end).toHaveBeenCalledOnce();
+    expect(hub.status().listenerCount).toBe(0);
+  });
 });
