@@ -115,12 +115,17 @@ export function createStreamListeningController(dependencies: {
     else
       setState("blocked", "The listening stream was interrupted. Tap resume.");
   };
+  const onWaiting = () => {
+    // iOS emits `waiting` while a live MP3 first buffers. Reloading here
+    // aborts the gesture-owned play() and prevents Now Playing from attaching.
+    if (wantsPlayback && state === "listening") setState("connecting");
+  };
 
   dependencies.audio.addEventListener("playing", onPlaying);
   dependencies.audio.addEventListener("pause", onPause);
   dependencies.audio.addEventListener("error", onError);
   dependencies.audio.addEventListener("ended", reconnect);
-  dependencies.audio.addEventListener("waiting", reconnect);
+  dependencies.audio.addEventListener("waiting", onWaiting);
 
   const play = async (reload: boolean, automatic = false) => {
     if (!prepared || !sessionId || !dependencies.audio.getAttribute("src")) {
@@ -206,11 +211,11 @@ export function createStreamListeningController(dependencies: {
     snapshot,
 
     startFromGesture() {
-      // Reload synchronously inside the user's tap before play(). This keeps
-      // iOS' media activation tied to the gesture and joins the live stream
-      // from its current edge instead of a stale prepared connection.
+      // The stream source is already prepared. Playing that persistent media
+      // element directly preserves iOS' user activation and lets Now Playing
+      // attach before any reconnect logic is allowed to reload the source.
       wantsPlayback = true;
-      return play(true);
+      return play(false);
     },
 
     async stop() {

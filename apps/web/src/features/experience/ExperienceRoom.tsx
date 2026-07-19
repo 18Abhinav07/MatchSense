@@ -10,6 +10,7 @@ import {
   type ExperienceRoomPreview,
   type ExperienceRoomView,
 } from "./experience-room-api.js";
+import { experienceMomentLabel } from "./experience-moment-label.js";
 import "./experience.css";
 
 type Route =
@@ -403,6 +404,18 @@ export function ExperienceRoom({
   const otherMembers = room.members.filter(
     (member) => member.id !== room.viewerParticipantId,
   );
+  const teamName = (code: string) =>
+    catalog.teams.find((team) => team.code === code)?.name ?? code;
+  const labelMoment = (moment: {
+    momentId: string;
+    varState: string;
+  }) =>
+    experienceMomentLabel({
+      awayTeam: teamName(room.fixture.awayTeam),
+      homeTeam: teamName(room.fixture.homeTeam),
+      momentId: moment.momentId,
+      varState: moment.varState,
+    });
 
   return (
     <main className="ms-experience ms-ex-room" id="main-content">
@@ -566,7 +579,7 @@ export function ExperienceRoom({
             <p>MATCH TOGETHER</p>
             <h2>
               {room.currentMoment
-                ? `Moment ${room.currentMoment.momentId}`
+                ? labelMoment(room.currentMoment)
                 : "Waiting for the next moment"}
             </h2>
             {room.status === "LIVE" ? (
@@ -618,6 +631,17 @@ export function ExperienceRoom({
                     <b>{reaction.senderNickname}</b> sent{" "}
                     {reaction.kind.toLowerCase()} to{" "}
                     {reaction.recipientNickname}
+                    <small>
+                      {" "}
+                      ·{" "}
+                      {labelMoment({
+                        momentId: reaction.momentId,
+                        varState:
+                          reaction.status === "OVERTURNED"
+                            ? "OVERTURNED"
+                            : "CONFIRMED",
+                      })}
+                    </small>
                     {reaction.status === "OVERTURNED" ? " · overturned" : ""}
                   </p>
                 ))}

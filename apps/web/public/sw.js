@@ -1,6 +1,6 @@
 importScripts("/push-notification.js");
 
-const CACHE = "matchsense-shell-v4";
+const CACHE = "matchsense-shell-v5";
 const ACTIVATION_DATABASE = "matchsense-push-activation-v1";
 const ACTIVATION_STORE = "pending-activations";
 const ACTIVATION_TTL_MS = 90_000;
@@ -141,7 +141,12 @@ function routeMessage(route) {
 }
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(SHELL)));
+  event.waitUntil(
+    Promise.all([
+      caches.open(CACHE).then((cache) => cache.addAll(SHELL)),
+      self.skipWaiting(),
+    ]),
+  );
 });
 
 self.addEventListener("activate", (event) => {
@@ -168,9 +173,17 @@ self.addEventListener("fetch", (event) => {
 
   if (request.mode === "navigate") {
     event.respondWith(
-      fetch(request).catch(() =>
-        caches.match("/").then((response) => response || Response.error()),
-      ),
+      fetch(request)
+        .then((response) => {
+          if (response.ok) {
+            const copy = response.clone();
+            void caches.open(CACHE).then((cache) => cache.put("/", copy));
+          }
+          return response;
+        })
+        .catch(() =>
+          caches.match("/").then((response) => response || Response.error()),
+        ),
     );
     return;
   }

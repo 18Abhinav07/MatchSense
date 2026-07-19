@@ -38,7 +38,7 @@ function audioFixture() {
 const input = { fixtureId: "experience:run-1", perspectiveTeam: "ARG" };
 
 describe("continuous Pocket Listening controller", () => {
-  it("prepares one stream and starts playback only from the fan gesture", async () => {
+  it("starts the prepared stream from the fan gesture without reloading it", async () => {
     const { audio, emit } = audioFixture();
     const api = {
       create: vi.fn(async () => ({ id: "listen-1" })),
@@ -61,7 +61,7 @@ describe("continuous Pocket Listening controller", () => {
     });
 
     const started = controller.startFromGesture();
-    expect(audio.load).toHaveBeenCalledOnce();
+    expect(audio.load).not.toHaveBeenCalled();
     expect(audio.play).toHaveBeenCalledOnce();
     expect(controller.snapshot().state).toBe("connecting");
     emit("playing");
@@ -214,9 +214,7 @@ describe("continuous Pocket Listening controller", () => {
     expect(clearSchedule).not.toHaveBeenCalled();
   });
 
-  it.each(["ended", "waiting"] as const)(
-    "automatically rejoins the live edge when iOS reports %s",
-    async (mediaEvent) => {
+  it("automatically rejoins the live edge when iOS reports ended", async () => {
       const { audio, emit } = audioFixture();
       const scheduled: Array<() => void> = [];
       const schedule = vi.fn((callback: () => void) => {
@@ -239,13 +237,38 @@ describe("continuous Pocket Listening controller", () => {
       vi.mocked(audio.load).mockClear();
       vi.mocked(audio.play).mockClear();
 
-      emit(mediaEvent);
+      emit("ended");
 
       expect(controller.snapshot().state).toBe("connecting");
       expect(schedule).toHaveBeenCalledWith(expect.any(Function), 1_500);
       scheduled[0]!();
       expect(audio.load).toHaveBeenCalledOnce();
       expect(audio.play).toHaveBeenCalledOnce();
-    },
-  );
+  });
+
+  it("does not reload during normal iOS startup buffering", async () => {
+    const { audio, emit } = audioFixture();
+    const schedule = vi.fn();
+    const controller = createStreamListeningController({
+      api: {
+        create: vi.fn(async () => ({ id: "listen-1" })),
+        remove: vi.fn(async () => undefined),
+        streamUrl: (id: string) => `/stream/${id}`,
+      },
+      audio,
+      schedule,
+    });
+    await controller.prepare(input);
+
+    const started = controller.startFromGesture();
+    emit("waiting");
+    await started;
+
+    expect(audio.load).not.toHaveBeenCalled();
+    expect(audio.play).toHaveBeenCalledOnce();
+    expect(schedule).not.toHaveBeenCalled();
+    expect(controller.snapshot().state).toBe("connecting");
+    emit("playing");
+    expect(controller.snapshot().state).toBe("listening");
+  });
 });

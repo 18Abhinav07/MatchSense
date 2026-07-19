@@ -28,7 +28,8 @@ describe("installable PWA contract", () => {
     expect(serviceWorker).toContain('pathname.endsWith(".mp3")');
     expect(serviceWorker).toContain('accept.includes("text/event-stream")');
     expect(serviceWorker).toContain('requestHeader(request, "range")');
-    expect(serviceWorker).not.toContain("skipWaiting");
+    expect(serviceWorker).toContain("skipWaiting");
+    expect(serviceWorker).toContain('cache.put("/", copy)');
     expect(serviceWorker).toContain("return;");
   });
 

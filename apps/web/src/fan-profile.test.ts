@@ -58,12 +58,6 @@ describe("fan profile client", () => {
           headers: { "content-type": "application/json" },
           status: 201,
         }),
-      )
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({ fan, follows: [], memories: [], rooms: [] }),
-          { headers: { "content-type": "application/json" }, status: 200 },
-        ),
       );
     const api = createFanProfileApi({ fetcher });
 
@@ -73,12 +67,38 @@ describe("fan profile client", () => {
     expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
       "/api/v1/bootstrap",
       "/api/v1/session/guest",
-      "/api/v1/bootstrap",
     ]);
     expect(fetcher.mock.calls[1]?.[1]).toMatchObject({
       credentials: "same-origin",
       method: "POST",
     });
+  });
+
+  it("repairs an incomplete standalone session that has no readable CSRF cookie", async () => {
+    const repaired = { ...fan, id: "fan-repaired" };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ fan, follows: [], memories: [], rooms: [] }),
+          { headers: { "content-type": "application/json" }, status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ csrfToken: "fresh-csrf", fan: repaired }),
+          { headers: { "content-type": "application/json" }, status: 201 },
+        ),
+      );
+    const api = createFanProfileApi({ cookieSource: () => "", fetcher });
+
+    await expect(api.ensureBootstrap()).resolves.toMatchObject({
+      fan: { id: "fan-repaired" },
+    });
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      "/api/v1/bootstrap",
+      "/api/v1/session/guest",
+    ]);
   });
 
   it("checks a safely encoded public handle", async () => {

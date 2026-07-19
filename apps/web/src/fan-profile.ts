@@ -227,13 +227,22 @@ export function createFanProfileApi(
     },
     ensureBootstrap: async () => {
       try {
-        return await getBootstrap();
+        const bootstrap = await getBootstrap();
+        if (
+          !profileComplete(bootstrap.fan) &&
+          !issuedCsrf &&
+          !csrfFromCookie(cookieSource())
+        ) {
+          const fan = await createGuest();
+          return { fan, follows: [], memories: [], rooms: [] };
+        }
+        return bootstrap;
       } catch (error) {
         if (!(error instanceof FanProfileError) || error.status !== 401) {
           throw error;
         }
-        await createGuest();
-        return getBootstrap();
+        const fan = await createGuest();
+        return { fan, follows: [], memories: [], rooms: [] };
       }
     },
     followFixture: async (

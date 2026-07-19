@@ -136,7 +136,7 @@ describe("service-worker activation contract", () => {
     ]);
   });
 
-  it("does not cache API, SSE, MP3, range, or mutation requests and never forces skipWaiting", () => {
+  it("does not cache API, SSE, MP3, range, or mutation requests", () => {
     const harness = createHarness();
     const fetchHandler = harness.handlers.get("fetch");
     const responded = (request: Record<string, unknown>) => {
@@ -189,6 +189,6 @@ describe("service-worker activation contract", () => {
         }),
       ),
     ).toBe(false);
-    expect(serviceWorkerSource).not.toContain("skipWaiting");
+    expect(serviceWorkerSource).toContain("skipWaiting");
   });
 });
