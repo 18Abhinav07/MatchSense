@@ -223,4 +223,50 @@ describe("persistent stream ownership", () => {
     deferredReleases.shift()!();
     expect(stop).toHaveBeenCalledOnce();
   });
+
+  it("retains the live fixture lease on its exact Moment route and stops after fixture exit", async () => {
+    const deferredReleases: Array<() => void> = [];
+    let path = "/matches/arg-fra";
+    const prepare = vi.fn(async () => undefined);
+    const stop = vi.fn(async () => undefined);
+    const lease = createFixtureListeningLease({
+      currentPath: () => path,
+      defer: (release) => deferredReleases.push(release),
+      prepare,
+      stop,
+    });
+
+    const release = lease.acquire({
+      fixtureId: "arg-fra",
+      perspectiveTeam: "ARG",
+    });
+    path = "/matches/arg-fra/moments/goal-family%3A3";
+    release();
+    deferredReleases.shift()!();
+
+    expect(stop).not.toHaveBeenCalled();
+
+    path = "/";
+    lease.reconcileRoute();
+    deferredReleases.shift()!();
+
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("lets an explicit stop close a route-retained fixture lease", async () => {
+    const prepare = vi.fn(async () => undefined);
+    const stop = vi.fn(async () => undefined);
+    const lease = createFixtureListeningLease({
+      currentPath: () => "/matches/arg-fra/moments/goal-family%3A3",
+      prepare,
+      stop,
+    });
+
+    lease.acquire({ fixtureId: "arg-fra", perspectiveTeam: "ARG" });
+    await lease.stop();
+    lease.acquire({ fixtureId: "arg-fra", perspectiveTeam: "ARG" });
+
+    expect(stop).toHaveBeenCalledOnce();
+    expect(prepare).toHaveBeenCalledTimes(2);
+  });
 });

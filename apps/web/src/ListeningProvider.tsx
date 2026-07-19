@@ -90,9 +90,23 @@ interface FixtureListeningLease {
     fixtureId: string;
     perspectiveTeam: string;
   }): () => void;
+  reconcileRoute(): void;
+  stop(): Promise<void>;
+}
+
+function fixtureIdFromListeningPath(path: string): string | null {
+  const matched =
+    /^\/matches\/([^/]+)(?:\/live|\/moments\/[^/]+)?\/?$/u.exec(path);
+  if (!matched?.[1]) return null;
+  try {
+    return decodeURIComponent(matched[1]);
+  } catch {
+    return null;
+  }
 }
 
 export function createFixtureListeningLease(dependencies: {
+  currentPath?: () => string;
   defer?: (release: () => void) => void;
   prepare(input: {
     fixtureId: string;
@@ -103,6 +117,22 @@ export function createFixtureListeningLease(dependencies: {
   const defer = dependencies.defer ?? queueMicrotask;
   const holders = new Map<string, number>();
   let activeKey: string | null = null;
+  let activeInput: {
+    fixtureId: string;
+    perspectiveTeam: string;
+  } | null = null;
+  let generation = 0;
+
+  const routeRetains = (input: { fixtureId: string }) =>
+    dependencies.currentPath !== undefined &&
+    fixtureIdFromListeningPath(dependencies.currentPath()) === input.fixtureId;
+
+  const clearOwnership = () => {
+    activeKey = null;
+    activeInput = null;
+    holders.clear();
+    generation += 1;
+  };
 
   return {
     acquire(input) {
@@ -111,21 +141,39 @@ export function createFixtureListeningLease(dependencies: {
       const existing = holders.get(key) ?? 0;
       holders.set(key, existing + 1);
       activeKey = key;
+      activeInput = input;
       if (!alreadyActive) void dependencies.prepare(input);
+      const acquiredGeneration = generation;
 
       let released = false;
       return () => {
         if (released) return;
         released = true;
+        if (acquiredGeneration !== generation) return;
         holders.set(key, Math.max((holders.get(key) ?? 1) - 1, 0));
         defer(() => {
+          if (acquiredGeneration !== generation) return;
           if ((holders.get(key) ?? 0) > 0) return;
           holders.delete(key);
           if (activeKey !== key) return;
-          activeKey = null;
+          if (routeRetains(input)) return;
+          clearOwnership();
           void dependencies.stop();
         });
       };
+    },
+
+    reconcileRoute() {
+      defer(() => {
+        if (!activeInput || routeRetains(activeInput)) return;
+        clearOwnership();
+        void dependencies.stop();
+      });
+    },
+
+    async stop() {
+      clearOwnership();
+      await dependencies.stop();
     },
   };
 }
@@ -205,6 +253,8 @@ export function ListeningProvider({ children }: { children: ReactNode }) {
       });
     controllerRef.current ??= controller;
     fixtureLeaseRef.current ??= createFixtureListeningLease({
+      currentPath: () =>
+        typeof window === "undefined" ? "/" : window.location.pathname,
       prepare: (input) => {
         preparedInputRef.current = input;
         return controller.prepare(input);
@@ -258,8 +308,18 @@ export function ListeningProvider({ children }: { children: ReactNode }) {
   const stop = useCallback(async () => {
     const controller = controllerRef.current;
     if (!controller) return;
-    preparedInputRef.current = null;
-    await controller.stop();
+    const lease = fixtureLeaseRef.current;
+    if (lease) await lease.stop();
+    else {
+      preparedInputRef.current = null;
+      await controller.stop();
+    }
+  }, []);
+
+  useEffect(() => {
+    const reconcileRoute = () => fixtureLeaseRef.current?.reconcileRoute();
+    window.addEventListener("popstate", reconcileRoute);
+    return () => window.removeEventListener("popstate", reconcileRoute);
   }, []);
 
   useEffect(() => {
