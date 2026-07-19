@@ -56,6 +56,7 @@ describe("TxLINE canonical source to product runtime", () => {
     if (canonical.kind !== "accepted") throw new Error("expected goal");
 
     const runtime = createProductRuntime({
+      createMediaChunks: (bytes) => [bytes],
       cueBytes: Buffer.from("goal-cue"),
       fixture: {
         awayTeam: "ESP",
