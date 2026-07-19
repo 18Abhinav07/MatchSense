@@ -113,6 +113,7 @@ const STREAM_SOURCE = "txline";
 const STREAM_KEY = "scores:mainnet";
 const LEASE_DURATION_MS = 90_000;
 const LEASE_RENEWAL_MS = 30_000;
+const LEASE_ACQUIRE_RETRY_MS = 1_000;
 const SCHEDULE_REFRESH_INTERVAL_MS = 60_000;
 const HACKATHON_RIGHTS_GRANT_ID = "txline-world-cup-hackathon-2026";
 const processCollectorWorkerId = `collector:${randomUUID()}`;
@@ -532,22 +533,29 @@ export function createDurableCollectorLifecycle(input: {
       started = true;
       stopping = false;
       const generation = ++lifecycleGeneration;
-      let lease: SourceLeaseRecord | null;
+      let lease: SourceLeaseRecord | null = null;
       try {
-        lease = await input.database.sourceState.acquireLease({
-          holderId,
-          leaseUntil: leaseUntil(),
-          mode: "live",
-          source: STREAM_SOURCE,
-          streamKey: STREAM_KEY,
-        });
+        while (!stopping && generation === lifecycleGeneration && !lease) {
+          lease = await input.database.sourceState.acquireLease({
+            holderId,
+            leaseUntil: leaseUntil(),
+            mode: "live",
+            source: STREAM_SOURCE,
+            streamKey: STREAM_KEY,
+          });
+          if (!lease) {
+            await new Promise<void>((resolve) => {
+              setTimeout(resolve, LEASE_ACQUIRE_RETRY_MS);
+            });
+          }
+        }
       } catch (error) {
         if (generation === lifecycleGeneration) started = false;
         throw error;
       }
       if (!lease) {
         if (generation === lifecycleGeneration) started = false;
-        throw new Error("Collector source lease is held by another worker");
+        return;
       }
       if (stopping || generation !== lifecycleGeneration) {
         await input.database.sourceState.releaseLease({

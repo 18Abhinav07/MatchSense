@@ -663,6 +663,57 @@ describe("durable collector tournament schedule", () => {
     }
   });
 
+  it("waits for a rolling deployment lease handoff instead of exiting", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-18T12:00:00.000Z"));
+    const current = fixture({
+      fixtureId: "fixture-lease-handoff",
+      sourceTimestampMs: 10,
+    });
+    const source = abortableSource();
+    const acquireLease = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(liveLease(2));
+    adapter.fetchSchedule.mockResolvedValue([current]);
+    adapter.createRawScoreSource.mockReturnValue(source);
+    const database = {
+      archive: {},
+      fixtureTruth: {
+        observeFixtureSchedule: vi.fn(async () => ({
+          fixture: {} as never,
+          kind: "committed" as const,
+          metadataUpdated: true,
+        })),
+      },
+      sourceState: {
+        acquireLease,
+        releaseLease: vi.fn(async () => undefined),
+        renewLease: vi.fn(async () => liveLease(2)),
+      },
+      teamCatalog: { upsert: vi.fn(async () => undefined) },
+    };
+    const lifecycle = createDurableCollectorLifecycle({
+      database: database as never,
+      txlineClient: {} as never,
+    });
+
+    const outcome = Promise.resolve(lifecycle.start()).then(
+      () => "started" as const,
+      () => "failed" as const,
+    );
+    await flushMicrotasks();
+    expect(acquireLease).toHaveBeenCalledOnce();
+    expect(adapter.createRawScoreSource).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(outcome).resolves.toBe("started");
+    expect(acquireLease).toHaveBeenCalledTimes(2);
+    expect(source.run).toHaveBeenCalledOnce();
+
+    await lifecycle.stop();
+  });
+
   it("releases a lease acquired after stop before a later start", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-18T12:00:00.000Z"));
