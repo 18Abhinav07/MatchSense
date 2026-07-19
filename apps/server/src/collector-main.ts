@@ -115,6 +115,7 @@ const LEASE_DURATION_MS = 90_000;
 const LEASE_RENEWAL_MS = 30_000;
 const LEASE_ACQUIRE_RETRY_MS = 1_000;
 const SCHEDULE_REFRESH_INTERVAL_MS = 60_000;
+const FINISHED_FIXTURE_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1_000;
 const HACKATHON_RIGHTS_GRANT_ID = "txline-world-cup-hackathon-2026";
 const processCollectorWorkerId = `collector:${randomUUID()}`;
 const WORLD_CUP_CATALOG_START_EPOCH_DAY = Math.floor(
@@ -148,7 +149,8 @@ function newestScheduleFixtures(fixtures: readonly TxlineScheduleFixture[]) {
 }
 
 async function fetchTournamentSchedule(client: TxlineAuthenticatedClient) {
-  const currentEpochDay = Math.floor(Date.now() / 86_400_000);
+  const now = Date.now();
+  const currentEpochDay = Math.floor(now / 86_400_000);
   const [catalogue, current] = await Promise.allSettled([
     fetchTxlineWorldCupSchedule(client, {
       startEpochDay: WORLD_CUP_CATALOG_START_EPOCH_DAY,
@@ -156,9 +158,17 @@ async function fetchTournamentSchedule(client: TxlineAuthenticatedClient) {
     fetchTxlineWorldCupSchedule(client, { startEpochDay: currentEpochDay }),
   ]);
   if (current.status === "rejected") throw current.reason;
+  const catalogueFixtures =
+    catalogue.status === "fulfilled" ? catalogue.value : null;
+  const recentlyFinished = (catalogueFixtures ?? []).filter(
+    (fixture) =>
+      fixture.gameState === 3 &&
+      fixture.startTimeMs <= now &&
+      fixture.startTimeMs >= now - FINISHED_FIXTURE_RECOVERY_WINDOW_MS,
+  );
   return {
-    catalogue: catalogue.status === "fulfilled" ? catalogue.value : null,
-    current: newestScheduleFixtures(current.value),
+    catalogue: catalogueFixtures,
+    current: newestScheduleFixtures([...recentlyFinished, ...current.value]),
   };
 }
 

@@ -22,6 +22,7 @@ function fixture(input: {
   participant1?: { id: string; name: string };
   participant2?: { id: string; name: string };
   sourceTimestampMs: number;
+  startTimeMs?: number;
 }) {
   return {
     competition: "World Cup",
@@ -33,7 +34,7 @@ function fixture(input: {
     participant1IsHome: true,
     participant2: input.participant2 ?? { id: "team-fra", name: "France" },
     sourceTimestampMs: input.sourceTimestampMs,
-    startTimeMs: 1_784_408_400_000,
+    startTimeMs: input.startTimeMs ?? 1_784_408_400_000,
   };
 }
 
@@ -79,6 +80,63 @@ afterEach(() => {
 });
 
 describe("durable collector tournament schedule", () => {
+  it("reconciles a recently finished fixture after the UTC schedule day changes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-19T04:30:00.000Z"));
+    const finishedYesterday = fixture({
+      fixtureId: "fixture-finished-yesterday",
+      gameState: 3,
+      sourceTimestampMs: 10,
+      startTimeMs: Date.parse("2026-07-18T21:00:00.000Z"),
+    });
+    const current = fixture({
+      fixtureId: "fixture-current",
+      sourceTimestampMs: 11,
+      startTimeMs: Date.parse("2026-07-19T18:00:00.000Z"),
+    });
+    adapter.fetchSchedule.mockImplementation(
+      async (_client, options?: { startEpochDay?: number }) =>
+        options?.startEpochDay === tournamentStartEpochDay
+          ? [finishedYesterday, current]
+          : [current],
+    );
+    const source = abortableSource();
+    adapter.createRawScoreSource.mockReturnValue(source);
+    const database = {
+      archive: {},
+      fixtureTruth: {
+        observeFixtureSchedule: vi.fn(async () => ({
+          fixture: {} as never,
+          kind: "committed" as const,
+          metadataUpdated: true,
+        })),
+      },
+      sourceState: {
+        acquireLease: vi.fn(async () => liveLease()),
+        getCursor: vi.fn(async () => null),
+        releaseLease: vi.fn(async () => undefined),
+        renewLease: vi.fn(async () => liveLease()),
+      },
+      teamCatalog: { upsert: vi.fn(async () => undefined) },
+    };
+    const lifecycle = createDurableCollectorLifecycle({
+      database: database as never,
+      txlineClient: {} as never,
+    });
+
+    try {
+      await lifecycle.start();
+
+      expect(adapter.createRawScoreSource).toHaveBeenCalledWith(
+        expect.objectContaining({
+          fixtureIds: ["fixture-finished-yesterday", "fixture-current"],
+        }),
+      );
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
   it("keeps the current live collection running when a durable roster survives a refresh error", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-18T12:00:00.000Z"));
