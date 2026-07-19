@@ -5,6 +5,7 @@ import {
   createPostgresDatabase,
   type ApplicationDatabase,
   type FixtureTruthRepository,
+  type MemoryRepository,
   type RoomAggregateRepository,
 } from "@matchsense/db";
 import type { TeamCode, TeamSummary } from "@matchsense/contracts";
@@ -34,6 +35,10 @@ import {
   restoreFixtureProjection,
 } from "./fixture-processor.js";
 import { inspectMp3, resolveMp3WriteIntervalMs } from "./mp3.js";
+import {
+  createMatchMemoryService,
+  type MatchMemoryPayload,
+} from "./memory-service.js";
 import { createProductRuntime, DEFAULT_TEAMS } from "./product-runtime.js";
 import { createPushSubscriptionCipher } from "./push-crypto.js";
 import {
@@ -51,6 +56,7 @@ export type ApiDatabaseRuntime = Pick<
   | "fans"
   | "fixtureReads"
   | "fixtureTruth"
+  | "memories"
   | "pushDevices"
   | "rooms"
   | "teamCatalog"
@@ -149,6 +155,19 @@ export async function startApi(
   const sessions = createFanSessionService({
     repository: databaseRuntime.fans,
   });
+  const memoryService =
+    databaseRuntime.experiences &&
+    databaseRuntime.fans &&
+    databaseRuntime.fixtureTruth &&
+    databaseRuntime.memories
+      ? createMatchMemoryService({
+          experiences: databaseRuntime.experiences,
+          fans: databaseRuntime.fans,
+          fixtureTruth: databaseRuntime.fixtureTruth,
+          memories:
+            databaseRuntime.memories as MemoryRepository<MatchMemoryPayload>,
+        })
+      : null;
   const pushRegistration =
     config.vapidPublicKey && config.pushSubscriptionEncryptionSecret
       ? createDurablePushRegistrationService({
@@ -400,6 +419,9 @@ export async function startApi(
           }
         : {}),
       ...(liveListening ? { liveListening } : {}),
+      ...(memoryService
+        ? { memory: { service: memoryService, sessions } }
+        : {}),
       ...(pushRegistration && config.vapidPublicKey
         ? {
             durablePush: {

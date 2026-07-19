@@ -4,6 +4,7 @@ import { createCommentaryPipeline } from "@matchsense/commentary";
 import {
   createPostgresDatabase,
   type ApplicationDatabase,
+  type MemoryRepository,
   type OutboxRepository,
   type RoomAggregateRepository,
   type SourceLeaseRecord,
@@ -57,6 +58,11 @@ import {
 } from "./experience-room-service.js";
 import { type Mp3Contract } from "./mp3.js";
 import {
+  createMatchMemoryService,
+  type MatchMemoryPayload,
+  type MatchMemoryService,
+} from "./memory-service.js";
+import {
   createOutboxWorker,
   type OutboxHandler,
   type OutboxWorker,
@@ -79,6 +85,7 @@ export type CollectorDatabaseRuntime = Pick<
   | "fans"
   | "fixtureTruth"
   | "migrate"
+  | "memories"
   | "outbox"
   | "pushDevices"
   | "rooms"
@@ -182,6 +189,7 @@ async function fetchTournamentSchedule(client: TxlineAuthenticatedClient) {
 export interface CollectorOutboxEffects {
   commentary?: Pick<CommentaryJobWorker, "handleOutbox">;
   experience?: { deliver(payload: unknown): Promise<unknown> };
+  memory?: Pick<MatchMemoryService, "projectFixture">;
   push?: Pick<DurablePushService, "deliverToFixture">;
   rooms?: Pick<DurableRoomService, "projectFixture">;
 }
@@ -231,9 +239,14 @@ function roomFixtureFromRealtimePayload(
   return snapshot as unknown as FixtureSnapshot;
 }
 
+function memoryFixtureIdFromRealtimePayload(payload: unknown): string | null {
+  const fixture = roomFixtureFromRealtimePayload(payload);
+  return fixture?.phase === "full_time" ? fixture.fixtureId : null;
+}
+
 /**
  * The collector is the only process allowed to turn a committed source event
- * into external work. Both handlers defend the source boundary again so an
+ * into external work. These handlers defend the source boundary again so an
  * archived/reconciliation row cannot become audible or visible to a fan.
  */
 export function createCollectorOutboxHandlers(
@@ -267,6 +280,14 @@ export function createCollectorOutboxHandlers(
       const fixture = roomFixtureFromRealtimePayload(message.payload);
       if (!fixture) return;
       await effects.rooms?.projectFixture(fixture);
+    };
+  }
+  if (effects.memory) {
+    handlers["memory.project"] = async (message) => {
+      if (message.mode !== "live") return;
+      const fixtureId = memoryFixtureIdFromRealtimePayload(message.payload);
+      if (!fixtureId) return;
+      await effects.memory?.projectFixture({ fixtureId, mode: "live" });
     };
   }
   return handlers;
@@ -702,6 +723,19 @@ export async function startCollector(
             databaseRuntime.rooms as RoomAggregateRepository<DurableRoomAggregate>,
         })
       : null;
+    const memoryService =
+      databaseRuntime.experiences &&
+      databaseRuntime.fans &&
+      databaseRuntime.fixtureTruth &&
+      databaseRuntime.memories
+        ? createMatchMemoryService({
+            experiences: databaseRuntime.experiences,
+            fans: databaseRuntime.fans,
+            fixtureTruth: databaseRuntime.fixtureTruth,
+            memories:
+              databaseRuntime.memories as MemoryRepository<MatchMemoryPayload>,
+          })
+        : null;
     outboxWorker =
       options.outboxWorker ??
       (
@@ -713,6 +747,7 @@ export async function startCollector(
               ...(commentaryWorker ? { commentary: commentaryWorker } : {}),
               ...(durablePush ? { push: durablePush } : {}),
               ...(durableRooms ? { rooms: durableRooms } : {}),
+              ...(memoryService ? { memory: memoryService } : {}),
             }),
             mode: "live",
             outbox,

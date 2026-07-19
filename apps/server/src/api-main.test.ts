@@ -88,6 +88,103 @@ describe("API-only runtime", () => {
     }
   });
 
+  it("registers authenticated Match Memory routes when durable dependencies exist", async () => {
+    const webDistPath = await temporaryWebShell();
+    let storedSession: {
+      csrfHash: string;
+      expiresAt: string;
+      sessionHash: string;
+    } | null = null;
+    const fan = {
+      avatarVariant: null,
+      createdAt: "2026-07-18T12:00:00.000Z",
+      deletedAt: null,
+      favoriteTeam: "ARG",
+      handle: "abhinav",
+      handleNormalized: "abhinav",
+      id: "",
+      preferences: {},
+      profile: {},
+      updatedAt: "2026-07-18T12:00:00.000Z",
+    };
+    const fans = {
+      createGuest: vi.fn(async (input) => {
+        storedSession = input;
+        fan.id = input.fanId;
+        return { ...fan };
+      }),
+      listFollows: vi.fn(async () => []),
+      resolveSession: vi.fn(async ({ sessionHash }) => {
+        const stored = storedSession;
+        if (!stored || stored.sessionHash !== sessionHash) return null;
+        return {
+          csrfHash: stored.csrfHash,
+          expiresAt: stored.expiresAt,
+          fan: { ...fan },
+          lastSeenAt: fan.updatedAt,
+          revokedAt: null,
+          sessionHash,
+        };
+      }),
+    };
+    const experiences = {
+      claimDueBeats: vi.fn(async () => []),
+      listForOwner: vi.fn(async () => []),
+      listRecoverableRuns: vi.fn(async () => []),
+    };
+    const memories = {
+      append: vi.fn(),
+      latestForFanFixture: vi.fn(async () => null),
+      listLatestForFan: vi.fn(async () => []),
+    };
+    const database = {
+      check: vi.fn(async () => ({
+        databaseReachable: true,
+        migrationsCurrent: true,
+      })),
+      close: vi.fn(async () => undefined),
+      experiences,
+      fans,
+      fixtureTruth: {},
+      memories,
+      pushDevices: {},
+      teamCatalog: { list: vi.fn(async () => []) },
+    };
+
+    try {
+      const app = await startApi(
+        parseServerEnv({
+          DATABASE_URL: "postgresql://db.example/matchsense",
+          ROLE: "api",
+        }),
+        { databaseRuntime: database as never, listen: false, webDistPath },
+      );
+
+      expect((await app.inject({ url: "/api/v1/memories" })).statusCode).toBe(
+        401,
+      );
+      const guest = await app.inject({
+        method: "POST",
+        url: "/api/v1/session/guest",
+      });
+      const cookies = guest.headers["set-cookie"] as string[];
+      const cookie = cookies.map((entry) => entry.split(";", 1)[0]).join("; ");
+      const response = await app.inject({
+        headers: { cookie },
+        url: "/api/v1/memories",
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ memories: [] });
+      expect(fans.listFollows).toHaveBeenCalledWith(fan.id);
+      expect(experiences.listForOwner).toHaveBeenCalledWith(fan.id);
+      expect(memories.listLatestForFan).toHaveBeenCalledWith(fan.id);
+      await app.close();
+    } finally {
+      await rm(webDistPath, { force: true, recursive: true });
+    }
+  });
+
   it("serves the persisted live catalogue and fixtures through the credential-free API role", async () => {
     const webDistPath = await temporaryWebShell();
     const fixture = {

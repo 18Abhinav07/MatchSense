@@ -75,6 +75,74 @@ describe("collector-only runtime", () => {
     expect(rooms.projectFixture).toHaveBeenCalledWith(snapshot);
   });
 
+  it("projects Match Memory only for well-formed live full-time revisions", async () => {
+    const memory = {
+      projectFixture: vi.fn(async () => []),
+    };
+    const handlers = createCollectorOutboxHandlers({ memory });
+    const snapshot = {
+      awayTeam: "FRA",
+      fixtureId: "fixture-arg-fra",
+      homeTeam: "ARG",
+      kickoffAt: "2026-07-18T18:00:00.000Z",
+      lastEvent: null,
+      minute: "FT",
+      phase: "full_time",
+      provenance: "live_txline",
+      revision: 8,
+      score: { away: 1, home: 2 },
+      sourceLabel: "TXLINE · DEVNET SOURCE",
+      updatedAt: "2026-07-18T20:00:00.000Z",
+    };
+    const payload = {
+      deliveryIntent: "realtime",
+      event: { event: "snapshot", id: "fixture-arg-fra:revision:8", snapshot },
+      mode: "live",
+    };
+
+    expect(handlers["memory.project"]).toEqual(expect.any(Function));
+    await handlers["memory.project"]?.(
+      { mode: "live", payload, topic: "memory.project" } as never,
+      new AbortController().signal,
+    );
+    await handlers["memory.project"]?.(
+      {
+        mode: "recorded",
+        payload: { ...payload, mode: "recorded" },
+        topic: "memory.project",
+      } as never,
+      new AbortController().signal,
+    );
+    await handlers["memory.project"]?.(
+      {
+        mode: "live",
+        payload: { ...payload, event: null },
+        topic: "memory.project",
+      } as never,
+      new AbortController().signal,
+    );
+    await handlers["memory.project"]?.(
+      {
+        mode: "live",
+        payload: {
+          ...payload,
+          event: {
+            ...payload.event,
+            snapshot: { ...snapshot, phase: "first_half" },
+          },
+        },
+        topic: "memory.project",
+      } as never,
+      new AbortController().signal,
+    );
+
+    expect(memory.projectFixture).toHaveBeenCalledOnce();
+    expect(memory.projectFixture).toHaveBeenCalledWith({
+      fixtureId: "fixture-arg-fra",
+      mode: "live",
+    });
+  });
+
   it("fans out only confirmed realtime canonical work into commentary and push", async () => {
     const commentary = {
       handleOutbox: vi.fn(async () => ({ kind: "ignored" as const })),
