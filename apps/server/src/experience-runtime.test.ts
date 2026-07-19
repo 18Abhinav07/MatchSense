@@ -16,7 +16,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "./app.js";
 import {
+  EXPERIENCE_AWAY_TEAM,
+  EXPERIENCE_HOME_TEAM,
+  EXPERIENCE_TEMPLATE_ID,
+  EXPERIENCE_TEMPLATE_VERSION,
   createExperienceRuntime,
+  isFixedExperienceFixture,
   type ExperienceRuntime,
 } from "./experience-runtime.js";
 import type { FixtureProcessor } from "./fixture-processor.js";
@@ -205,6 +210,52 @@ function productRuntime() {
 }
 
 describe("server-owned Experience Match", () => {
+  it("exports the fixed authored fixture and version 3 template contract", () => {
+    expect(EXPERIENCE_HOME_TEAM).toBe("ARG");
+    expect(EXPERIENCE_AWAY_TEAM).toBe("FRA");
+    expect(EXPERIENCE_TEMPLATE_ID).toBe("five-minute-match");
+    expect(EXPERIENCE_TEMPLATE_VERSION).toBe(3);
+    expect(isFixedExperienceFixture({ awayTeam: "FRA", homeTeam: "ARG" })).toBe(
+      true,
+    );
+    expect(isFixedExperienceFixture({ awayTeam: "ARG", homeTeam: "FRA" })).toBe(
+      false,
+    );
+  });
+
+  it("rejects non-authored fixtures before persistence or fixture registration", async () => {
+    const repository = memoryExperiences();
+    const createRun = vi.spyOn(repository, "createRun");
+    const persistFixture = vi.fn(async () => undefined);
+    const id = vi.fn(() => "wrong-fixture-run");
+    const product = productRuntime();
+    const experience = createExperienceRuntime({
+      id,
+      persistFixture,
+      processor: {
+        process: async () => ({ kind: "accepted_no_change" }),
+      },
+      productRuntime: product,
+      repository,
+    });
+    const wrongFixture = {
+      awayTeam: "ARG",
+      homeTeam: "FRA",
+      ownerFanId: "fan-1",
+    };
+
+    await expect(experience.prepareFixture(wrongFixture)).rejects.toThrow();
+    await expect(experience.startRun(wrongFixture)).rejects.toThrow();
+
+    expect(id).not.toHaveBeenCalled();
+    expect(persistFixture).not.toHaveBeenCalled();
+    expect(createRun).not.toHaveBeenCalled();
+    expect(repository.beats.size).toBe(0);
+    expect(product.fixture("experience:wrong-fixture-run")).toBeNull();
+    await experience.close();
+    await product.close();
+  });
+
   it("prepares a private fixture without beats and starts that same fixture idempotently", async () => {
     const repository = memoryExperiences();
     const product = productRuntime();
@@ -227,7 +278,9 @@ describe("server-owned Experience Match", () => {
     });
     expect(prepared).toMatchObject({
       fixture: {
+        awayTeam: "FRA",
         fixtureId: "experience:prepared-run",
+        homeTeam: "ARG",
         kickoffAt: "2026-07-17T12:30:00.000Z",
       },
       runId: "prepared-run",
@@ -254,6 +307,8 @@ describe("server-owned Experience Match", () => {
     });
     expect(duplicate).toEqual(started);
     expect(product.fixture(started.fixtureId)).toMatchObject({
+      awayTeam: "FRA",
+      homeTeam: "ARG",
       kickoffAt: started.kickoffAt,
       phase: "scheduled",
       revision: 0,
@@ -603,7 +658,7 @@ describe("server-owned Experience Match", () => {
         };
       });
 
-    expect(run.templateVersion).toBe(2);
+    expect(run.templateVersion).toBe(3);
     expect(authored).toEqual([
       {
         dueAt: "2026-07-17T12:00:00.000Z",
@@ -890,6 +945,7 @@ describe("exact Moment resolver and Experience HTTP contract", () => {
       repository,
     });
     const fans = fanRoutes();
+    const startRun = vi.spyOn(experience, "startRun");
     const app = buildApp({
       demo: false,
       experience,
@@ -906,6 +962,18 @@ describe("exact Moment resolver and Experience HTTP contract", () => {
       webDistPath: process.cwd(),
     });
 
+    const rejected = await app.inject({
+      headers: fans.headers("fan-owner", true),
+      method: "POST",
+      payload: { awayTeam: "ARG", homeTeam: "FRA" },
+      url: "/api/v1/experience/runs",
+    });
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json()).toEqual({
+      error: { code: "INVALID_REQUEST", message: "Request is invalid" },
+    });
+    expect(startRun).not.toHaveBeenCalled();
+
     const started = await app.inject({
       headers: fans.headers("fan-owner", true),
       method: "POST",
@@ -913,6 +981,7 @@ describe("exact Moment resolver and Experience HTTP contract", () => {
       url: "/api/v1/experience/runs",
     });
     expect(started.statusCode).toBe(201);
+    expect(startRun).toHaveBeenCalledOnce();
     expect(started.json()).toMatchObject({
       run: {
         fixtureId: "experience:route-run",

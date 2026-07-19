@@ -33,7 +33,10 @@ import {
   type DurableRoomRouteDependencies,
   registerDurableRoomRoutes,
 } from "./durable-room-routes.js";
-import type { ExperienceRuntime } from "./experience-runtime.js";
+import {
+  isFixedExperienceFixture,
+  type ExperienceRuntime,
+} from "./experience-runtime.js";
 import {
   type FanRouteDependencies,
   registerFanRoutes,
@@ -402,7 +405,7 @@ function registerExperienceRoutes(
     );
     if (!session) return;
     const body = experienceRunBody.safeParse(request.body);
-    if (!body.success || body.data.homeTeam === body.data.awayTeam) {
+    if (!body.success || !isFixedExperienceFixture(body.data)) {
       return invalidRequest(reply);
     }
     const rawIdempotencyKey = request.headers["idempotency-key"];

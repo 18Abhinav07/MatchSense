@@ -14,6 +14,7 @@ import type {
   ExperienceRoomService,
   ExperienceRoomStreamEvent,
 } from "./experience-room-service.js";
+import { isFixedExperienceFixture } from "./experience-runtime.js";
 import { RoomServiceError, type RoomServiceErrorCode } from "./room-service.js";
 
 const nickname = z.string().trim().min(1).max(30);
@@ -425,7 +426,9 @@ function registerExperienceRoomRoutes(
     );
     if (!session) return;
     const parsed = createExperienceBody.safeParse(request.body);
-    if (!parsed.success) return invalidRequest(reply);
+    if (!parsed.success || !isFixedExperienceFixture(parsed.data)) {
+      return invalidRequest(reply);
+    }
     try {
       return reply.code(201).send(
         await dependencies.service.create({

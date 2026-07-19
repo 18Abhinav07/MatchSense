@@ -13,8 +13,10 @@ import type {
 import type { FixtureProcessor } from "./fixture-processor.js";
 import type { ProductFixture, ProductRuntime } from "./product-runtime.js";
 
-const EXPERIENCE_TEMPLATE_ID = "five-minute-match";
-const EXPERIENCE_TEMPLATE_VERSION = 2;
+export const EXPERIENCE_HOME_TEAM: TeamCode = "ARG";
+export const EXPERIENCE_AWAY_TEAM: TeamCode = "FRA";
+export const EXPERIENCE_TEMPLATE_ID = "five-minute-match";
+export const EXPERIENCE_TEMPLATE_VERSION = 3;
 
 interface ExperienceBeatDefinition {
   key: string;
@@ -26,7 +28,7 @@ interface ExperienceBeatDefinition {
   team: "away" | "home" | null;
 }
 
-const EXPERIENCE_BEATS: readonly ExperienceBeatDefinition[] = [
+const EXPERIENCE_BEATS = [
   {
     key: "kickoff",
     kind: "phase.kickoff",
@@ -193,7 +195,32 @@ const EXPERIENCE_BEATS: readonly ExperienceBeatDefinition[] = [
     status: "confirmed",
     team: null,
   },
-] as const;
+] as const satisfies readonly ExperienceBeatDefinition[];
+
+export type ExperienceBeatKey = (typeof EXPERIENCE_BEATS)[number]["key"];
+
+export const EXPERIENCE_BEAT_KEYS: readonly ExperienceBeatKey[] = Object.freeze(
+  EXPERIENCE_BEATS.map(({ key }) => key),
+);
+
+export function isFixedExperienceFixture(input: {
+  awayTeam: TeamCode;
+  homeTeam: TeamCode;
+}): boolean {
+  return (
+    input.homeTeam === EXPERIENCE_HOME_TEAM &&
+    input.awayTeam === EXPERIENCE_AWAY_TEAM
+  );
+}
+
+function requireFixedExperienceFixture(input: {
+  awayTeam: TeamCode;
+  homeTeam: TeamCode;
+}) {
+  if (!isFixedExperienceFixture(input)) {
+    throw new Error("Experience fixture must be Argentina against France");
+  }
+}
 
 interface PersistedExperienceEnvelope {
   fact: CanonicalEventFact;
@@ -401,6 +428,7 @@ export function createExperienceRuntime(
     },
     getRun: (runId) => options.repository.getRun(runId),
     prepareFixture: async (input) => {
+      requireFixedExperienceFixture(input);
       const runId = input.runId ?? id();
       const fixtureId = `experience:${runId}`;
       const existing = options.productRuntime.fixture(fixtureId);
@@ -451,6 +479,7 @@ export function createExperienceRuntime(
       timer.unref?.();
     },
     startRun: async (input) => {
+      requireFixedExperienceFixture(input);
       const runId = input.runId ?? id();
       const existing = await options.repository.getRun(runId);
       if (existing) return existing;

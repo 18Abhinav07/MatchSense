@@ -278,6 +278,23 @@ describe("durable Call Three Room routes", () => {
       "x-matchsense-csrf": host.csrfToken,
     };
 
+    const rejected = await app.inject({
+      headers,
+      method: "POST",
+      payload: {
+        awayTeam: "ARG",
+        homeTeam: "FRA",
+        host: { nickname: "Abhinav", teamCode: "ARG" },
+        name: "Experience finals",
+      },
+      url: "/api/v1/experience/rooms",
+    });
+    expect(rejected.statusCode).toBe(400);
+    expect(rejected.json()).toEqual({
+      error: { code: "INVALID_REQUEST", message: "Request is invalid" },
+    });
+    expect(experience.create).not.toHaveBeenCalled();
+
     const created = await app.inject({
       headers,
       method: "POST",
