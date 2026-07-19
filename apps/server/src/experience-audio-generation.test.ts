@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -10,6 +10,7 @@ import {
   EXPERIENCE_AUDIO_GENERATION_TARGETS,
   createDockerFfmpegRunner,
   createGeminiExperienceWavRequester,
+  createMacosExperienceWavRequester,
   generateExperienceAudioPack,
   parseExperienceAudioGeneratorArgs,
   validateExperienceAudioGenerationTargets,
@@ -116,6 +117,12 @@ describe("Experience audio generation plan", () => {
       decoder: "local",
       provider: "groq",
     });
+    expect(
+      parseExperienceAudioGeneratorArgs([
+        "--decoder=docker",
+        "--provider=macos",
+      ]),
+    ).toEqual({ decoder: "docker", provider: "macos" });
     expect(() =>
       parseExperienceAudioGeneratorArgs(["--provider=unknown"]),
     ).toThrow(/usage/i);
@@ -380,4 +387,80 @@ describe("Experience audio pack generator", () => {
       rejectFallback(EXPERIENCE_AUDIO_GENERATION_TARGETS[0]!),
     ).rejects.toThrow(new Error(fallbackReason));
   });
+
+  it("creates offline WAV narration with exact macOS command arguments and cleans up", async () => {
+    const commands: Array<{ args: readonly string[]; command: string }> = [];
+    let temporaryDirectory: string | null = null;
+    const requestMacosWav = createMacosExperienceWavRequester({
+      run: async (command) => {
+        commands.push(command);
+        if (command.command === "say") {
+          temporaryDirectory = path.dirname(command.args[5]!);
+          await writeFile(command.args[5]!, Buffer.from("aiff"));
+        } else {
+          await writeFile(command.args[5]!, wavBytes());
+        }
+      },
+    });
+    const target = EXPERIENCE_AUDIO_GENERATION_TARGETS[0]!;
+
+    await expect(requestMacosWav(target)).resolves.toEqual(wavBytes());
+    expect(commands).toEqual([
+      {
+        args: [
+          "-v",
+          "Daniel (English (UK))",
+          "-r",
+          "195",
+          "-o",
+          expect.stringMatching(/clip\.aiff$/u),
+          target.transcript,
+        ],
+        command: "say",
+      },
+      {
+        args: [
+          "-f",
+          "WAVE",
+          "-d",
+          "LEI16",
+          expect.stringMatching(/clip\.aiff$/u),
+          expect.stringMatching(/clip\.wav$/u),
+        ],
+        command: "afconvert",
+      },
+    ]);
+    expect(temporaryDirectory).not.toBeNull();
+    await expect(access(temporaryDirectory!)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it.each([
+    { output: Buffer.alloc(0), expected: /empty WAV/i },
+    { output: Buffer.from("not-wave"), expected: /invalid WAV/i },
+  ])(
+    "rejects invalid offline output and removes its private temp directory",
+    async ({ expected, output }) => {
+      let temporaryDirectory: string | null = null;
+      const requestMacosWav = createMacosExperienceWavRequester({
+        run: async (command) => {
+          if (command.command === "say") {
+            temporaryDirectory = path.dirname(command.args[5]!);
+            await writeFile(command.args[5]!, Buffer.from("aiff"));
+          } else {
+            await writeFile(command.args[5]!, output);
+          }
+        },
+      });
+
+      await expect(
+        requestMacosWav(EXPERIENCE_AUDIO_GENERATION_TARGETS[0]!),
+      ).rejects.toThrow(expected);
+      expect(temporaryDirectory).not.toBeNull();
+      await expect(access(temporaryDirectory!)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    },
+  );
 });

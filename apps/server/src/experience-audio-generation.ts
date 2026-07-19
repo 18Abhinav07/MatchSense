@@ -1,12 +1,16 @@
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import {
   access,
+  chmod,
   mkdir,
   mkdtemp,
+  readFile,
   rename,
   rm,
   writeFile,
 } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import type { CanonicalEventKind } from "@matchsense/contracts";
@@ -98,8 +102,17 @@ interface ExperienceSpeechSynthesizer {
 
 export interface ExperienceAudioGeneratorOptions {
   decoder: "docker" | "local";
-  provider: "gemini" | "groq";
+  provider: "gemini" | "groq" | "macos";
 }
+
+export interface ExperienceFileCommand {
+  args: readonly string[];
+  command: string;
+}
+
+export type ExperienceFileCommandRunner = (
+  command: ExperienceFileCommand,
+) => Promise<void>;
 
 const BEAT_METADATA = [
   ["kickoff", "phase.kickoff", "0'"],
@@ -149,7 +162,7 @@ export const EXPERIENCE_AUDIO_GENERATION_TARGETS: readonly ExperienceAudioGenera
   ]);
 
 const GENERATOR_USAGE =
-  "Usage: generate-experience-audio.mts [--provider=groq|--provider=gemini] [--decoder=local|--decoder=docker]";
+  "Usage: generate-experience-audio.mts [--provider=groq|--provider=gemini|--provider=macos] [--decoder=local|--decoder=docker]";
 
 export function parseExperienceAudioGeneratorArgs(
   args: readonly string[],
@@ -166,9 +179,14 @@ export function parseExperienceAudioGeneratorArgs(
       decoderWasSet = true;
       continue;
     }
-    if (argument === "--provider=groq" || argument === "--provider=gemini") {
+    if (
+      argument === "--provider=groq" ||
+      argument === "--provider=gemini" ||
+      argument === "--provider=macos"
+    ) {
       if (providerWasSet) throw new Error(GENERATOR_USAGE);
-      provider = argument === "--provider=gemini" ? "gemini" : "groq";
+      provider = argument.slice("--provider=".length) as
+        "gemini" | "groq" | "macos";
       providerWasSet = true;
       continue;
     }
@@ -298,6 +316,102 @@ export function createGeminiExperienceWavRequester(
     }
     assertWav(speech.bytes);
     return speech.bytes;
+  };
+}
+
+export const runExperienceFileCommand: ExperienceFileCommandRunner = (
+  command,
+) =>
+  new Promise((resolve, reject) => {
+    const child = spawn(command.command, [...command.args], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    const errors: Buffer[] = [];
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      callback();
+    };
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(() =>
+        reject(
+          new Error(`Offline narration command timed out: ${command.command}`),
+        ),
+      );
+    }, 60_000);
+    timeout.unref?.();
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (Buffer.concat(errors).length < 8_192) errors.push(Buffer.from(chunk));
+    });
+    child.once("error", () =>
+      finish(() =>
+        reject(
+          new Error(
+            `Offline narration command is unavailable: ${command.command}`,
+          ),
+        ),
+      ),
+    );
+    child.once("close", (code) => {
+      if (code === 0) {
+        finish(resolve);
+        return;
+      }
+      const detail = Buffer.concat(errors)
+        .toString("utf8")
+        .replace(/\s+/gu, " ")
+        .trim()
+        .slice(0, 240);
+      finish(() =>
+        reject(
+          new Error(
+            detail
+              ? `Offline narration command failed: ${detail}`
+              : `Offline narration command failed: ${command.command}`,
+          ),
+        ),
+      );
+    });
+  });
+
+export function createMacosExperienceWavRequester(options?: {
+  run?: ExperienceFileCommandRunner;
+}): ExperienceWavRequester {
+  const run = options?.run ?? runExperienceFileCommand;
+  return async (target) => {
+    const directory = await mkdtemp(
+      path.join(tmpdir(), "matchsense-narration-"),
+    );
+    try {
+      await chmod(directory, 0o700);
+      const aiffPath = path.join(directory, "clip.aiff");
+      const wavPath = path.join(directory, "clip.wav");
+      await run({
+        args: [
+          "-v",
+          "Daniel (English (UK))",
+          "-r",
+          "195",
+          "-o",
+          aiffPath,
+          target.transcript,
+        ],
+        command: "say",
+      });
+      await run({
+        args: ["-f", "WAVE", "-d", "LEI16", aiffPath, wavPath],
+        command: "afconvert",
+      });
+      const bytes = await readFile(wavPath);
+      assertWav(bytes);
+      return bytes;
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
   };
 }
 

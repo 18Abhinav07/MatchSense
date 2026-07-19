@@ -7,6 +7,7 @@ import { createCommentaryPipeline } from "../packages/commentary/src/index.js";
 import {
   createDockerFfmpegRunner,
   createGeminiExperienceWavRequester,
+  createMacosExperienceWavRequester,
   generateExperienceAudioPack,
   parseExperienceAudioGeneratorArgs,
 } from "../apps/server/src/experience-audio-generation.js";
@@ -43,7 +44,9 @@ async function main() {
             ttsTimeoutMs: 60_000,
           }),
         )
-      : undefined;
+      : provider === "macos"
+        ? createMacosExperienceWavRequester()
+        : undefined;
   const result = await generateExperienceAudioPack({
     expectedMp3Bytes,
     outputDirectory,
