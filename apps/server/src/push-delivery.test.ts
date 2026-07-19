@@ -57,6 +57,20 @@ describe("canonical Moment push envelope", () => {
       tag: "matchsense:test:run-20260718:arg-fra-demo:arg-fra-demo:score:1-0",
     });
   });
+
+  it("routes an Experience readiness test to the private run, not a fake Moment", () => {
+    expect(
+      createTestPushEnvelope(
+        {
+          ...moment,
+          familyId: "readiness",
+          fixtureId: "experience:run_one",
+          momentId: "readiness",
+        },
+        "device-one",
+      ).route,
+    ).toBe("/experience/run_one");
+  });
 });
 
 describe("push delivery routes", () => {

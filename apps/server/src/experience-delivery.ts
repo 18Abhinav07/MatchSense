@@ -111,6 +111,7 @@ export function experiencePushCandidate(
 export function createExperienceDelivery(options: {
   experiences: Pick<ExperienceRepository, "getRun">;
   push: Pick<DurablePushService, "deliverExperienceToFans">;
+  roomFanIds?: (runId: string) => Promise<readonly string[]>;
 }) {
   return {
     async deliver(payload: unknown) {
@@ -125,8 +126,9 @@ export function createExperienceDelivery(options: {
       ) {
         return { accepted: 0, attempted: 0 };
       }
+      const roomFanIds = await options.roomFanIds?.(candidate.runId);
       return options.push.deliverExperienceToFans(candidate.input, [
-        run.ownerFanId,
+        ...new Set([run.ownerFanId, ...(roomFanIds ?? [])]),
       ]);
     },
   };

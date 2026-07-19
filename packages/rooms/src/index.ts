@@ -1032,19 +1032,80 @@ export function resolveCallThree(
   };
 }
 
-export function createCallThreeRoom(input: {
+/** Projects current canonical match facts into an explicitly provisional table. */
+export function projectCallThreeRoom(
+  room: CallThreeRoomState,
+  input: {
+    readonly observedAt: number;
+    readonly regulationResult: RegulationResult;
+    readonly totalCards: number | null;
+    readonly totalGoals: number;
+    readonly version: number;
+  },
+): CallThreeRoomState {
+  assertCallThreeRoomOpen(room);
+  assertTimestamp(input.observedAt, "observedAt");
+  assertRevision(input.version);
+  const candidate = {
+    cards:
+      input.totalCards === null
+        ? null
+        : resolvedCallThreeTarget(input.totalCards >= 5 ? "YES" : "NO", {
+            finalisedAt: input.observedAt,
+            regulationResult: input.regulationResult,
+            totalCards: input.totalCards,
+            totalGoals: input.totalGoals,
+            verified: true,
+            version: input.version,
+          }),
+    goals: resolvedCallThreeTarget(input.totalGoals >= 3 ? "YES" : "NO", {
+      finalisedAt: input.observedAt,
+      regulationResult: input.regulationResult,
+      totalCards: input.totalCards,
+      totalGoals: input.totalGoals,
+      verified: true,
+      version: input.version,
+    }),
+    result: resolvedCallThreeTarget(input.regulationResult, {
+      finalisedAt: input.observedAt,
+      regulationResult: input.regulationResult,
+      totalCards: input.totalCards,
+      totalGoals: input.totalGoals,
+      verified: true,
+      version: input.version,
+    }),
+  } as const;
+  const nextTargets = {
+    cards:
+      candidate.cards === null ||
+      (room.targets.cards?.version ?? 0) >= input.version
+        ? room.targets.cards
+        : candidate.cards,
+    goals:
+      (room.targets.goals?.version ?? 0) >= input.version
+        ? room.targets.goals
+        : candidate.goals,
+    result:
+      (room.targets.result?.version ?? 0) >= input.version
+        ? room.targets.result
+        : candidate.result,
+  };
+  return sameCallThreeTargets(room.targets, nextTargets)
+    ? room
+    : { ...room, targets: nextTargets };
+}
+
+interface CreateCallThreeRoomInput {
   readonly id: string;
   readonly createdAt: number;
   readonly fixture: CallThreeFixture;
   readonly host: ParticipantIdentity;
   readonly reactionPolicy?: ReactionPolicy;
-}): CallThreeRoomState {
-  if (input.fixture.provenance !== "live_txline") {
-    fail(
-      "ROOM_NOT_ELIGIBLE",
-      "Call Three is available only for live TxLINE fixtures",
-    );
-  }
+}
+
+function createQualifiedCallThreeRoom(
+  input: CreateCallThreeRoomInput,
+): CallThreeRoomState {
   const id = cleanRequiredText(input.id, "INVALID_ROOM", "room id");
   const matchId = cleanRequiredText(
     input.fixture.fixtureId,
@@ -1076,6 +1137,48 @@ export function createCallThreeRoom(input: {
     status: "PRE_KICKOFF",
     targets: { cards: null, goals: null, result: null },
   };
+}
+
+export function createCallThreeRoom(
+  input: CreateCallThreeRoomInput,
+): CallThreeRoomState {
+  if (input.fixture.provenance !== "live_txline") {
+    fail(
+      "ROOM_NOT_ELIGIBLE",
+      "Call Three is available only for live TxLINE fixtures",
+    );
+  }
+  return createQualifiedCallThreeRoom(input);
+}
+
+/**
+ * Creates the explicitly labelled Experience-only Call Three aggregate.
+ * Keeping this separate preserves the live room eligibility boundary while
+ * allowing the authored five-minute fixture to reuse the same scoring rules.
+ */
+export function createExperienceCallThreeRoom(
+  input: CreateCallThreeRoomInput,
+): CallThreeRoomState {
+  if (input.fixture.provenance !== "synthetic_txline_shaped") {
+    fail(
+      "ROOM_NOT_ELIGIBLE",
+      "Experience Call Three requires a simulated TxLINE-shaped fixture",
+    );
+  }
+  return createQualifiedCallThreeRoom(input);
+}
+
+/** Starts an Experience Room early and makes that instant its hard lock. */
+export function startExperienceCallThreeRoom(
+  room: CallThreeRoomState,
+  input: { readonly observedAt: number },
+): CallThreeRoomState {
+  assertCallThreeRoomOpen(room);
+  assertTimestamp(input.observedAt, "observedAt");
+  return hardLockCallThreeAtKickoff({
+    ...room,
+    kickoffAt: input.observedAt,
+  });
 }
 
 export function joinCallThreeRoom(
@@ -1266,6 +1369,78 @@ export function registerConfirmedCallThreeMoment(
   };
 }
 
+/** Holds a Moment family and its reactions while canonical VAR is unresolved. */
+export function holdCallThreeMoment(
+  room: CallThreeRoomState,
+  input: { readonly momentId: string; readonly revision: number },
+): CallThreeRoomState {
+  assertCallThreeRoomOpen(room);
+  const momentId = cleanRequiredText(
+    input.momentId,
+    "MOMENT_NOT_FOUND",
+    "moment id",
+  );
+  assertRevision(input.revision);
+  const moments = Object.fromEntries(
+    Object.entries(room.moments).map(([key, moment]) => [
+      key,
+      moment.momentId === momentId && moment.revision <= input.revision
+        ? { ...moment, varState: "HOLD" as const }
+        : moment,
+    ]),
+  ) as Record<string, MomentRevision>;
+  moments[momentKey(momentId, input.revision)] = {
+    momentId,
+    revision: input.revision,
+    varState: "HOLD",
+  };
+  return {
+    ...room,
+    moments,
+    reactions: room.reactions.map((reaction) =>
+      reaction.momentId === momentId && reaction.revision <= input.revision
+        ? { ...reaction, status: "HELD" }
+        : reaction,
+    ),
+  };
+}
+
+/** Releases a held Moment family after canonical VAR confirms it stands. */
+export function confirmHeldCallThreeMoment(
+  room: CallThreeRoomState,
+  input: { readonly momentId: string; readonly revision: number },
+): CallThreeRoomState {
+  assertCallThreeRoomOpen(room);
+  const momentId = cleanRequiredText(
+    input.momentId,
+    "MOMENT_NOT_FOUND",
+    "moment id",
+  );
+  assertRevision(input.revision);
+  const moments = Object.fromEntries(
+    Object.entries(room.moments).map(([key, moment]) => [
+      key,
+      moment.momentId === momentId && moment.varState === "HOLD"
+        ? { ...moment, varState: "OVERTURNED" as const }
+        : moment,
+    ]),
+  ) as Record<string, MomentRevision>;
+  moments[momentKey(momentId, input.revision)] = {
+    momentId,
+    revision: input.revision,
+    varState: "CLEAR",
+  };
+  return {
+    ...room,
+    moments,
+    reactions: room.reactions.map((reaction) =>
+      reaction.momentId === momentId && reaction.status === "HELD"
+        ? { ...reaction, status: "VISIBLE" }
+        : reaction,
+    ),
+  };
+}
+
 /**
  * A canonical correction replaces the meaning of an older revision in the
  * same Moment family. Keep the old revision visible, but make any response to
@@ -1371,7 +1546,17 @@ export function addCallThreeReaction(
     fail("INVALID_REACTION", `unsupported reaction: ${input.kind}`);
   }
   const moment = room.moments[momentKey(momentId, input.revision)];
-  if (!moment || moment.varState !== "CLEAR") {
+  const latestRevision = Math.max(
+    0,
+    ...Object.values(room.moments)
+      .filter((candidate) => candidate.momentId === momentId)
+      .map((candidate) => candidate.revision),
+  );
+  if (
+    !moment ||
+    input.revision !== latestRevision ||
+    moment.varState !== "CLEAR"
+  ) {
     fail(
       "MOMENT_NOT_CONFIRMED",
       "reactions require a confirmed canonical Moment",

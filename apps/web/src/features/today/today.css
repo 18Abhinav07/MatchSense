@@ -334,6 +334,74 @@
   line-height: 1.55;
 }
 
+.ms-today-experience {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 40px;
+  align-items: end;
+  width: min(100%, 1240px);
+  margin: 0 auto clamp(48px, 7vw, 82px);
+  padding: clamp(28px, 4vw, 48px);
+  overflow: hidden;
+  color: #182014;
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / 38%), transparent 48%), #a8c96a;
+}
+.ms-today-experience::after {
+  position: absolute;
+  top: 50%;
+  right: 22%;
+  width: 230px;
+  aspect-ratio: 1;
+  border: 1px solid rgb(24 32 20 / 18%);
+  border-radius: 50%;
+  content: "";
+  transform: translateY(-50%);
+}
+.ms-today-experience p,
+.ms-today-experience button small {
+  margin: 0;
+  font:
+    760 9px/1.35 "SFMono-Regular",
+    ui-monospace,
+    monospace;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+.ms-today-experience h2 {
+  max-width: 12ch;
+  margin: 10px 0 13px;
+  font-size: clamp(30px, 4vw, 52px);
+  line-height: 0.93;
+  letter-spacing: -0.065em;
+}
+.ms-today-experience > div > span {
+  display: block;
+  max-width: 58ch;
+  line-height: 1.55;
+  opacity: 0.72;
+}
+.ms-today-experience button {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  min-width: min(100%, 280px);
+  gap: 8px;
+  padding: 20px 24px;
+  color: #f3f1e9;
+  border: 0;
+  background: #111a13;
+  text-align: left;
+}
+.ms-today-experience button span {
+  font-size: 16px;
+  font-weight: 800;
+}
+.ms-today-experience button small {
+  opacity: 0.55;
+}
+
 @keyframes ms-today-skeleton {
   from {
     background-position: 100% 0;
@@ -352,6 +420,12 @@
   }
   .ms-today-hero aside {
     max-width: 420px;
+  }
+  .ms-today-experience {
+    grid-template-columns: 1fr;
+  }
+  .ms-today-experience button {
+    min-width: 0;
   }
   .ms-fixture-card button {
     grid-template-areas:

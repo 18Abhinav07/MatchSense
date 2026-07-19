@@ -5,7 +5,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { parseServerEnv } from "./config.js";
-import { startApi } from "./api-main.js";
+import { experienceTeamCatalog, startApi } from "./api-main.js";
 
 async function temporaryWebShell() {
   const directory = await mkdtemp(path.join(tmpdir(), "matchsense-api-"));
@@ -18,6 +18,36 @@ async function temporaryWebShell() {
 }
 
 describe("API-only runtime", () => {
+  it("adapts every persisted tournament team for Experience commentary", () => {
+    expect(
+      experienceTeamCatalog([
+        {
+          code: "ARG",
+          name: "Argentina",
+          participantId: "team-arg",
+        },
+        {
+          code: "MAR",
+          name: "Morocco",
+          participantId: "team-mar",
+        },
+      ]),
+    ).toEqual([
+      {
+        code: "ARG",
+        colors: { primary: "#75AADB", secondary: "#F3EFE4" },
+        name: "Argentina",
+        participantId: "team-arg",
+      },
+      {
+        code: "MAR",
+        colors: { primary: "#164C36", secondary: "#D8F279" },
+        name: "Morocco",
+        participantId: "team-mar",
+      },
+    ]);
+  });
+
   it("boots static/readiness routes without migrations or public demo routes", async () => {
     const webDistPath = await temporaryWebShell();
     const database = {

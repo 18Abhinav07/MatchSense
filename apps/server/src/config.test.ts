@@ -16,11 +16,17 @@ describe("parseServerEnv", () => {
   });
 
   it("defaults the product to live TxLINE and never silently substitutes demo", () => {
-    expect(() =>
+    expect(
       parseServerEnv({
         DATABASE_URL: "postgresql://db.example/matchsense",
       }),
-    ).toThrow("Invalid MatchSense server configuration");
+    ).toEqual({
+      databaseUrl: "postgresql://db.example/matchsense",
+      dataRightsMode: "txline_hackathon",
+      host: "0.0.0.0",
+      port: 8080,
+      role: "worker",
+    });
     const config = parseServerEnv({
       DATABASE_URL: "postgresql://db.example/matchsense",
       TXLINE_API_TOKEN: "fixture-server-only-token",
@@ -36,7 +42,7 @@ describe("parseServerEnv", () => {
     });
   });
 
-  it("enables the explicit hackathon TxLINE source only with its backend token", () => {
+  it("enables the live TxLINE source only when its backend token is present", () => {
     expect(
       parseServerEnv({
         DATABASE_URL: "postgresql://db.example/matchsense",
@@ -47,12 +53,12 @@ describe("parseServerEnv", () => {
       dataRightsMode: "txline_hackathon",
       txlineApiToken: "fixture-server-only-token",
     });
-    expect(() =>
+    expect(
       parseServerEnv({
         DATABASE_URL: "postgresql://db.example/matchsense",
         DATA_RIGHTS_MODE: "txline_hackathon",
       }),
-    ).toThrow("Invalid MatchSense server configuration");
+    ).not.toHaveProperty("txlineApiToken");
   });
 
   it("separates push subscription encryption from VAPID signing keys", () => {
@@ -100,13 +106,13 @@ describe("parseServerEnv", () => {
     ).toThrow("API role must not receive VAPID private key");
   });
 
-  it("requires the TxLINE token only for the collector worker", () => {
-    expect(() =>
+  it("allows a push-only worker without placing TxLINE credentials in the API", () => {
+    expect(
       parseServerEnv({
         DATABASE_URL: "postgresql://db.example/matchsense",
         ROLE: "worker",
       }),
-    ).toThrow("TxLINE token is required");
+    ).toMatchObject({ role: "worker" });
 
     const apiConfig = parseServerEnv({
       DATABASE_URL: "postgresql://db.example/matchsense",

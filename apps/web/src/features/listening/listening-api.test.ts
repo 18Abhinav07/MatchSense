@@ -17,7 +17,10 @@ describe("Pocket Listening browser API", () => {
         ),
       )
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
-    const api = createListeningApi(fetcher);
+    const api = createListeningApi(
+      fetcher,
+      () => "matchsense_csrf=proof-token; another=value",
+    );
 
     await expect(
       api.create({
@@ -32,13 +35,21 @@ describe("Pocket Listening browser API", () => {
       "/api/v1/fixtures/experience%3Arun-1/listening-sessions",
       expect.objectContaining({
         body: JSON.stringify({ perspectiveTeam: "ARG" }),
+        headers: expect.objectContaining({
+          "x-matchsense-csrf": "proof-token",
+        }),
         method: "POST",
       }),
     );
     expect(fetcher).toHaveBeenNthCalledWith(
       2,
       "/api/v1/listening-sessions/listen-1",
-      expect.objectContaining({ method: "DELETE" }),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "x-matchsense-csrf": "proof-token",
+        }),
+        method: "DELETE",
+      }),
     );
     expect(api.streamUrl("listen-1")).toBe(
       "/api/v1/listening-sessions/listen-1/stream.mp3",

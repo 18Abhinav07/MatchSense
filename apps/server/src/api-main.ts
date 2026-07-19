@@ -9,7 +9,7 @@ import {
   type FixtureTruthRepository,
   type RoomAggregateRepository,
 } from "@matchsense/db";
-import type { TeamCode } from "@matchsense/contracts";
+import type { TeamCode, TeamSummary } from "@matchsense/contracts";
 import {
   createFixtureProjection,
   toFixtureSnapshot,
@@ -25,13 +25,17 @@ import {
 } from "./durable-room-service.js";
 import { createDurablePushRegistrationService } from "./durable-push.js";
 import { createExperienceRuntime } from "./experience-runtime.js";
+import {
+  createExperienceRoomService,
+  type ExperienceRoomAggregate,
+} from "./experience-room-service.js";
 import { createFanSessionService } from "./fan-session.js";
 import {
   createFixtureProcessor,
   restoreFixtureProjection,
 } from "./fixture-processor.js";
 import { inspectMp3 } from "./mp3.js";
-import { createProductRuntime } from "./product-runtime.js";
+import { createProductRuntime, DEFAULT_TEAMS } from "./product-runtime.js";
 import { createPushSubscriptionCipher } from "./push-crypto.js";
 import {
   createShutdownFailureReporter,
@@ -69,6 +73,25 @@ function assertApiRole(config: ServerConfig) {
   if (config.role !== "api") {
     throw new Error("API runtime requires ROLE=api");
   }
+}
+
+export function experienceTeamCatalog(
+  entries: readonly {
+    code: string;
+    name: string;
+    participantId: string;
+  }[],
+): readonly TeamSummary[] {
+  const defaults = new Map(DEFAULT_TEAMS.map((team) => [team.code, team]));
+  return entries.map((entry) => ({
+    code: entry.code,
+    colors: defaults.get(entry.code)?.colors ?? {
+      primary: "#164C36",
+      secondary: "#D8F279",
+    },
+    name: entry.name,
+    participantId: entry.participantId,
+  }));
 }
 
 /**
@@ -163,11 +186,15 @@ export async function startApi(
           readFile(path.resolve(import.meta.dirname, "../assets/silence.mp3")),
         ])
       : null;
+  const experienceTeams = experienceAssets
+    ? experienceTeamCatalog(await databaseRuntime.teamCatalog.list())
+    : null;
   const experienceProduct = experienceAssets
     ? createProductRuntime({
         commentaryPipeline: createCommentaryPipeline({ env: process.env }),
         cueBytes: experienceAssets[0],
         silenceBytes: experienceAssets[1],
+        ...(experienceTeams?.length ? { teamCatalog: experienceTeams } : {}),
         transcodeCommentary: (wavBytes) =>
           transcodeWavToStreamMp3(wavBytes, {
             expected: inspectMp3(experienceAssets[0]),
@@ -254,7 +281,78 @@ export async function startApi(
         })
       : null;
 
+  const experienceRoomUnsubscribers: (() => void)[] = [];
+  const subscribedExperienceRoomFixtures = new Set<string>();
+  let experienceRooms: ReturnType<typeof createExperienceRoomService> | null =
+    null;
+  const subscribeExperienceRoomFixture = (fixtureId: string) => {
+    if (
+      !experienceProduct ||
+      !experienceRooms ||
+      subscribedExperienceRoomFixtures.has(fixtureId)
+    ) {
+      return;
+    }
+    const unsubscribe = experienceProduct.subscribeFixture(
+      fixtureId,
+      (event) => {
+        void experienceRooms
+          ?.projectFixture(event.snapshot)
+          .catch(() => undefined);
+      },
+    );
+    if (!unsubscribe) return;
+    subscribedExperienceRoomFixtures.add(fixtureId);
+    experienceRoomUnsubscribers.push(unsubscribe);
+  };
+  experienceRooms =
+    experience && experienceProduct && databaseRuntime.rooms
+      ? createExperienceRoomService({
+          activateFixture: subscribeExperienceRoomFixture,
+          prepareFixture: async (input) => {
+            const prepared = await experience.prepareFixture(input);
+            subscribeExperienceRoomFixture(prepared.fixture.fixtureId);
+            const fixture = experienceProduct.fixture(
+              prepared.fixture.fixtureId,
+            );
+            if (!fixture) {
+              throw new Error("Prepared Experience fixture is unavailable");
+            }
+            return { fixture, runId: prepared.runId };
+          },
+          repository:
+            databaseRuntime.rooms as RoomAggregateRepository<ExperienceRoomAggregate>,
+          startFixture: async (input) => {
+            const run = await experience.startRun({
+              awayTeam: input.fixture.awayTeam,
+              homeTeam: input.fixture.homeTeam,
+              ownerFanId: input.ownerFanId,
+              runId: input.runId,
+            });
+            subscribeExperienceRoomFixture(run.fixtureId);
+            const fixture = experienceProduct.fixture(run.fixtureId);
+            if (!fixture) {
+              throw new Error("Started Experience fixture is unavailable");
+            }
+            return fixture;
+          },
+        })
+      : null;
+  const experienceRoomTimer = experienceRooms
+    ? setInterval(() => {
+        void experienceRooms?.tick().catch(() => undefined);
+      }, 1_000)
+    : null;
+  experienceRoomTimer?.unref?.();
+
+  if (experienceProduct && experienceRooms) {
+    experienceRoomUnsubscribers.push(
+      experienceProduct.onFixtureRegistered(subscribeExperienceRoomFixture),
+    );
+  }
+
   await experience?.start();
+  await experienceRooms?.recover();
 
   let app: FastifyInstance | null = null;
   let unregisterSignals: () => void = () => undefined;
@@ -262,9 +360,27 @@ export async function startApi(
     app = buildApp({
       ...(commentaryArtifacts ? { commentaryArtifacts } : {}),
       demo: false,
-      ...(durableRooms ? { durableRooms } : {}),
+      ...(durableRooms
+        ? {
+            durableRooms: {
+              ...durableRooms,
+              ...(experienceRooms ? { experience: experienceRooms } : {}),
+            },
+          }
+        : {}),
       ...(experience && experienceProduct
-        ? { experience, experienceRuntime: experienceProduct }
+        ? {
+            experience,
+            ...(experienceRooms
+              ? {
+                  experienceRunAccess: (input: {
+                    fanId: string;
+                    runId: string;
+                  }) => experienceRooms.isRunMember(input.runId, input.fanId),
+                }
+              : {}),
+            experienceRuntime: experienceProduct,
+          }
         : {}),
       ...(pushRegistration && config.vapidPublicKey
         ? {
@@ -289,6 +405,8 @@ export async function startApi(
     });
     app.addHook("onClose", async () => {
       unregisterSignals();
+      if (experienceRoomTimer) clearInterval(experienceRoomTimer);
+      for (const unsubscribe of experienceRoomUnsubscribers) unsubscribe();
       await databaseRuntime.close();
     });
     unregisterSignals = registerShutdownSignals(

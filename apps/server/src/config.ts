@@ -27,17 +27,6 @@ const serverEnvironmentSchema = z
     VAPID_SUBJECT: z.string().trim().min(1).optional(),
   })
   .superRefine((environment, context) => {
-    if (
-      environment.ROLE === "worker" &&
-      environment.DATA_RIGHTS_MODE === "txline_hackathon" &&
-      !environment.TXLINE_API_TOKEN
-    ) {
-      context.addIssue({
-        code: "custom",
-        message: "TxLINE token is required",
-        path: ["TXLINE_API_TOKEN"],
-      });
-    }
     if (environment.ROLE === "api" && environment.TXLINE_API_TOKEN) {
       context.addIssue({
         code: "custom",
@@ -150,9 +139,10 @@ export function parseServerEnv(
   };
   if (
     result.data.ROLE === "worker" &&
-    result.data.DATA_RIGHTS_MODE === "txline_hackathon"
+    result.data.DATA_RIGHTS_MODE === "txline_hackathon" &&
+    result.data.TXLINE_API_TOKEN
   ) {
-    config.txlineApiToken = result.data.TXLINE_API_TOKEN!;
+    config.txlineApiToken = result.data.TXLINE_API_TOKEN;
   }
   if (result.data.PUSH_SUBSCRIPTION_ENCRYPTION_SECRET) {
     config.pushSubscriptionEncryptionSecret =

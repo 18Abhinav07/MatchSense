@@ -22,6 +22,54 @@ import {
 import type { FixtureProcessor } from "./fixture-processor.js";
 import { createProductRuntime } from "./product-runtime.js";
 
+function fanRoutes() {
+  const fan = (id: string) => ({
+    avatarVariant: null,
+    createdAt: "2026-07-17T12:00:00.000Z",
+    deletedAt: null,
+    favoriteTeam: "ARG",
+    handle: id,
+    handleNormalized: id,
+    id,
+    preferences: {},
+    profile: {},
+    updatedAt: "2026-07-17T12:00:00.000Z",
+  });
+  const sessions = {
+    createGuest: vi.fn(),
+    hash: vi.fn(),
+    resolve: vi.fn(async (token: string) => {
+      if (!token.endsWith("-token")) return null;
+      const id = token.slice(0, -"-token".length);
+      return {
+        csrfHash: `csrf-hash-${id}`,
+        expiresAt: "2099-07-17T12:00:00.000Z",
+        fan: fan(id),
+        lastSeenAt: "2026-07-17T12:00:00.000Z",
+        revokedAt: null,
+        sessionHash: `session-hash-${id}`,
+      };
+    }),
+    verifyCsrf: vi.fn(
+      (session: { fan: { id: string } }, csrf: string) =>
+        csrf === `csrf-${session.fan.id}`,
+    ),
+  };
+  return {
+    dependencies: {
+      fixtureReads: {},
+      repository: {
+        listFollows: vi.fn(async () => []),
+      },
+      sessions,
+    } as never,
+    headers: (id: string, mutation = false) => ({
+      cookie: `matchsense_session=${id}-token`,
+      ...(mutation ? { "x-matchsense-csrf": `csrf-${id}` } : {}),
+    }),
+  };
+}
+
 function memoryExperiences(): ExperienceRepository & {
   beats: Map<string, ExperienceBeatRecord>;
 } {
@@ -841,20 +889,25 @@ describe("exact Moment resolver and Experience HTTP contract", () => {
       productRuntime: product,
       repository,
     });
+    const fans = fanRoutes();
     const app = buildApp({
       demo: false,
       experience,
+      experienceRunAccess: async ({ fanId, runId }) =>
+        fanId === "fan-member" && runId === "route-run",
+      experienceRuntime: product,
+      fan: fans.dependencies,
       readinessProbe: {
         check: async () => ({
           databaseReachable: true,
           migrationsCurrent: true,
         }),
       },
-      runtime: product,
       webDistPath: process.cwd(),
     });
 
     const started = await app.inject({
+      headers: fans.headers("fan-owner", true),
       method: "POST",
       payload: { awayTeam: "FRA", homeTeam: "ARG" },
       url: "/api/v1/experience/runs",
@@ -867,13 +920,97 @@ describe("exact Moment resolver and Experience HTTP contract", () => {
         status: "countdown",
       },
     });
+    expect(started.json().run).not.toHaveProperty("ownerFanId");
     const status = await app.inject({
+      headers: fans.headers("fan-owner"),
       url: "/api/v1/experience/runs/route-run",
     });
     expect(status.statusCode).toBe(200);
     expect(status.json()).toMatchObject({
       run: { id: "route-run", nextBeatIndex: 0 },
     });
+    expect(status.json().run).not.toHaveProperty("ownerFanId");
+
+    const fixture = await app.inject({
+      headers: fans.headers("fan-owner"),
+      url: "/api/v1/experience/runs/route-run/fixture",
+    });
+    expect(fixture.statusCode).toBe(200);
+    expect(fixture.json()).toMatchObject({ fixtureId: "experience:route-run" });
+
+    const listening = await app.inject({
+      headers: fans.headers("fan-owner", true),
+      method: "POST",
+      payload: { perspectiveTeam: "ARG" },
+      url: "/api/v1/fixtures/experience%3Aroute-run/listening-sessions",
+    });
+    expect(listening.statusCode).toBe(201);
+    const listeningSessionId = listening.json().id as string;
+
+    const memberStatus = await app.inject({
+      headers: fans.headers("fan-member"),
+      url: "/api/v1/experience/runs/route-run",
+    });
+    expect(memberStatus.statusCode).toBe(200);
+    const memberFixture = await app.inject({
+      headers: fans.headers("fan-member"),
+      url: "/api/v1/experience/runs/route-run/fixture",
+    });
+    expect(memberFixture.statusCode).toBe(200);
+    const memberListening = await app.inject({
+      headers: fans.headers("fan-member", true),
+      method: "POST",
+      payload: { perspectiveTeam: "FRA" },
+      url: "/api/v1/fixtures/experience%3Aroute-run/listening-sessions",
+    });
+    expect(memberListening.statusCode).toBe(201);
+    const memberListeningSessionId = memberListening.json().id as string;
+    expect(
+      (
+        await app.inject({
+          headers: fans.headers("fan-member"),
+          url: `/api/v1/listening-sessions/${memberListeningSessionId}`,
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await app.inject({
+          headers: fans.headers("fan-owner"),
+          url: `/api/v1/listening-sessions/${memberListeningSessionId}`,
+        })
+      ).statusCode,
+    ).toBe(404);
+
+    for (const url of [
+      "/api/v1/experience/runs/route-run",
+      "/api/v1/experience/runs/route-run/fixture",
+      "/api/v1/experience/runs/route-run/moments/missing",
+      "/api/v1/experience/runs/route-run/stream",
+      `/api/v1/listening-sessions/${listeningSessionId}`,
+      `/api/v1/listening-sessions/${listeningSessionId}/stream.mp3`,
+    ]) {
+      const unauthenticated = await app.inject({ url });
+      expect(unauthenticated.statusCode, url).toBe(401);
+      const otherFan = await app.inject({
+        headers: fans.headers("fan-other"),
+        url,
+      });
+      expect(otherFan.statusCode, url).toBe(404);
+    }
+
+    const forbiddenDelete = await app.inject({
+      headers: fans.headers("fan-other", true),
+      method: "DELETE",
+      url: `/api/v1/listening-sessions/${listeningSessionId}`,
+    });
+    expect(forbiddenDelete.statusCode).toBe(404);
+    const deleted = await app.inject({
+      headers: fans.headers("fan-owner", true),
+      method: "DELETE",
+      url: `/api/v1/listening-sessions/${listeningSessionId}`,
+    });
+    expect(deleted.statusCode).toBe(204);
     await app.close();
   });
 });

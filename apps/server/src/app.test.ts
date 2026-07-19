@@ -124,6 +124,9 @@ describe("same-origin web shell", () => {
     "/you",
     "/you/profile",
     "/you/settings/notifications",
+    "/experience",
+    "/experience/run-1",
+    "/experience/run-1/moments/run-1%3Agoal%3A3",
     "/matches/fixture-1",
     "/matches/fixture%3Alive",
     "/matches/fixture-1/live",
@@ -178,7 +181,8 @@ describe("same-origin web shell", () => {
 
   it.each([
     "/onboarding",
-    "/experience/with-friends",
+    "/experience/run-1/moments",
+    "/experience/run-1/moments/moment-1/extra",
     "/history",
     "/demo",
     "/offline",

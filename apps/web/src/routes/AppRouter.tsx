@@ -15,6 +15,10 @@ import {
   type OnboardingProfileApi,
 } from "../features/onboarding/OnboardingFlow.js";
 import { MatchHub } from "../features/fixture/MatchHub.js";
+import { ExperienceJourney } from "../features/experience/ExperienceJourney.js";
+import type { ExperienceApi } from "../features/experience/experience-api.js";
+import { ExperienceRoom } from "../features/experience/ExperienceRoom.js";
+import type { ExperienceRoomApi } from "../features/experience/experience-room-api.js";
 import {
   createFixtureEventSourceStream,
   type FixtureStreamPort,
@@ -73,6 +77,8 @@ export interface AppRouterProps {
   initialRoom?: CallThreeRoomView | undefined;
   initialRooms?: readonly CallThreeRoomView[] | undefined;
   fixtureStream?: FixtureStreamPort | undefined;
+  experienceApi?: ExperienceApi | undefined;
+  experienceRoomApi?: ExperienceRoomApi | undefined;
   memoryApi?: MemoryApi | undefined;
   momentApi?: MomentResolutionApi | undefined;
   productApi?: ProductApi | undefined;
@@ -87,15 +93,45 @@ function currentPath() {
 
 function publicPath(path: string) {
   const normalized = normalizePath(path);
-  if (
-    normalized === "/demo" ||
-    normalized.startsWith("/demo/") ||
-    normalized === "/experience" ||
-    normalized.startsWith("/experience/")
-  ) {
+  if (normalized === "/demo" || normalized.startsWith("/demo/")) {
     return "/";
   }
   return normalized;
+}
+
+function experienceRouteFrom(path: string) {
+  if (path === "/experience") return { identity: null, runId: null };
+  const matched = /^\/experience\/([^/]+)(?:\/moments\/([^/]+))?$/u.exec(path);
+  const runId = decodeRouteSegment(matched?.[1]);
+  const identity = decodeRouteSegment(matched?.[2]);
+  return runId ? { identity, runId } : null;
+}
+
+function experienceRunIdFromFixture(fixtureId: string | null) {
+  if (!fixtureId?.startsWith("experience:")) return null;
+  const runId = fixtureId.slice("experience:".length);
+  return /^[A-Za-z0-9_.:-]{1,120}$/u.test(runId) ? runId : null;
+}
+
+function experienceRoomRouteFrom(path: string) {
+  let matched = /^\/experience\/rooms\/new\/([^/]+)\/([^/]+)$/u.exec(path);
+  if (matched) {
+    const homeTeam = decodeRouteSegment(matched[1]);
+    const awayTeam = decodeRouteSegment(matched[2]);
+    return homeTeam && awayTeam
+      ? ({ awayTeam, homeTeam, mode: "create" } as const)
+      : null;
+  }
+  matched = /^\/experience\/rooms\/join\/([^/]+)$/u.exec(path);
+  if (matched) {
+    const inviteCode = decodeRouteSegment(matched[1]);
+    return inviteCode && /^[A-Za-z0-9_-]{22}$/u.test(inviteCode)
+      ? ({ inviteCode, mode: "invite" } as const)
+      : null;
+  }
+  matched = /^\/experience\/rooms\/([^/]+)$/u.exec(path);
+  const roomId = decodeRouteSegment(matched?.[1]);
+  return roomId ? ({ mode: "room", roomId } as const) : null;
 }
 
 function fixtureIdFrom(path: string) {
@@ -197,6 +233,8 @@ export function AppRouter({
   initialRoom,
   initialRooms,
   fixtureStream,
+  experienceApi,
+  experienceRoomApi,
   memoryApi,
   momentApi,
   productApi,
@@ -278,8 +316,21 @@ export function AppRouter({
   const selectedFixtureId = fixtureIdFrom(path);
   const memoryFixtureId = memoryFixtureIdFrom(path);
   const momentRoute = momentRouteFrom(path);
-  const momentFixtureId = momentRoute?.fixtureId ?? null;
-  const momentIdentity = momentRoute?.identity ?? null;
+  const experienceRoute = experienceRouteFrom(path);
+  const experienceRoomRoute = experienceRoomRouteFrom(path);
+  const pushedExperienceRunId = experienceRunIdFromFixture(
+    momentRoute?.fixtureId ?? null,
+  );
+  const experienceRunId = experienceRoute?.runId ?? pushedExperienceRunId;
+  const experienceMomentIdentity =
+    experienceRoute?.identity ??
+    (pushedExperienceRunId ? (momentRoute?.identity ?? null) : null);
+  const momentFixtureId = pushedExperienceRunId
+    ? null
+    : (momentRoute?.fixtureId ?? null);
+  const momentIdentity = pushedExperienceRunId
+    ? null
+    : (momentRoute?.identity ?? null);
   const replaySessionId = replaySessionIdFrom(path);
   const roomCreateFixtureId = roomCreateFixtureIdFrom(path);
   const roomInviteCode = roomInviteCodeFrom(path);
@@ -561,9 +612,46 @@ export function AppRouter({
         catalogState={catalogState}
         onComplete={(next) => {
           setProfile(next);
-          navigate("/");
+          navigate(path);
         }}
         profileApi={profiles as OnboardingProfileApi}
+      />
+    );
+  }
+
+  if (experienceRoomRoute) {
+    return (
+      <ExperienceRoom
+        {...(experienceRoomApi ? { api: experienceRoomApi } : {})}
+        catalog={catalog}
+        favoriteTeam={profile.favoriteTeam}
+        nickname={profile.handle ?? "supporter"}
+        onBack={() => navigate("/experience")}
+        onOpenMatch={(id) => navigate(`/experience/${encodeURIComponent(id)}`)}
+        onOpenRoom={(id) =>
+          navigate(`/experience/rooms/${encodeURIComponent(id)}`)
+        }
+        route={experienceRoomRoute}
+      />
+    );
+  }
+
+  if (experienceRoute || pushedExperienceRunId) {
+    return (
+      <ExperienceJourney
+        {...(experienceApi ? { api: experienceApi } : {})}
+        catalog={catalog}
+        favoriteTeam={profile.favoriteTeam}
+        initialMomentIdentity={experienceMomentIdentity}
+        onBack={() => navigate("/")}
+        onCreateRoom={({ awayTeam, homeTeam }) =>
+          navigate(
+            `/experience/rooms/new/${encodeURIComponent(homeTeam)}/${encodeURIComponent(awayTeam)}`,
+          )
+        }
+        onOpenRun={(id) => navigate(`/experience/${encodeURIComponent(id)}`)}
+        onRestart={() => navigate("/experience")}
+        runId={experienceRunId}
       />
     );
   }
@@ -794,6 +882,7 @@ export function AppRouter({
         onOpenFixture={(fixtureId) =>
           navigate(`/matches/${encodeURIComponent(fixtureId)}`)
         }
+        onOpenExperience={() => navigate("/experience")}
         onOpenProfile={() => navigate("/you")}
         onOpenReplays={() => navigate("/replays")}
         state={todayState}

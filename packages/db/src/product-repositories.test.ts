@@ -322,6 +322,33 @@ describe("durable push, Experience, Room, and Memory repositories", () => {
     ]);
   });
 
+  it("lists persisted Room aggregates by mode for Experience recovery", async () => {
+    const row = {
+      aggregate: '{"schemaVersion":3}',
+      created_at: "2026-07-17T10:00:00.000Z",
+      finalized_at: null,
+      fixture_id: "experience:run-1",
+      id: "room-1",
+      invite_expires_at: "2026-07-17T11:00:00.000Z",
+      invite_hash: "e".repeat(64),
+      mode: "demo",
+      owner_fan_id: "fan-1",
+      status: "lobby",
+      updated_at: "2026-07-17T10:01:00.000Z",
+      version: 0,
+    };
+    const fake = testClient(() => [row]);
+    const repository = databaseModule.createRoomAggregateRepository(
+      fake.client,
+    );
+
+    await expect(repository.listByMode?.("demo")).resolves.toMatchObject([
+      { fixtureId: "experience:run-1", mode: "demo" },
+    ]);
+    expect(fake.queries[0]?.query).toMatch(/WHERE mode = \$1/u);
+    expect(fake.queries[0]?.parameters).toEqual(["demo"]);
+  });
+
   it("appends immutable Memory revisions and resolves the latest", async () => {
     const row = {
       created_at: "2026-07-17T10:00:00.000Z",

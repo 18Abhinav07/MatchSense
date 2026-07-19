@@ -249,6 +249,44 @@ describe("truthful application router", () => {
     expect(markup).not.toContain("Open Demo Mode");
   });
 
+  it("opens the always-available Experience instead of redirecting it to Today", () => {
+    const markup = render({ initialPath: "/experience" });
+
+    expect(markup).toContain("THE COMPLETE MATCHSENSE LOOP");
+    expect(markup).toContain("Start five-minute match");
+    expect(markup).toContain("SIMULATED TXLINE-SHAPED DATA");
+  });
+
+  it("opens the Experience Room creator with the chosen fixture", () => {
+    const markup = render({
+      initialPath: "/experience/rooms/new/ARG/FRA",
+    });
+
+    expect(markup).toContain("YOUR FIVE-MINUTE WATCH PARTY");
+    expect(markup).toContain("Argentina");
+    expect(markup).toContain("France");
+    expect(markup).toContain("Create room and invite");
+  });
+
+  it("keeps a cold Experience invite pending through onboarding", () => {
+    const markup = render({
+      initialPath: "/experience/rooms/join/BwcHBwcHBwcHBwcHBwcHBw",
+      initialProfile: null,
+    });
+
+    expect(markup).toContain("Every match has a pulse");
+    expect(markup).not.toContain("YOUR MATCH DAY");
+  });
+
+  it("routes an Experience push deep-link back to private run truth", () => {
+    const markup = render({
+      initialPath: "/matches/experience%3Arun_one/moments/txline%3Agoal%3A1",
+    });
+
+    expect(markup).toContain("Preparing the server-owned match");
+    expect(markup).not.toContain("Opening current Moment truth");
+  });
+
   it("routes verified Memory, revision-safe Moments, and recorded replay surfaces", () => {
     const memoryMarkup = render({
       initialMemory: memory,

@@ -932,6 +932,9 @@ export interface RoomAggregateRepository<T = unknown> {
     fixtureId: string;
     mode: PersistenceMode;
   }): Promise<readonly RoomAggregateRecord<T>[]>;
+  listByMode?(
+    mode: PersistenceMode,
+  ): Promise<readonly RoomAggregateRecord<T>[]>;
   listForFan(fanId: string): Promise<readonly RoomAggregateRecord<T>[]>;
   previewByInviteHash(
     inviteHash: string,
@@ -1093,6 +1096,16 @@ ORDER BY created_at ASC, id ASC;`,
         [input.mode, input.fixtureId],
       );
       return rows.map(parseRoom<T>);
+    },
+    listByMode: async (mode) => {
+      const rows = await client.unsafe(
+        `SELECT ${roomColumns}
+FROM matchsense.rooms
+WHERE mode = $1
+ORDER BY created_at ASC, id ASC;`,
+        [mode],
+      );
+      return rows.map((row) => parseRoom<T>(row));
     },
     listForFan: async (fanId) => {
       const rows = await client.unsafe(

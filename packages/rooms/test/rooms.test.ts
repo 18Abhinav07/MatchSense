@@ -7,6 +7,7 @@ import {
   addReaction,
   applyStatRevision,
   createCallThreeRoom,
+  createExperienceCallThreeRoom,
   createRoom,
   finaliseCallThreeRoom,
   finaliseRoom,
@@ -17,11 +18,14 @@ import {
   supersedeCallThreeMoment,
   lockCalls,
   lockCallThreeCalls,
+  holdCallThreeMoment,
+  confirmHeldCallThreeMoment,
   registerMoment,
   resolveMoment,
   resolveCallThree,
   scoreSenseSlates,
   setCallThreeCalls,
+  startExperienceCallThreeRoom,
   setCalls,
   validateSensePicks,
   voidStat,
@@ -177,6 +181,33 @@ test("Call Three rejects recorded and synthetic fixtures before a room is create
   }
 });
 
+test("Experience Call Three is an explicit synthetic-only lane and can start before its lobby deadline", () => {
+  const room = createExperienceCallThreeRoom({
+    createdAt: 100,
+    fixture: {
+      fixtureId: "experience:run-1",
+      kickoffAt: 300_100,
+      provenance: "synthetic_txline_shaped",
+    },
+    host: { id: "alice", nickname: "Alice" },
+    id: "experience-room-1",
+  });
+  const started = startExperienceCallThreeRoom(room, { observedAt: 500 });
+
+  assert.equal(started.status, "LIVE");
+  assert.equal(started.kickoffAt, 500);
+  assert.throws(
+    () =>
+      createExperienceCallThreeRoom({
+        createdAt: 100,
+        fixture: liveCallThreeFixture,
+        host: { id: "alice", nickname: "Alice" },
+        id: "wrong-lane",
+      }),
+    hasCode("ROOM_NOT_ELIGIBLE"),
+  );
+});
+
 test("Call Three reactions are accepted only for a confirmed canonical revision", () => {
   let room = createCallThreeRoom({
     createdAt: 100,
@@ -207,6 +238,59 @@ test("Call Three reactions are accepted only for a confirmed canonical revision"
     revision: 1,
   });
   assert.equal(reacted.reaction?.status, "VISIBLE");
+});
+
+test("Call Three visibly holds reactions during VAR and restores them only when the decision stands", () => {
+  let room = createCallThreeRoom({
+    createdAt: 100,
+    fixture: liveCallThreeFixture,
+    host: { id: "alice", nickname: "Alice" },
+    id: "call-three-var-hold",
+  });
+  room = registerConfirmedCallThreeMoment(room, {
+    momentId: "goal-1",
+    revision: 1,
+  });
+  room = addCallThreeReaction(room, {
+    kind: "ROAR",
+    momentId: "goal-1",
+    participantId: "alice",
+    reactedAt: 1_100,
+    revision: 1,
+  }).room;
+
+  room = holdCallThreeMoment(room, { momentId: "goal-1", revision: 2 });
+  assert.equal(room.reactions[0]?.status, "HELD");
+  assert.throws(
+    () =>
+      addCallThreeReaction(room, {
+        kind: "COLD",
+        momentId: "goal-1",
+        participantId: "alice",
+        reactedAt: 1_200,
+        revision: 2,
+      }),
+    hasCode("MOMENT_NOT_CONFIRMED"),
+  );
+
+  room = confirmHeldCallThreeMoment(room, {
+    momentId: "goal-1",
+    revision: 3,
+  });
+  assert.equal(room.reactions[0]?.status, "VISIBLE");
+  assert.equal(room.moments['["goal-1",1]']?.varState, "OVERTURNED");
+  assert.equal(room.moments['["goal-1",3]']?.varState, "CLEAR");
+  assert.throws(
+    () =>
+      addCallThreeReaction(room, {
+        kind: "ROAR",
+        momentId: "goal-1",
+        participantId: "alice",
+        reactedAt: 1_300,
+        revision: 1,
+      }),
+    hasCode("MOMENT_NOT_CONFIRMED"),
+  );
 });
 
 test("Call Three marks prior reactions overturned when a newer canonical correction supersedes them", () => {

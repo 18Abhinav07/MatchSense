@@ -51,6 +51,10 @@ import {
   type DurableRoomService,
 } from "./durable-room-service.js";
 import { createExperienceDelivery } from "./experience-delivery.js";
+import {
+  experienceRoomFanIdsForRun,
+  type ExperienceRoomAggregate,
+} from "./experience-room-service.js";
 import { type Mp3Contract } from "./mp3.js";
 import {
   createOutboxWorker,
@@ -98,6 +102,7 @@ export interface StartCollectorOptions {
   commentaryWorker?: CommentaryJobWorker;
   databaseFactory?: (databaseUrl: string) => CollectorDatabaseRuntime;
   databaseRuntime?: CollectorDatabaseRuntime;
+  experienceOutboxWorker?: OutboxWorker;
   outboxWorker?: OutboxWorker;
   outboxWorkerFactory?: (outbox: OutboxRepository) => OutboxWorker;
   sourceLifecycleFactory?: (input: {
@@ -620,12 +625,9 @@ export function createDurableCollectorLifecycle(input: {
 function assertCollectorRole(config: ServerConfig) {
   if (
     config.role !== "worker" ||
-    config.dataRightsMode !== "txline_hackathon" ||
-    !config.txlineApiToken
+    config.dataRightsMode !== "txline_hackathon"
   ) {
-    throw new Error(
-      "Collector runtime requires ROLE=worker and a TxLINE token",
-    );
+    throw new Error("Collector runtime requires ROLE=worker");
   }
 }
 
@@ -635,11 +637,6 @@ export async function startCollector(
 ): Promise<{ close(): Promise<void> }> {
   assertCollectorRole(config);
   const txlineApiToken = config.txlineApiToken;
-  if (!txlineApiToken) {
-    throw new Error(
-      "Collector runtime requires ROLE=worker and a TxLINE token",
-    );
-  }
   const databaseRuntime =
     options.databaseRuntime ??
     (options.databaseFactory ?? createPostgresDatabase)(config.databaseUrl);
@@ -667,43 +664,6 @@ export async function startCollector(
 
   try {
     await databaseRuntime.migrate();
-    await establishCollectorRights(databaseRuntime);
-    const txlineClient = (
-      options.txlineClientFactory ?? createTxlineAuthenticatedClient
-    )({ apiToken: txlineApiToken });
-    const archiveImportRunner = (
-      options.archiveImportRunnerFactory ?? createArchiveImportRunner
-    )({
-      archive: createArchiveService({ archive: databaseRuntime.archive }),
-      archiveImportJobs: databaseRuntime.archiveImportJobs,
-      client: txlineClient,
-      fixtureTruth: databaseRuntime.fixtureTruth,
-      rightsGrantId: HACKATHON_RIGHTS_GRANT_ID,
-      sourceState: databaseRuntime.sourceState,
-      workerId: processCollectorWorkerId,
-    });
-    archiveImportPoller =
-      options.archiveImportPoller ??
-      (
-        options.archiveImportPollerFactory ??
-        ((runner) =>
-          createArchiveImportPoller({
-            onError: (error) => {
-              process.stderr.write(
-                `Archive import poll failed: ${
-                  error instanceof Error ? error.message : String(error)
-                }\n`,
-              );
-            },
-            runner,
-          }))
-      )(archiveImportRunner);
-    sourceLifecycle =
-      options.sourceLifecycle ??
-      (options.sourceLifecycleFactory ?? createDurableCollectorLifecycle)({
-        database: databaseRuntime,
-        txlineClient,
-      });
     commentaryWorker =
       options.commentaryWorker ??
       (databaseRuntime.commentaryJobs && databaseRuntime.fixtureTruth
@@ -759,23 +719,33 @@ export async function startCollector(
           }))
       )(databaseRuntime.outbox);
     experienceOutboxWorker =
-      durablePush && databaseRuntime.experiences
+      options.experienceOutboxWorker ??
+      (durablePush && databaseRuntime.experiences
         ? createOutboxWorker({
             consumer: "collector-experience",
             handlers: createCollectorOutboxHandlers({
               experience: createExperienceDelivery({
                 experiences: databaseRuntime.experiences,
                 push: durablePush,
+                ...(databaseRuntime.rooms
+                  ? {
+                      roomFanIds: (runId: string) =>
+                        experienceRoomFanIdsForRun(
+                          databaseRuntime.rooms as RoomAggregateRepository<ExperienceRoomAggregate>,
+                          runId,
+                        ),
+                    }
+                  : {}),
               }),
             }),
             mode: "demo",
             outbox: databaseRuntime.outbox,
           })
-        : null;
-    await sourceLifecycle.start();
-    sourceStarted = true;
-    archiveImportPoller.start();
-    archiveImportPollerStarted = true;
+        : null);
+
+    // Durable fan effects are independent from the live TxLINE transport.
+    // Starting these first keeps the private Experience usable when the live
+    // source is temporarily unavailable or no token is configured.
     commentaryWorker?.start();
     outboxWorker.start();
     experienceOutboxWorker?.start();
@@ -789,6 +759,64 @@ export async function startCollector(
         writeError: (message) => process.stderr.write(message),
       }),
     );
+
+    if (txlineApiToken) {
+      try {
+        await establishCollectorRights(databaseRuntime);
+        const txlineClient = (
+          options.txlineClientFactory ?? createTxlineAuthenticatedClient
+        )({ apiToken: txlineApiToken });
+        const archiveImportRunner = (
+          options.archiveImportRunnerFactory ?? createArchiveImportRunner
+        )({
+          archive: createArchiveService({ archive: databaseRuntime.archive }),
+          archiveImportJobs: databaseRuntime.archiveImportJobs,
+          client: txlineClient,
+          fixtureTruth: databaseRuntime.fixtureTruth,
+          rightsGrantId: HACKATHON_RIGHTS_GRANT_ID,
+          sourceState: databaseRuntime.sourceState,
+          workerId: processCollectorWorkerId,
+        });
+        archiveImportPoller =
+          options.archiveImportPoller ??
+          (
+            options.archiveImportPollerFactory ??
+            ((runner) =>
+              createArchiveImportPoller({
+                onError: (error) => {
+                  process.stderr.write(
+                    `Archive import poll failed: ${
+                      error instanceof Error ? error.message : String(error)
+                    }\n`,
+                  );
+                },
+                runner,
+              }))
+          )(archiveImportRunner);
+        sourceLifecycle =
+          options.sourceLifecycle ??
+          (options.sourceLifecycleFactory ?? createDurableCollectorLifecycle)({
+            database: databaseRuntime,
+            txlineClient,
+          });
+        await sourceLifecycle.start();
+        sourceStarted = true;
+        archiveImportPoller.start();
+        archiveImportPollerStarted = true;
+      } catch (error) {
+        await Promise.resolve(sourceLifecycle?.stop()).catch(() => undefined);
+        sourceLifecycle = null;
+        process.stderr.write(
+          `TxLINE source unavailable; Experience delivery remains active: ${
+            error instanceof Error ? error.message : String(error)
+          }\n`,
+        );
+      }
+    } else {
+      process.stderr.write(
+        "TxLINE token unavailable; Experience delivery remains active\n",
+      );
+    }
     return { close };
   } catch (error) {
     await close().catch(() => undefined);

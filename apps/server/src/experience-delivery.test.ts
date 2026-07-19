@@ -61,7 +61,7 @@ describe("Experience-only delivery adapter", () => {
     expect(experiencePushCandidate(payload("card.yellow"))).toBeNull();
   });
 
-  it("targets only the exact run owner and never a live follower query", async () => {
+  it("targets the solo owner plus real room members without a live follower query", async () => {
     const deliverExperienceToFans = vi.fn(async () => ({
       accepted: 1,
       attempted: 1,
@@ -86,6 +86,7 @@ describe("Experience-only delivery adapter", () => {
         }),
       },
       push: { deliverExperienceToFans },
+      roomFanIds: async () => ["fan-1", "fan-2"],
     });
 
     await expect(delivery.deliver(payload())).resolves.toEqual({
@@ -94,7 +95,7 @@ describe("Experience-only delivery adapter", () => {
     });
     expect(deliverExperienceToFans).toHaveBeenCalledWith(
       expect.objectContaining({ fixtureId: "experience:run-1" }),
-      ["fan-1"],
+      ["fan-1", "fan-2"],
     );
   });
 });

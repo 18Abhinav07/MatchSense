@@ -38,6 +38,7 @@ import {
   type FanRouteDependencies,
   registerFanRoutes,
   requireFanMutationSession,
+  requireFanSession,
 } from "./fan-routes.js";
 import type { FanSessionService } from "./fan-session.js";
 import {
@@ -73,6 +74,10 @@ export interface BuildAppOptions {
   durablePush?: DurablePushRouteDependencies;
   durableRooms?: DurableRoomRouteDependencies;
   experience?: ExperienceRuntime;
+  experienceRunAccess?: (input: {
+    fanId: string;
+    runId: string;
+  }) => boolean | Promise<boolean>;
   experienceRuntime?: ProductRuntime;
   fan?: FanRouteDependencies;
   fixtureRead?: FixtureReadRouteDependencies;
@@ -103,6 +108,27 @@ const segment = "(?!\\.{1,2}(?:/|$))[A-Za-z0-9_.:-]+";
 const canonicalShellRoutes = [
   { pattern: /^\/$/u, template: "/" },
   { pattern: /^\/you$/u, template: "/you" },
+  { pattern: /^\/experience$/u, template: "/experience" },
+  {
+    pattern: new RegExp(`^/experience/rooms/new/${segment}/${segment}$`, "u"),
+    template: "/experience/rooms/new/:homeTeam/:awayTeam",
+  },
+  {
+    pattern: new RegExp(`^/experience/rooms/join/${segment}$`, "u"),
+    template: "/experience/rooms/join/:inviteCode",
+  },
+  {
+    pattern: new RegExp(`^/experience/rooms/${segment}$`, "u"),
+    template: "/experience/rooms/:roomId",
+  },
+  {
+    pattern: new RegExp(`^/experience/${segment}$`, "u"),
+    template: "/experience/:runId",
+  },
+  {
+    pattern: new RegExp(`^/experience/${segment}/moments/${segment}$`, "u"),
+    template: "/experience/:runId/moments/:identity",
+  },
   {
     pattern: new RegExp(`^/matches/${segment}$`, "u"),
     template: "/matches/:fixtureId",
@@ -223,11 +249,26 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     registerCommentaryArtifactRoutes(app, options.commentaryArtifacts);
   }
   if (options.experience) {
-    registerExperienceRoutes(app, options.experience, options.fan?.sessions);
+    if (options.fan?.sessions) {
+      registerExperienceRoutes(
+        app,
+        options.experience,
+        options.fan.sessions,
+        options.experienceRunAccess,
+      );
+    }
     app.addHook("preClose", () => options.experience?.close());
   }
   if (options.experienceRuntime) {
-    registerExperienceProductRoutes(app, options.experienceRuntime);
+    if (options.experience && options.fan?.sessions) {
+      registerExperienceProductRoutes(
+        app,
+        options.experienceRuntime,
+        options.experience,
+        options.fan.sessions,
+        options.experienceRunAccess,
+      );
+    }
     app.addHook("preClose", () => options.experienceRuntime?.close());
   }
   if (options.fan) {
@@ -350,13 +391,16 @@ function invalidRequest(reply: FastifyReply) {
 function registerExperienceRoutes(
   app: FastifyInstance,
   experience: ExperienceRuntime,
-  fanSessions?: FanSessionService,
+  fanSessions: FanSessionService,
+  canAccessRun?: BuildAppOptions["experienceRunAccess"],
 ) {
   const startRun = async (request: FastifyRequest, reply: FastifyReply) => {
-    const session = fanSessions
-      ? await requireFanMutationSession(request, reply, fanSessions)
-      : null;
-    if (fanSessions && !session) return;
+    const session = await requireFanMutationSession(
+      request,
+      reply,
+      fanSessions,
+    );
+    if (!session) return;
     const body = experienceRunBody.safeParse(request.body);
     if (!body.success || body.data.homeTeam === body.data.awayTeam) {
       return invalidRequest(reply);
@@ -373,27 +417,43 @@ function registerExperienceRoutes(
     }
     const runId = idempotencyKey
       ? `run_${createHash("sha256")
-          .update(`${session?.fan.id ?? "anonymous"}|${idempotencyKey}`)
+          .update(`${session.fan.id}|${idempotencyKey}`)
           .digest("hex")
           .slice(0, 32)}`
       : undefined;
     const run = await experience.startRun({
       awayTeam: body.data.awayTeam,
       homeTeam: body.data.homeTeam,
-      ownerFanId: session?.fan.id ?? null,
+      ownerFanId: session.fan.id,
       ...(runId ? { runId } : {}),
     });
-    return reply.code(201).send({ run });
+    return reply.code(201).send({ run: publicExperienceRun(run) });
   };
   app.post("/api/v1/experience/runs", startRun);
   app.post("/api/v1/experience/runs/start", startRun);
   app.get<{ Params: { runId: string } }>(
     "/api/v1/experience/runs/:runId",
     async (request, reply) => {
+      const session = await requireFanSession(request, reply, fanSessions);
+      if (!session) return;
       const run = await experience.getRun(request.params.runId);
-      return run ? reply.send({ run }) : notFound(reply);
+      return run &&
+        (run.ownerFanId === session.fan.id ||
+          (await canAccessRun?.({
+            fanId: session.fan.id,
+            runId: request.params.runId,
+          })))
+        ? reply.send({ run: publicExperienceRun(run) })
+        : notFound(reply);
     },
   );
+}
+
+function publicExperienceRun(
+  run: NonNullable<Awaited<ReturnType<ExperienceRuntime["getRun"]>>>,
+) {
+  const { ownerFanId: _ownerFanId, ...publicRun } = run;
+  return publicRun;
 }
 
 function experienceFixtureId(runId: string) {
@@ -403,10 +463,75 @@ function experienceFixtureId(runId: string) {
 function registerExperienceProductRoutes(
   app: FastifyInstance,
   runtime: ProductRuntime,
+  experience: ExperienceRuntime,
+  fanSessions: FanSessionService,
+  canAccessRun?: BuildAppOptions["experienceRunAccess"],
 ) {
+  const listeningSessionOwners = new Map<string, string>();
+  const requireRunAccess = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    runId: string,
+    mutation = false,
+  ) => {
+    const session = mutation
+      ? await requireFanMutationSession(request, reply, fanSessions)
+      : await requireFanSession(request, reply, fanSessions);
+    if (!session) return null;
+    const run = await experience.getRun(runId);
+    const allowed =
+      !!run &&
+      (run.ownerFanId === session.fan.id ||
+        (await canAccessRun?.({ fanId: session.fan.id, runId })) === true);
+    if (!run || !allowed) {
+      notFound(reply);
+      return null;
+    }
+    return { run, session };
+  };
+
+  const runIdFromFixtureId = (fixtureId: string) =>
+    fixtureId.startsWith("experience:")
+      ? fixtureId.slice("experience:".length)
+      : null;
+
+  const requireListeningOwner = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    listeningSessionId: string,
+    mutation = false,
+  ) => {
+    const fanSession = mutation
+      ? await requireFanMutationSession(request, reply, fanSessions)
+      : await requireFanSession(request, reply, fanSessions);
+    if (!fanSession) return null;
+    const listeningSession = runtime.listeningSession(listeningSessionId);
+    const runId = listeningSession
+      ? runIdFromFixtureId(listeningSession.fixtureId)
+      : null;
+    if (!listeningSession || !runId) {
+      notFound(reply);
+      return null;
+    }
+    const run = await experience.getRun(runId);
+    const ownerFanId = listeningSessionOwners.get(listeningSessionId);
+    const allowed =
+      !!run &&
+      (run.ownerFanId === fanSession.fan.id ||
+        (await canAccessRun?.({ fanId: fanSession.fan.id, runId })) === true);
+    if (!run || !allowed || ownerFanId !== fanSession.fan.id) {
+      notFound(reply);
+      return null;
+    }
+    return listeningSession;
+  };
+
   app.get<{ Params: { runId: string } }>(
     "/api/v1/experience/runs/:runId/fixture",
     async (request, reply) => {
+      if (!(await requireRunAccess(request, reply, request.params.runId))) {
+        return;
+      }
       const fixtureId = experienceFixtureId(request.params.runId);
       const fixture = fixtureId ? runtime.fixture(fixtureId) : null;
       return fixture
@@ -417,6 +542,9 @@ function registerExperienceProductRoutes(
   app.get<{ Params: { runId: string; identity: string } }>(
     "/api/v1/experience/runs/:runId/moments/:identity",
     async (request, reply) => {
+      if (!(await requireRunAccess(request, reply, request.params.runId))) {
+        return;
+      }
       const fixtureId = experienceFixtureId(request.params.runId);
       const resolved = fixtureId
         ? runtime.resolveMoment(fixtureId, request.params.identity)
@@ -427,84 +555,127 @@ function registerExperienceProductRoutes(
     },
   );
   app.get<{ Params: { runId: string } }>(
-    "/api/v1/experience/runs/:runId/stream",
-    (request, reply) => {
+    "/api/v1/experience/runs/:runId/timeline",
+    async (request, reply) => {
+      if (!(await requireRunAccess(request, reply, request.params.runId))) {
+        return;
+      }
       const fixtureId = experienceFixtureId(request.params.runId);
       const fixture = fixtureId ? runtime.fixture(fixtureId) : null;
       if (!fixtureId || !fixture) return notFound(reply);
-      reply.hijack();
-      reply.raw.writeHead(200, {
-        "Cache-Control": "no-cache, no-transform",
-        Connection: "keep-alive",
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "X-Accel-Buffering": "no",
-        "X-Content-Type-Options": "nosniff",
+      const events = runtime.fixtureEvents(fixtureId);
+      return reply.header("Cache-Control", "no-store").send({
+        cursor: events.at(-1)?.id ?? null,
+        events,
+        fixture,
       });
-      const lastEventHeader = request.headers["last-event-id"];
-      const lastEventId = Array.isArray(lastEventHeader)
-        ? lastEventHeader[0]
-        : lastEventHeader;
-      if (lastEventId) {
-        const history = runtime.fixtureEvents(fixtureId);
-        const cursor = history.findIndex((event) => event.id === lastEventId);
-        const moments = (cursor >= 0 ? history.slice(cursor + 1) : [])
-          .map((event) => event.moment)
-          .filter((moment) => moment !== undefined);
-        if (moments.length) {
-          reply.raw.write(
-            formatSse({
-              catchup: { fromEventId: lastEventId, moments },
-              event: "catchup.ready",
-              id: `catchup:${moments.at(-1)?.identity ?? lastEventId}`,
-              snapshot: fixture,
-            }),
-          );
-        }
-      }
-      const unsubscribe = runtime.subscribeFixture(fixtureId, (event) => {
-        reply.raw.write(formatSse(event));
-      });
-      if (!unsubscribe) {
-        reply.raw.end();
-        return reply;
-      }
-      request.raw.once("close", unsubscribe);
-      return reply;
     },
   );
+  app.get<{
+    Params: { runId: string };
+    Querystring: { after?: string };
+  }>("/api/v1/experience/runs/:runId/stream", async (request, reply) => {
+    if (!(await requireRunAccess(request, reply, request.params.runId))) {
+      return;
+    }
+    const fixtureId = experienceFixtureId(request.params.runId);
+    const fixture = fixtureId ? runtime.fixture(fixtureId) : null;
+    if (!fixtureId || !fixture) return notFound(reply);
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "X-Accel-Buffering": "no",
+      "X-Content-Type-Options": "nosniff",
+    });
+    const lastEventHeader = request.headers["last-event-id"];
+    const lastEventId = Array.isArray(lastEventHeader)
+      ? lastEventHeader[0]
+      : (lastEventHeader ??
+        (typeof request.query.after === "string" &&
+        /^[A-Za-z0-9_.:-]{1,240}$/u.test(request.query.after)
+          ? request.query.after
+          : undefined));
+    if (lastEventId) {
+      const history = runtime.fixtureEvents(fixtureId);
+      const cursor = history.findIndex((event) => event.id === lastEventId);
+      const missedHistory = cursor >= 0 ? history.slice(cursor + 1) : [];
+      const moments = missedHistory
+        .map((event) => event.moment)
+        .filter((moment) => moment !== undefined);
+      if (moments.length) {
+        reply.raw.write(
+          formatSse({
+            catchup: { fromEventId: lastEventId, moments },
+            event: "catchup.ready",
+            id: missedHistory.at(-1)?.id ?? lastEventId,
+            snapshot: fixture,
+          }),
+        );
+      }
+    }
+    const unsubscribe = runtime.subscribeFixture(fixtureId, (event) => {
+      reply.raw.write(formatSse(event));
+    });
+    if (!unsubscribe) {
+      reply.raw.end();
+      return reply;
+    }
+    request.raw.once("close", unsubscribe);
+    return reply;
+  });
   app.post<{ Params: { fixtureId: string } }>(
     "/api/v1/fixtures/:fixtureId/listening-sessions",
     async (request, reply) => {
-      if (!request.params.fixtureId.startsWith("experience:")) {
+      const runId = runIdFromFixtureId(request.params.fixtureId);
+      if (!runId) {
         return notFound(reply);
       }
+      const access = await requireRunAccess(request, reply, runId, true);
+      if (!access) return;
       const body = listeningSessionBody.safeParse(request.body);
       if (!body.success) return invalidRequest(reply);
       const session = runtime.createListeningSession(
         request.params.fixtureId,
         body.data.perspectiveTeam as TeamCode,
       );
+      if (session)
+        listeningSessionOwners.set(session.id, access.session.fan.id);
       return session ? reply.code(201).send(session) : notFound(reply);
     },
   );
   app.get<{ Params: { id: string } }>(
     "/api/v1/listening-sessions/:id",
     async (request, reply) => {
+      if (!(await requireListeningOwner(request, reply, request.params.id))) {
+        return;
+      }
       const session = runtime.listeningSession(request.params.id);
       return session ? reply.send(session) : notFound(reply);
     },
   );
   app.delete<{ Params: { id: string } }>(
     "/api/v1/listening-sessions/:id",
-    async (request, reply) =>
-      runtime.deleteListeningSession(request.params.id)
-        ? reply.code(204).send()
-        : notFound(reply),
+    async (request, reply) => {
+      if (
+        !(await requireListeningOwner(request, reply, request.params.id, true))
+      ) {
+        return;
+      }
+      if (!runtime.deleteListeningSession(request.params.id)) {
+        return notFound(reply);
+      }
+      listeningSessionOwners.delete(request.params.id);
+      return reply.code(204).send();
+    },
   );
   app.get<{ Params: { id: string } }>(
     "/api/v1/listening-sessions/:id/stream.mp3",
-    (request, reply) => {
-      if (!runtime.listeningSession(request.params.id)) return notFound(reply);
+    async (request, reply) => {
+      if (!(await requireListeningOwner(request, reply, request.params.id))) {
+        return;
+      }
       reply.hijack();
       reply.raw.writeHead(200, {
         "Cache-Control": "no-store",

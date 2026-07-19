@@ -10,6 +10,10 @@ import type {
   DurableRoomService,
   DurableRoomStreamEvent,
 } from "./durable-room-service.js";
+import type {
+  ExperienceRoomService,
+  ExperienceRoomStreamEvent,
+} from "./experience-room-service.js";
 import { RoomServiceError, type RoomServiceErrorCode } from "./room-service.js";
 
 const nickname = z.string().trim().min(1).max(30);
@@ -22,6 +26,16 @@ const createBody = z
     name: z.string().trim().min(1).max(60),
   })
   .strict();
+const createExperienceBody = z
+  .object({
+    addDemoSupporters: z.boolean().optional(),
+    awayTeam: teamCode,
+    homeTeam: teamCode,
+    host: z.object({ nickname, teamCode: teamCode.optional() }).strict(),
+    name: z.string().trim().min(1).max(60),
+  })
+  .strict()
+  .refine((body) => body.homeTeam !== body.awayTeam);
 const joinBody = z
   .object({
     inviteCode: z.string().regex(/^[A-Za-z0-9_-]{22}$/u),
@@ -91,6 +105,19 @@ interface DurableRoomRouteService {
 }
 
 export interface DurableRoomRouteDependencies {
+  experience?: Pick<
+    ExperienceRoomService,
+    | "create"
+    | "get"
+    | "join"
+    | "list"
+    | "lockCalls"
+    | "preview"
+    | "react"
+    | "setCalls"
+    | "start"
+    | "subscribe"
+  >;
   /**
    * Compatibility-only until main process wiring is simplified. Durable route
    * registration intentionally never exposes this retired Experience hook.
@@ -137,7 +164,7 @@ function sendError(reply: FastifyReply, error: unknown) {
   });
 }
 
-function formatSse(event: DurableRoomStreamEvent) {
+function formatSse(event: DurableRoomStreamEvent | ExperienceRoomStreamEvent) {
   return `id: ${event.id}\nevent: ${event.event}\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
@@ -261,6 +288,16 @@ export function registerDurableRoomRoutes(
       const params = roomIdParams.safeParse(request.params);
       if (!params.success) return invalidRequest(reply);
       try {
+        const buffered: DurableRoomStreamEvent[] = [];
+        let opened = false;
+        const unsubscribe = await dependencies.service.subscribe(
+          params.data.roomId,
+          session.fan.id,
+          (event) => {
+            if (opened) reply.raw.write(formatSse(event));
+            else buffered.push(event);
+          },
+        );
         reply.hijack();
         reply.raw.writeHead(200, {
           "Cache-Control": "no-cache, no-transform",
@@ -269,11 +306,8 @@ export function registerDurableRoomRoutes(
           "X-Accel-Buffering": "no",
           "X-Content-Type-Options": "nosniff",
         });
-        const unsubscribe = await dependencies.service.subscribe(
-          params.data.roomId,
-          session.fan.id,
-          (event) => reply.raw.write(formatSse(event)),
-        );
+        opened = true;
+        for (const event of buffered) reply.raw.write(formatSse(event));
         const heartbeat = setInterval(() => {
           reply.raw.write(`: heartbeat ${Date.now()}\n\n`);
         }, 15_000);
@@ -344,6 +378,278 @@ export function registerDurableRoomRoutes(
 
   app.post<{ Params: { roomId: string } }>(
     "/api/v1/rooms/:roomId/reactions",
+    async (request, reply) => {
+      const session = await requireFanMutationSession(
+        request,
+        reply,
+        dependencies.sessions,
+      );
+      if (!session) return;
+      const params = roomIdParams.safeParse(request.params);
+      const body = reactionBody.safeParse(request.body);
+      if (!params.success || !body.success) return invalidRequest(reply);
+      try {
+        return reply.code(201).send(
+          await dependencies.service.react({
+            fanId: session.fan.id,
+            roomId: params.data.roomId,
+            ...body.data,
+          }),
+        );
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  if (dependencies.experience) {
+    registerExperienceRoomRoutes(app, {
+      service: dependencies.experience,
+      sessions: dependencies.sessions,
+    });
+  }
+}
+
+function registerExperienceRoomRoutes(
+  app: FastifyInstance,
+  dependencies: {
+    service: NonNullable<DurableRoomRouteDependencies["experience"]>;
+    sessions: FanSessionService;
+  },
+) {
+  app.post("/api/v1/experience/rooms", async (request, reply) => {
+    const session = await requireFanMutationSession(
+      request,
+      reply,
+      dependencies.sessions,
+    );
+    if (!session) return;
+    const parsed = createExperienceBody.safeParse(request.body);
+    if (!parsed.success) return invalidRequest(reply);
+    try {
+      return reply.code(201).send(
+        await dependencies.service.create({
+          ...(parsed.data.addDemoSupporters ? { addDemoSupporters: true } : {}),
+          awayTeam: parsed.data.awayTeam,
+          homeTeam: parsed.data.homeTeam,
+          host: {
+            fanId: session.fan.id,
+            nickname: parsed.data.host.nickname,
+            ...(parsed.data.host.teamCode
+              ? { teamCode: parsed.data.host.teamCode }
+              : {}),
+          },
+          name: parsed.data.name,
+        }),
+      );
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get("/api/v1/experience/rooms", async (request, reply) => {
+    const session = await requireFanSession(
+      request,
+      reply,
+      dependencies.sessions,
+    );
+    if (!session) return;
+    try {
+      return reply.send({
+        rooms: await dependencies.service.list(session.fan.id),
+      });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get<{ Params: { inviteCode: string } }>(
+    "/api/v1/experience/rooms/invites/:inviteCode/preview",
+    async (request, reply) => {
+      const inviteCode = z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{22}$/u)
+        .safeParse(request.params.inviteCode);
+      if (!inviteCode.success) return invalidRequest(reply);
+      try {
+        return reply.send(await dependencies.service.preview(inviteCode.data));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  app.post("/api/v1/experience/rooms/join", async (request, reply) => {
+    const session = await requireFanMutationSession(
+      request,
+      reply,
+      dependencies.sessions,
+    );
+    if (!session) return;
+    const parsed = joinBody.safeParse(request.body);
+    if (!parsed.success) return invalidRequest(reply);
+    try {
+      return reply.send(
+        await dependencies.service.join({
+          fanId: session.fan.id,
+          inviteCode: parsed.data.inviteCode,
+          nickname: parsed.data.nickname,
+          ...(parsed.data.teamCode ? { teamCode: parsed.data.teamCode } : {}),
+        }),
+      );
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get<{ Params: { roomId: string } }>(
+    "/api/v1/experience/rooms/:roomId",
+    async (request, reply) => {
+      const session = await requireFanSession(
+        request,
+        reply,
+        dependencies.sessions,
+      );
+      if (!session) return;
+      const params = roomIdParams.safeParse(request.params);
+      if (!params.success) return invalidRequest(reply);
+      try {
+        return reply.send(
+          await dependencies.service.get(params.data.roomId, session.fan.id),
+        );
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  app.get<{ Params: { roomId: string } }>(
+    "/api/v1/experience/rooms/:roomId/stream",
+    async (request, reply) => {
+      const session = await requireFanSession(
+        request,
+        reply,
+        dependencies.sessions,
+      );
+      if (!session) return;
+      const params = roomIdParams.safeParse(request.params);
+      if (!params.success) return invalidRequest(reply);
+      try {
+        const buffered: ExperienceRoomStreamEvent[] = [];
+        let opened = false;
+        const unsubscribe = await dependencies.service.subscribe(
+          params.data.roomId,
+          session.fan.id,
+          (event) => {
+            if (opened) reply.raw.write(formatSse(event));
+            else buffered.push(event);
+          },
+        );
+        reply.hijack();
+        reply.raw.writeHead(200, {
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "X-Accel-Buffering": "no",
+          "X-Content-Type-Options": "nosniff",
+        });
+        opened = true;
+        for (const event of buffered) reply.raw.write(formatSse(event));
+        const heartbeat = setInterval(() => {
+          reply.raw.write(`: heartbeat ${Date.now()}\n\n`);
+        }, 15_000);
+        heartbeat.unref?.();
+        request.raw.once("close", () => {
+          clearInterval(heartbeat);
+          unsubscribe();
+        });
+        return reply;
+      } catch (error) {
+        if (!reply.sent) return sendError(reply, error);
+        reply.raw.end();
+        return reply;
+      }
+    },
+  );
+
+  app.put<{ Params: { roomId: string } }>(
+    "/api/v1/experience/rooms/:roomId/calls",
+    async (request, reply) => {
+      const session = await requireFanMutationSession(
+        request,
+        reply,
+        dependencies.sessions,
+      );
+      if (!session) return;
+      const params = roomIdParams.safeParse(request.params);
+      const body = callsBody.safeParse(request.body);
+      if (!params.success || !body.success) return invalidRequest(reply);
+      try {
+        return reply.send(
+          await dependencies.service.setCalls({
+            calls: body.data.calls,
+            fanId: session.fan.id,
+            roomId: params.data.roomId,
+          }),
+        );
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  app.post<{ Params: { roomId: string } }>(
+    "/api/v1/experience/rooms/:roomId/calls/lock",
+    async (request, reply) => {
+      const session = await requireFanMutationSession(
+        request,
+        reply,
+        dependencies.sessions,
+      );
+      if (!session) return;
+      const params = roomIdParams.safeParse(request.params);
+      const body = emptyBody.safeParse(request.body ?? {});
+      if (!params.success || !body.success) return invalidRequest(reply);
+      try {
+        return reply.send(
+          await dependencies.service.lockCalls({
+            fanId: session.fan.id,
+            roomId: params.data.roomId,
+          }),
+        );
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  app.post<{ Params: { roomId: string } }>(
+    "/api/v1/experience/rooms/:roomId/start",
+    async (request, reply) => {
+      const session = await requireFanMutationSession(
+        request,
+        reply,
+        dependencies.sessions,
+      );
+      if (!session) return;
+      const params = roomIdParams.safeParse(request.params);
+      const body = emptyBody.safeParse(request.body ?? {});
+      if (!params.success || !body.success) return invalidRequest(reply);
+      try {
+        return reply.send(
+          await dependencies.service.start({
+            fanId: session.fan.id,
+            roomId: params.data.roomId,
+          }),
+        );
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  app.post<{ Params: { roomId: string } }>(
+    "/api/v1/experience/rooms/:roomId/reactions",
     async (request, reply) => {
       const session = await requireFanMutationSession(
         request,

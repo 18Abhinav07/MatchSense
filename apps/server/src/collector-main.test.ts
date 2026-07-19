@@ -309,7 +309,9 @@ describe("collector-only runtime", () => {
       revokedAt: "2026-07-18T11:00:00.000Z",
       scopes: ["replay"],
     });
-    expect(events.slice(0, 3)).toEqual([
+    expect(events.slice(0, 5)).toEqual([
+      "commentary:start",
+      "outbox:start",
       "rights",
       "live:start",
       "archive:start",
@@ -382,5 +384,105 @@ describe("collector-only runtime", () => {
     expect(outboxWorker.stop).toHaveBeenCalledOnce();
     expect(commentaryWorker.stop).toHaveBeenCalledOnce();
     expect(database.close).toHaveBeenCalledOnce();
+  });
+
+  it("keeps Experience delivery running when no TxLINE token is configured", async () => {
+    const liveOutbox = {
+      start: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    };
+    const experienceOutbox = {
+      start: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    };
+    const database = {
+      close: vi.fn(async () => undefined),
+      migrate: vi.fn(async () => undefined),
+      outbox: {},
+    };
+    const txlineClientFactory = vi.fn();
+
+    const runtime = await startCollector(
+      parseServerEnv({
+        DATABASE_URL: "postgresql://db.example/matchsense",
+        ROLE: "worker",
+      }),
+      {
+        databaseRuntime: database as never,
+        experienceOutboxWorker: experienceOutbox as never,
+        outboxWorker: liveOutbox as never,
+        txlineClientFactory: txlineClientFactory as never,
+      },
+    );
+
+    expect(database.migrate).toHaveBeenCalledOnce();
+    expect(experienceOutbox.start).toHaveBeenCalledOnce();
+    expect(liveOutbox.start).toHaveBeenCalledOnce();
+    expect(txlineClientFactory).not.toHaveBeenCalled();
+    await runtime.close();
+    expect(experienceOutbox.stop).toHaveBeenCalledOnce();
+    expect(database.close).toHaveBeenCalledOnce();
+  });
+
+  it("keeps Experience delivery running when the live source fails to start", async () => {
+    const order: string[] = [];
+    const experienceOutbox = {
+      start: vi.fn(() => order.push("experience:start")),
+      stop: vi.fn(async () => undefined),
+    };
+    const liveOutbox = {
+      start: vi.fn(() => order.push("live-outbox:start")),
+      stop: vi.fn(async () => undefined),
+    };
+    const sourceLifecycle = {
+      start: vi.fn(async () => {
+        order.push("source:start");
+        throw new Error("token rejected");
+      }),
+      stop: vi.fn(async () => {
+        order.push("source:stop");
+      }),
+    };
+    const database = {
+      archive: { ensureRightsGrant: vi.fn(async () => ({})) },
+      archiveImportJobs: {},
+      close: vi.fn(async () => undefined),
+      fixtureTruth: {},
+      migrate: vi.fn(async () => undefined),
+      outbox: {},
+      sourceState: {},
+    };
+
+    const runtime = await startCollector(
+      parseServerEnv({
+        DATABASE_URL: "postgresql://db.example/matchsense",
+        ROLE: "worker",
+        TXLINE_API_TOKEN: "fixture-invalid-token",
+      }),
+      {
+        archiveImportPoller: {
+          start: vi.fn(),
+          stop: vi.fn(async () => undefined),
+        } as never,
+        archiveImportRunnerFactory: vi.fn(
+          () => ({ runOnce: vi.fn(async () => ({ kind: "idle" })) }) as never,
+        ),
+        databaseRuntime: database as never,
+        experienceOutboxWorker: experienceOutbox as never,
+        outboxWorker: liveOutbox as never,
+        sourceLifecycle,
+        txlineClientFactory: vi.fn(() => ({ prepare: vi.fn() })) as never,
+      },
+    );
+
+    expect(order).toEqual([
+      "live-outbox:start",
+      "experience:start",
+      "source:start",
+      "source:stop",
+    ]);
+    expect(experienceOutbox.stop).not.toHaveBeenCalled();
+    await runtime.close();
+    expect(experienceOutbox.stop).toHaveBeenCalledOnce();
   });
 });

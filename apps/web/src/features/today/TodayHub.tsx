@@ -12,6 +12,7 @@ export interface TodayHubProps {
   catalog: ProductCatalog;
   favoriteTeam: string | null;
   fixtures: readonly LiveSnapshot[];
+  onOpenExperience?: (() => void) | undefined;
   onOpenFixture(fixtureId: string): void;
   onOpenProfile(): void;
   onOpenReplays?: (() => void) | undefined;
@@ -80,6 +81,7 @@ export function TodayHub({
   catalog,
   favoriteTeam,
   fixtures,
+  onOpenExperience,
   onOpenFixture,
   onOpenProfile,
   onOpenReplays,
@@ -142,6 +144,25 @@ export function TodayHub({
           </span>
         </aside>
       </section>
+      {onOpenExperience ? (
+        <section
+          className="ms-today-experience"
+          aria-labelledby="experience-title"
+        >
+          <div>
+            <p>ALWAYS AVAILABLE · FIVE MINUTES</p>
+            <h2 id="experience-title">Feel a complete match right now.</h2>
+            <span>
+              Goals, cards, two honest VAR decisions, lock-screen alerts and
+              Pocket Listening in one server-owned Experience match.
+            </span>
+          </div>
+          <button onClick={onOpenExperience} type="button">
+            <span>Enter Experience</span>
+            <small>SIMULATED TXLINE-SHAPED DATA</small>
+          </button>
+        </section>
+      ) : null}
       {state === "loading" ? (
         <section className="ms-today-loading" aria-live="polite">
           <span />

@@ -127,6 +127,10 @@ export function createTestPushEnvelope(
     throw new Error("Push test run id is invalid");
   }
   const familyId = parsed.familyId ?? parsed.momentId;
+  const experienceRunId =
+    parsed.fixtureId.startsWith("experience:") && familyId === "readiness"
+      ? parsed.fixtureId.slice("experience:".length)
+      : null;
   return {
     ...parsed,
     familyId,
@@ -138,9 +142,12 @@ export function createTestPushEnvelope(
       .digest("hex")
       .slice(0, 32)}`,
     kind: "test",
-    route: `/matches/${encodeURIComponent(
-      parsed.fixtureId,
-    )}/moments/${encodeURIComponent(`${familyId}:${parsed.revision}`)}`,
+    route:
+      experienceRunId && /^[A-Za-z0-9_.:-]{1,120}$/u.test(experienceRunId)
+        ? `/experience/${encodeURIComponent(experienceRunId)}`
+        : `/matches/${encodeURIComponent(
+            parsed.fixtureId,
+          )}/moments/${encodeURIComponent(`${familyId}:${parsed.revision}`)}`,
     schemaVersion: 1,
     tag: `matchsense:test:${testRunId}:${parsed.fixtureId}:${familyId}`,
     type: "matchsense.moment",
