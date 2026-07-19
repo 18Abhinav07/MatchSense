@@ -51,6 +51,7 @@ import {
   type MemoryRouteDependencies,
   registerMemoryRoutes,
 } from "./memory-routes.js";
+import type { LiveListeningService } from "./live-listening-service.js";
 import type { ProductRuntime } from "./product-runtime.js";
 import {
   type PushRouteDependencies,
@@ -82,6 +83,7 @@ export interface BuildAppOptions {
   experienceRuntime?: ProductRuntime;
   fan?: FanRouteDependencies;
   fixtureRead?: FixtureReadRouteDependencies;
+  liveListening?: LiveListeningService;
   manageRuntimeLifecycle?: boolean;
   readinessProbe: ReadinessProbe;
   memory?: MemoryRouteDependencies;
@@ -268,9 +270,13 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
         options.experience,
         options.fan.sessions,
         options.experienceRunAccess,
+        options.liveListening,
       );
     }
     app.addHook("preClose", () => options.experienceRuntime?.close());
+  }
+  if (options.liveListening) {
+    app.addHook("preClose", () => options.liveListening?.stop());
   }
   if (options.fan) {
     registerFanRoutes(app, options.fan);
@@ -467,6 +473,7 @@ function registerExperienceProductRoutes(
   experience: ExperienceRuntime,
   fanSessions: FanSessionService,
   canAccessRun?: BuildAppOptions["experienceRunAccess"],
+  liveListening?: LiveListeningService,
 ) {
   const listeningSessionOwners = new Map<string, string>();
   const requireRunAccess = async (
@@ -496,35 +503,22 @@ function registerExperienceProductRoutes(
       ? fixtureId.slice("experience:".length)
       : null;
 
-  const requireListeningOwner = async (
-    request: FastifyRequest,
-    reply: FastifyReply,
+  const experienceListeningForFan = async (
     listeningSessionId: string,
-    mutation = false,
+    fanId: string,
   ) => {
-    const fanSession = mutation
-      ? await requireFanMutationSession(request, reply, fanSessions)
-      : await requireFanSession(request, reply, fanSessions);
-    if (!fanSession) return null;
     const listeningSession = runtime.listeningSession(listeningSessionId);
     const runId = listeningSession
       ? runIdFromFixtureId(listeningSession.fixtureId)
       : null;
-    if (!listeningSession || !runId) {
-      notFound(reply);
-      return null;
-    }
+    if (!listeningSession || !runId) return null;
     const run = await experience.getRun(runId);
     const ownerFanId = listeningSessionOwners.get(listeningSessionId);
     const allowed =
       !!run &&
-      (run.ownerFanId === fanSession.fan.id ||
-        (await canAccessRun?.({ fanId: fanSession.fan.id, runId })) === true);
-    if (!run || !allowed || ownerFanId !== fanSession.fan.id) {
-      notFound(reply);
-      return null;
-    }
-    return listeningSession;
+      (run.ownerFanId === fanId ||
+        (await canAccessRun?.({ fanId, runId })) === true);
+    return run && allowed && ownerFanId === fanId ? listeningSession : null;
   };
 
   app.get<{ Params: { runId: string } }>(
@@ -671,7 +665,21 @@ function registerExperienceProductRoutes(
     async (request, reply) => {
       const runId = runIdFromFixtureId(request.params.fixtureId);
       if (!runId) {
-        return notFound(reply);
+        if (!liveListening) return notFound(reply);
+        const fanSession = await requireFanMutationSession(
+          request,
+          reply,
+          fanSessions,
+        );
+        if (!fanSession) return;
+        const body = listeningSessionBody.safeParse(request.body);
+        if (!body.success) return invalidRequest(reply);
+        const session = await liveListening.createSession({
+          fanId: fanSession.fan.id,
+          fixtureId: request.params.fixtureId,
+          perspectiveTeam: body.data.perspectiveTeam,
+        });
+        return session ? reply.code(201).send(session) : notFound(reply);
       }
       const access = await requireRunAccess(request, reply, runId, true);
       if (!access) return;
@@ -689,22 +697,36 @@ function registerExperienceProductRoutes(
   app.get<{ Params: { id: string } }>(
     "/api/v1/listening-sessions/:id",
     async (request, reply) => {
-      if (!(await requireListeningOwner(request, reply, request.params.id))) {
-        return;
-      }
-      const session = runtime.listeningSession(request.params.id);
+      const fanSession = await requireFanSession(request, reply, fanSessions);
+      if (!fanSession) return;
+      const session =
+        liveListening?.session(request.params.id, fanSession.fan.id) ??
+        (await experienceListeningForFan(
+          request.params.id,
+          fanSession.fan.id,
+        ));
       return session ? reply.send(session) : notFound(reply);
     },
   );
   app.delete<{ Params: { id: string } }>(
     "/api/v1/listening-sessions/:id",
     async (request, reply) => {
-      if (
-        !(await requireListeningOwner(request, reply, request.params.id, true))
-      ) {
-        return;
+      const fanSession = await requireFanMutationSession(
+        request,
+        reply,
+        fanSessions,
+      );
+      if (!fanSession) return;
+      if (liveListening?.removeSession(request.params.id, fanSession.fan.id)) {
+        return reply.code(204).send();
       }
-      if (!runtime.deleteListeningSession(request.params.id)) {
+      if (
+        !(await experienceListeningForFan(
+          request.params.id,
+          fanSession.fan.id,
+        )) ||
+        !runtime.deleteListeningSession(request.params.id)
+      ) {
         return notFound(reply);
       }
       listeningSessionOwners.delete(request.params.id);
@@ -714,9 +736,19 @@ function registerExperienceProductRoutes(
   app.get<{ Params: { id: string } }>(
     "/api/v1/listening-sessions/:id/stream.mp3",
     async (request, reply) => {
-      if (!(await requireListeningOwner(request, reply, request.params.id))) {
-        return;
-      }
+      const fanSession = await requireFanSession(request, reply, fanSessions);
+      if (!fanSession) return;
+      const liveSession = liveListening?.session(
+        request.params.id,
+        fanSession.fan.id,
+      );
+      const experienceSession = liveSession
+        ? null
+        : await experienceListeningForFan(
+            request.params.id,
+            fanSession.fan.id,
+          );
+      if (!liveSession && !experienceSession) return notFound(reply);
       reply.hijack();
       reply.raw.writeHead(200, {
         "Cache-Control": "no-store",
@@ -724,12 +756,17 @@ function registerExperienceProductRoutes(
         "Content-Type": "audio/mpeg",
         "X-Content-Type-Options": "nosniff",
       });
-      if (
-        !runtime.attachListeningClient(
-          request.params.id,
-          reply.raw as AudioWritable,
-        )
-      ) {
+      const attached = liveSession
+        ? liveListening!.attach(
+            request.params.id,
+            fanSession.fan.id,
+            reply.raw as AudioWritable,
+          )
+        : runtime.attachListeningClient(
+            request.params.id,
+            reply.raw as AudioWritable,
+          );
+      if (!attached) {
         reply.raw.end();
       }
       return reply;

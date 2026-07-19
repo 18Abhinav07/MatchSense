@@ -23,6 +23,7 @@ import {
 import { createDurablePushRegistrationService } from "./durable-push.js";
 import { createExperienceRuntime } from "./experience-runtime.js";
 import { loadExperienceAudioPack } from "./experience-audio-pack.js";
+import { createLiveListeningService } from "./live-listening-service.js";
 import {
   createExperienceRoomService,
   type ExperienceRoomAggregate,
@@ -204,6 +205,20 @@ export async function startApi(
         ),
       })
     : null;
+  const liveListening =
+    experienceAssets &&
+    databaseRuntime.commentaryArtifacts &&
+    databaseRuntime.fixtureReads
+      ? createLiveListeningService({
+          artifacts: databaseRuntime.commentaryArtifacts,
+          cueBytes: experienceAssets[0],
+          reads: databaseRuntime.fixtureReads,
+          silenceBytes: experienceAssets[1],
+          writeIntervalMs: resolveMp3WriteIntervalMs(
+            inspectMp3(experienceAssets[1]),
+          ),
+        })
+      : null;
   const experience =
     experienceProduct &&
     databaseRuntime.experiences &&
@@ -384,6 +399,7 @@ export async function startApi(
             experienceRuntime: experienceProduct,
           }
         : {}),
+      ...(liveListening ? { liveListening } : {}),
       ...(pushRegistration && config.vapidPublicKey
         ? {
             durablePush: {
