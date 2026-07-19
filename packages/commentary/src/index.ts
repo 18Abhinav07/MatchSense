@@ -417,7 +417,11 @@ export function createCommentaryPipeline(options?: {
   const store = options?.store ?? createMemoryCommentaryArtifactStore();
   const now = options?.now ?? (() => new Date());
   const groqTimeoutMs = options?.groqTimeoutMs ?? 5_000;
-  const ttsTimeoutMs = options?.ttsTimeoutMs ?? 15_000;
+  // Free-tier Gemini speech commonly needs longer than 15 seconds for an
+  // energetic multi-sentence football call. Match events are naturally
+  // spaced apart, so preserving real narration is more valuable than
+  // prematurely falling back to the deterministic two-tone cue.
+  const ttsTimeoutMs = options?.ttsTimeoutMs ?? 40_000;
 
   const generateArtifact = async (
     input: CommentaryInput,
