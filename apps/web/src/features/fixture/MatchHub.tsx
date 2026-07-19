@@ -10,6 +10,7 @@ import {
   type LiveSnapshot,
   type LiveViewState,
 } from "../../product-state.js";
+import { ListeningControl } from "../listening/ListeningControl.js";
 
 import "./match-hub.css";
 
@@ -142,6 +143,20 @@ export function MatchHub({
   const score = fixture.score;
   const scheduled =
     fixture.lifecycle === "SCHEDULED" || fixture.lifecycle === "TRACKING";
+  const perspectiveTeam =
+    favoriteTeam === home.code || favoriteTeam === away.code
+      ? favoriteTeam
+      : home.code;
+  const listeningMoment = lastEvent
+    ? {
+        familyId: lastEvent.id,
+        fixtureId: fixture.fixtureId,
+        revision: lastEvent.revision,
+        text:
+          lastEvent.detail ??
+          `${lastEvent.title ?? eventLabel(lastEvent)} confirmed at ${lastEvent.minute}.`,
+      }
+    : null;
 
   return (
     <main className="ms-match-hub" id="main-content">
@@ -217,6 +232,11 @@ export function MatchHub({
           <b>{fixture.sourceLabel ?? "TXLINE MATCH DATA"}</b>
         </article>
       </section>
+      <ListeningControl
+        fixtureId={fixture.fixtureId}
+        moment={listeningMoment}
+        perspectiveTeam={perspectiveTeam}
+      />
       <section
         className="ms-match-hub-timeline"
         aria-labelledby="timeline-title"

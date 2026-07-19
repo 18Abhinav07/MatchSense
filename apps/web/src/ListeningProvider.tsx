@@ -4,6 +4,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -12,19 +13,22 @@ import {
 import {
   createArtifactListeningController,
   type ArtifactAudioElement,
-  type ArtifactListeningController,
-  type ListeningMoment,
-  type ListeningSnapshot,
-  type ListeningState,
 } from "./features/listening/artifact-listening.js";
+import { createListeningApi } from "./features/listening/listening-api.js";
+import {
+  createStreamListeningController,
+  type ListeningMoment,
+  type StreamAudioElement,
+  type StreamListeningController,
+  type StreamListeningSnapshot,
+  type StreamListeningState,
+} from "./features/listening/stream-listening.js";
 
 export {
   createArtifactListeningController,
   type ArtifactAudioElement,
-  type ListeningMoment,
-  type ListeningSnapshot,
-  type ListeningState,
 } from "./features/listening/artifact-listening.js";
+export type { ListeningMoment } from "./features/listening/stream-listening.js";
 
 /**
  * Kept as pure media helpers for existing product-state tests. The PWA no
@@ -81,69 +85,40 @@ export function decidePreparationRelease(input: {
   };
 }
 
-interface ListeningContextValue extends ListeningSnapshot {
-  announce(moment: ListeningMoment): Promise<void>;
+interface ListeningContextValue extends StreamListeningSnapshot {
+  announce(moment: ListeningMoment): void;
+  pause(): void;
+  prepare(input: { fixtureId: string; perspectiveTeam: string }): Promise<void>;
   retry(): Promise<void>;
   start(): Promise<void>;
-  stop(): void;
+  stop(): Promise<void>;
 }
 
-const STOPPED_SNAPSHOT: ListeningSnapshot = {
+const STOPPED_SNAPSHOT: StreamListeningSnapshot = {
   commentaryPending: false,
+  error: null,
   lastCueText: null,
+  prepared: false,
   state: "stopped",
 };
 
-const ListeningContext = createContext<ListeningContextValue | null>(null);
+const DEFAULT_CONTEXT: ListeningContextValue = {
+  ...STOPPED_SNAPSHOT,
+  announce: () => undefined,
+  pause: () => undefined,
+  prepare: async () => undefined,
+  retry: async () => undefined,
+  start: async () => undefined,
+  stop: async () => undefined,
+};
 
-function createCuePlayer() {
-  let context: AudioContext | null = null;
-  const AudioContextConstructor =
-    globalThis.AudioContext ??
-    (
-      globalThis as typeof globalThis & {
-        webkitAudioContext?: typeof AudioContext;
-      }
-    ).webkitAudioContext;
+const ListeningContext = createContext<ListeningContextValue>(DEFAULT_CONTEXT);
 
-  return {
-    async activate() {
-      if (!AudioContextConstructor) {
-        throw new Error("Web Audio is unavailable on this device");
-      }
-      context ??= new AudioContextConstructor();
-      if (context.state === "suspended") await context.resume();
-      if (context.state !== "running") {
-        throw new Error("Web Audio could not be activated");
-      }
-    },
-    cue() {
-      if (!context || context.state !== "running") {
-        throw new Error("Audio must be activated by the fan first");
-      }
-      const start = context.currentTime;
-      for (const [offset, frequency] of [
-        [0, 620],
-        [0.13, 860],
-      ] as const) {
-        const gain = context.createGain();
-        const oscillator = context.createOscillator();
-        oscillator.frequency.setValueAtTime(frequency, start + offset);
-        gain.gain.setValueAtTime(0.0001, start + offset);
-        gain.gain.exponentialRampToValueAtTime(0.11, start + offset + 0.015);
-        gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + 0.12);
-        oscillator.connect(gain).connect(context.destination);
-        oscillator.start(start + offset);
-        oscillator.stop(start + offset + 0.13);
-      }
-    },
-  };
-}
-
-function asArtifactAudioElement(audio: HTMLAudioElement): ArtifactAudioElement {
+function asStreamAudioElement(audio: HTMLAudioElement): StreamAudioElement {
   return {
     addEventListener: (event, listener) =>
       audio.addEventListener(event, listener),
+    getAttribute: (name) => audio.getAttribute(name),
     load: () => audio.load(),
     pause: () => audio.pause(),
     play: () => audio.play(),
@@ -156,37 +131,62 @@ function asArtifactAudioElement(audio: HTMLAudioElement): ArtifactAudioElement {
 
 export function ListeningProvider({ children }: { children: ReactNode }) {
   const audioRef = useRef<HTMLAudioElement>(null);
-  const controllerRef = useRef<ArtifactListeningController | null>(null);
-  const [snapshot, setSnapshot] = useState<ListeningSnapshot>(STOPPED_SNAPSHOT);
+  const controllerRef = useRef<StreamListeningController | null>(null);
+  const preparedInputRef = useRef<{
+    fixtureId: string;
+    perspectiveTeam: string;
+  } | null>(null);
+  const [snapshot, setSnapshot] =
+    useState<StreamListeningSnapshot>(STOPPED_SNAPSHOT);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
-    const cuePlayer = createCuePlayer();
-    const controller = createArtifactListeningController({
-      activateAudio: cuePlayer.activate,
-      audio: asArtifactAudioElement(audio),
-      cue: () => cuePlayer.cue(),
+    const controller = createStreamListeningController({
+      api: createListeningApi(),
+      audio: asStreamAudioElement(audio),
     });
     controllerRef.current = controller;
     const unsubscribe = controller.subscribe(setSnapshot);
     return () => {
       unsubscribe();
-      controller.stop();
+      void controller.stop();
       controllerRef.current = null;
     };
   }, []);
 
   const announce = useCallback((moment: ListeningMoment) => {
-    return controllerRef.current?.announce(moment) ?? Promise.resolve();
+    controllerRef.current?.announce(moment);
   }, []);
+  const pause = useCallback(() => controllerRef.current?.pause(), []);
+  const prepare = useCallback(
+    (input: { fixtureId: string; perspectiveTeam: string }) => {
+      preparedInputRef.current = input;
+      return controllerRef.current?.prepare(input) ?? Promise.resolve();
+    },
+    [],
+  );
   const retry = useCallback(() => {
-    return controllerRef.current?.retryFromGesture() ?? Promise.resolve();
+    if (
+      controllerRef.current &&
+      !controllerRef.current.snapshot().prepared &&
+      preparedInputRef.current
+    ) {
+      return controllerRef.current.prepare(preparedInputRef.current);
+    }
+    return controllerRef.current?.resumeFromGesture() ?? Promise.resolve();
   }, []);
   const start = useCallback(() => {
     return controllerRef.current?.startFromGesture() ?? Promise.resolve();
   }, []);
-  const stop = useCallback(() => controllerRef.current?.stop(), []);
+  const stop = useCallback(async () => {
+    const controller = controllerRef.current;
+    if (!controller) return;
+    await controller.stop();
+    if (preparedInputRef.current) {
+      await controller.prepare(preparedInputRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
@@ -203,12 +203,13 @@ export function ListeningProvider({ children }: { children: ReactNode }) {
           },
         ],
         title:
-          snapshot.state === "speaking"
+          snapshot.state === "listening"
             ? "Live MatchSense commentary"
             : "MatchSense Listening Mode",
       });
       session.setActionHandler("play", () => void retry());
-      session.setActionHandler("stop", stop);
+      session.setActionHandler("pause", pause);
+      session.setActionHandler("stop", () => void stop());
     } catch {
       // Media Session is a progressive enhancement; the audio contract stays
       // truthful when a browser declines these optional handlers.
@@ -216,16 +217,17 @@ export function ListeningProvider({ children }: { children: ReactNode }) {
     return () => {
       try {
         session.setActionHandler("play", null);
+        session.setActionHandler("pause", null);
         session.setActionHandler("stop", null);
       } catch {
         // Some browsers expose Media Session but reject unsupported actions.
       }
     };
-  }, [retry, snapshot.state, stop]);
+  }, [pause, retry, snapshot.state, stop]);
 
   const value = useMemo<ListeningContextValue>(
-    () => ({ ...snapshot, announce, retry, start, stop }),
-    [announce, retry, snapshot, start, stop],
+    () => ({ ...snapshot, announce, pause, prepare, retry, start, stop }),
+    [announce, pause, prepare, retry, snapshot, start, stop],
   );
 
   return (
@@ -236,7 +238,9 @@ export function ListeningProvider({ children }: { children: ReactNode }) {
         preload="none"
       />
       {children}
-      {snapshot.state !== "stopped" ? <ListeningDock value={value} /> : null}
+      {snapshot.state !== "stopped" || snapshot.prepared ? (
+        <ListeningDock value={value} />
+      ) : null}
     </ListeningContext.Provider>
   );
 }
@@ -270,26 +274,30 @@ function ListeningDock({ value }: { value: ListeningContextValue }) {
           Retry audio
         </button>
       ) : null}
-      <button className="dock-stop" onClick={value.stop} type="button">
+      {value.state === "listening" || value.state === "connecting" ? (
+        <button onClick={value.pause} type="button">
+          Pause
+        </button>
+      ) : null}
+      <button
+        className="dock-stop"
+        onClick={() => void value.stop()}
+        type="button"
+      >
         Stop
       </button>
     </aside>
   );
 }
 
-const stateLabels: Record<ListeningState, string> = {
+const stateLabels: Record<StreamListeningState, string> = {
   blocked: "Audio blocked — tap Retry audio",
-  connecting: "Activating audio",
+  connecting: "Connecting to the live audio edge",
   listening: "Waiting for a verified update",
-  reconnecting: "Commentary is preparing",
-  speaking: "Calling the moment",
+  paused: "Paused — tap Play to rejoin live",
   stopped: "Stopped",
 };
 
 export function useListening() {
-  const value = useContext(ListeningContext);
-  if (!value) {
-    throw new Error("useListening must be used inside ListeningProvider");
-  }
-  return value;
+  return useContext(ListeningContext);
 }

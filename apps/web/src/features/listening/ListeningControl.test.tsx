@@ -12,12 +12,14 @@ describe("ListeningControl", () => {
         ListeningProvider,
         null,
         createElement(ListeningControl, {
+          fixtureId: "arg-fra",
           moment: {
             familyId: "goal-1",
             fixtureId: "arg-fra",
             revision: 1,
             text: "Argentina score.",
           },
+          perspectiveTeam: "ARG",
         }),
       ),
     );

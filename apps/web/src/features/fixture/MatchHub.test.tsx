@@ -46,7 +46,7 @@ describe("MatchHub", () => {
     expect(markup).toContain("Argentina");
     expect(markup).toContain("France");
     expect(markup).not.toContain(">LIVE<");
-    expect(markup).not.toContain("Start listening");
+    expect(markup).toContain("Start listening");
   });
 
   it("shows a source-projected live match when the SSE is reconciled", () => {
