@@ -16,6 +16,7 @@ import {
   joinCallThreeRoom,
   lockCallThreeCalls,
   overturnCallThreeMoment,
+  projectCallThreeRoom,
   registerConfirmedCallThreeMoment,
   setCallThreeCalls,
   startCallThreeRoom,
@@ -337,6 +338,28 @@ function isVerifiedFinal(fixture: FixtureSnapshot) {
   );
 }
 
+function isVerifiedFinalRevision(
+  fixture: FixtureSnapshot,
+  room: CallThreeRoomState,
+) {
+  // The first final must cross the strict confirmed full-time gate. Once that
+  // durable boundary exists, later canonical full-time revisions may correct
+  // the same verified result without freezing the Room at an older score.
+  if (isVerifiedFinal(fixture)) return true;
+  const moment = fixture.lastEvent;
+  return (
+    room.status === "FINAL" &&
+    room.finalisedVersion !== null &&
+    fixture.provenance === "live_txline" &&
+    fixture.phase === "full_time" &&
+    moment?.provenance === "live_txline" &&
+    moment.revision === fixture.revision &&
+    (moment.status === "confirmed" ||
+      moment.status === "corrected" ||
+      moment.status === "overturned")
+  );
+}
+
 function projectCanonicalMoment(
   room: CallThreeRoomState,
   moment: NonNullable<FixtureSnapshot["lastEvent"]>,
@@ -376,14 +399,13 @@ function appendLifecycle(
     : [...lifecycle, entry];
 }
 
-function finalFacts(fixture: FixtureSnapshot, finalisedAt: number) {
-  const verified = isVerifiedFinal(fixture);
+function verifiedFinalFacts(fixture: FixtureSnapshot, finalisedAt: number) {
   return {
     finalisedAt,
-    regulationResult: verified ? regulationResult(fixture) : null,
-    totalCards: verified ? cardTotal(fixture) : null,
-    totalGoals: verified ? fixture.score.home + fixture.score.away : null,
-    verified,
+    regulationResult: regulationResult(fixture),
+    totalCards: cardTotal(fixture),
+    totalGoals: fixture.score.home + fixture.score.away,
+    verified: true,
     version: fixture.revision,
   } as const;
 }
@@ -911,7 +933,11 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
         const updated = await update(candidate.id, (current) => {
           const aggregate = requireCallThreeAggregate(current);
           if (fixture.revision <= aggregate.fixture.revision) return null;
-          if (aggregate.room.status === "FINAL" && !isVerifiedFinal(fixture)) {
+          const verifiedFinalRevision = isVerifiedFinalRevision(
+            fixture,
+            aggregate.room,
+          );
+          if (aggregate.room.status === "FINAL" && !verifiedFinalRevision) {
             return null;
           }
           const observedAt = Math.max(
@@ -930,6 +956,22 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
           ) {
             room = projectCanonicalMoment(room, fixture.lastEvent);
           }
+          if (
+            room.status !== "FINAL" &&
+            fixture.phase !== "scheduled" &&
+            fixture.revision > 0
+          ) {
+            const result = regulationResult(fixture);
+            if (result) {
+              room = projectCallThreeRoom(room, {
+                observedAt,
+                regulationResult: result,
+                totalCards: cardTotal(fixture),
+                totalGoals: fixture.score.home + fixture.score.away,
+                version: fixture.revision,
+              });
+            }
+          }
 
           let status: RoomStatus =
             room.status === "FINAL"
@@ -938,9 +980,9 @@ export function createDurableRoomService(options: DurableRoomServiceOptions) {
                 ? "live"
                 : "lobby";
           let finalizedAt: string | null | undefined;
-          if (isVerifiedFinal(fixture)) {
+          if (verifiedFinalRevision) {
             room = finaliseCallThreeRoom(room, {
-              facts: finalFacts(fixture, observedAt),
+              facts: verifiedFinalFacts(fixture, observedAt),
             });
             status = "final";
             finalizedAt = new Date(

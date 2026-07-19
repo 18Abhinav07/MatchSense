@@ -380,6 +380,114 @@ describe("durable data-qualified Call Three Rooms", () => {
     });
   });
 
+  it("projects each canonical live revision into a provisional leaderboard after kickoff", async () => {
+    const repository = inMemoryRepository();
+    let now = kickoffAt - 60_000;
+    const service = createDurableRoomService({
+      fixture: async () => scheduledLiveFixture,
+      now: () => now,
+      repository,
+      roomId: () => "room-provisional",
+    });
+    const created = await service.create({
+      fixtureId: scheduledLiveFixture.fixtureId,
+      host: { fanId: "fan-host", nickname: "Host" },
+      name: "Call Three",
+    });
+    await service.setCalls({
+      calls,
+      fanId: "fan-host",
+      roomId: created.room.id,
+    });
+
+    now = kickoffAt + 60_000;
+    const openingGoal = canonicalMoment({
+      kind: "goal",
+      revision: 1,
+      status: "confirmed",
+      score: { away: 0, home: 1 },
+    });
+    await service.projectFixture({
+      ...scheduledLiveFixture,
+      lastEvent: openingGoal,
+      minute: "23'",
+      phase: "first_half",
+      revision: 1,
+      score: openingGoal.score,
+      scores: {
+        extraTime: { away: 0, home: 0 },
+        regulation: openingGoal.score,
+        shootout: { away: 0, home: 0 },
+      },
+      updatedAt: new Date(now).toISOString(),
+    });
+
+    await expect(
+      service.get(created.room.id, "fan-host"),
+    ).resolves.toMatchObject({
+      leaderboard: [expect.objectContaining({ provisional: true, score: 300 })],
+      myCalls: { lockedAt: kickoffAt },
+      points: { lifetimeTotal: 0, roomPoints: 0 },
+      status: "LIVE",
+      targets: {
+        cards: null,
+        goals: { answer: "NO", version: 1 },
+        result: { answer: "HOME", version: 1 },
+      },
+    });
+
+    now += 60_000;
+    const secondGoal = canonicalMoment({
+      kind: "goal",
+      revision: 2,
+      status: "confirmed",
+      score: { away: 1, home: 2 },
+    });
+    await service.projectFixture({
+      ...scheduledLiveFixture,
+      lastEvent: secondGoal,
+      minute: "41'",
+      phase: "first_half",
+      revision: 2,
+      score: secondGoal.score,
+      scores: {
+        extraTime: { away: 0, home: 0 },
+        regulation: secondGoal.score,
+        shootout: { away: 0, home: 0 },
+      },
+      stats: {
+        away: {
+          corners: 0,
+          penaltiesAwarded: 0,
+          penaltiesMissed: 0,
+          penaltiesScored: 0,
+          redCards: 0,
+          yellowCards: 2,
+        },
+        home: {
+          corners: 0,
+          penaltiesAwarded: 0,
+          penaltiesMissed: 0,
+          penaltiesScored: 0,
+          redCards: 0,
+          yellowCards: 2,
+        },
+      },
+      updatedAt: new Date(now).toISOString(),
+    });
+
+    await expect(
+      service.get(created.room.id, "fan-host"),
+    ).resolves.toMatchObject({
+      leaderboard: [expect.objectContaining({ provisional: true, score: 600 })],
+      targets: {
+        cards: { answer: "NO", version: 2 },
+        goals: { answer: "YES", version: 2 },
+        result: { answer: "HOME", version: 2 },
+      },
+    });
+  });
+
   it("finalizes verified facts into MatchSense Points and voids missing cards for everyone", async () => {
     const repository = inMemoryRepository();
     let now = kickoffAt - 60_000;
@@ -430,6 +538,111 @@ describe("durable data-qualified Call Three Rooms", () => {
         cards: { state: "VOID" },
         goals: { answer: "YES", state: "RESOLVED" },
         result: { answer: "HOME", state: "RESOLVED" },
+      },
+    });
+  });
+
+  it("recalculates final scoring from a later canonical full-time correction", async () => {
+    const repository = inMemoryRepository();
+    let now = kickoffAt - 60_000;
+    const service = createDurableRoomService({
+      fixture: async () => scheduledLiveFixture,
+      now: () => now,
+      repository,
+      roomId: () => "room-final-correction",
+    });
+    const created = await service.create({
+      fixtureId: scheduledLiveFixture.fixtureId,
+      host: { fanId: "fan-host", nickname: "Host" },
+      name: "Call Three",
+    });
+    await service.setCalls({
+      calls,
+      fanId: "fan-host",
+      roomId: created.room.id,
+    });
+    now = kickoffAt + 7_200_000;
+    const finalMoment = canonicalMoment({
+      kind: "phase.full_time",
+      revision: 8,
+      status: "confirmed",
+      score: { away: 1, home: 2 },
+    });
+    await service.projectFixture({
+      ...scheduledLiveFixture,
+      lastEvent: finalMoment,
+      minute: "FT",
+      phase: "full_time",
+      revision: 8,
+      score: finalMoment.score,
+      scores: {
+        extraTime: { away: 0, home: 0 },
+        regulation: finalMoment.score,
+        shootout: { away: 0, home: 0 },
+      },
+      updatedAt: new Date(now).toISOString(),
+    });
+    await expect(
+      service.get(created.room.id, "fan-host"),
+    ).resolves.toMatchObject({
+      points: { lifetimeTotal: 500, roomPoints: 500 },
+      status: "FINAL",
+    });
+
+    now += 60_000;
+    const correction = canonicalMoment({
+      kind: "correction",
+      revision: 9,
+      status: "corrected",
+      score: { away: 3, home: 2 },
+    });
+    await expect(
+      service.projectFixture({
+        ...scheduledLiveFixture,
+        lastEvent: correction,
+        minute: "FT",
+        phase: "full_time",
+        revision: 9,
+        score: correction.score,
+        scores: {
+          extraTime: { away: 0, home: 0 },
+          regulation: correction.score,
+          shootout: { away: 0, home: 0 },
+        },
+        stats: {
+          away: {
+            corners: 0,
+            penaltiesAwarded: 0,
+            penaltiesMissed: 0,
+            penaltiesScored: 0,
+            redCards: 1,
+            yellowCards: 2,
+          },
+          home: {
+            corners: 0,
+            penaltiesAwarded: 0,
+            penaltiesMissed: 0,
+            penaltiesScored: 0,
+            redCards: 1,
+            yellowCards: 2,
+          },
+        },
+        updatedAt: new Date(now).toISOString(),
+      }),
+    ).resolves.toBe(1);
+
+    await expect(
+      service.get(created.room.id, "fan-host"),
+    ).resolves.toMatchObject({
+      leaderboard: [
+        expect.objectContaining({ provisional: false, score: 200 }),
+      ],
+      points: { lifetimeTotal: 200, roomPoints: 200 },
+      status: "FINAL",
+      targets: {
+        cards: { answer: "YES", state: "RESOLVED", version: 9 },
+        goals: { answer: "YES", state: "RESOLVED", version: 9 },
+        result: { answer: "AWAY", state: "RESOLVED", version: 9 },
       },
     });
   });
