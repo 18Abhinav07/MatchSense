@@ -50,7 +50,7 @@ const prefixCatalog = [
 
 describe("migration catalog and planning", () => {
   it("publishes a deterministic schema-only baseline migration", () => {
-    expect(db.migrationCatalog).toHaveLength(9);
+    expect(db.migrationCatalog).toHaveLength(10);
 
     const migration = db.migrationCatalog?.[0];
     expect(migration).toMatchObject({
@@ -66,6 +66,31 @@ describe("migration catalog and planning", () => {
         .update(migration?.sql ?? "")
         .digest("hex"),
     );
+  });
+
+  it("restores only the isolated Experience truth modes in v10", () => {
+    const migration = db.migrationCatalog?.[9];
+
+    expect(migration).toMatchObject({
+      description: "restore isolated experience match persistence",
+      version: 10,
+    });
+    expect(migration?.checksum).toBe(
+      createHash("sha256")
+        .update(migration?.sql ?? "")
+        .digest("hex"),
+    );
+    expect(migration?.sql).toContain("'matchsense-experience-v2'");
+    expect(migration?.sql).toContain("mode IN ('live', 'recorded', 'demo')");
+    expect(migration?.sql).toContain(
+      "mode = 'demo' AND provenance = 'synthetic_txline_shaped'",
+    );
+    expect(migration?.sql).toContain(
+      "experience_runs_fixture_mode_check CHECK (fixture_mode = 'demo')",
+    );
+    expect(migration?.sql).not.toContain("'fan_follows'");
+    expect(migration?.sql).not.toContain("'commentary_artifacts'");
+    expect(migration?.sql).not.toContain("'commentary_jobs'");
   });
 
   it("publishes the deterministic v2 truth and delivery foundation", () => {
@@ -214,7 +239,7 @@ describe("migration catalog and planning", () => {
   it("retires synthetic public modes and adds the authorised archive/job foundation in v4", () => {
     const migration = db.migrationCatalog?.[3];
 
-    expect(db.migrationCatalog).toHaveLength(9);
+    expect(db.migrationCatalog).toHaveLength(10);
     expect(migration).toMatchObject({
       description:
         "retire synthetic public modes and add authorised archive jobs",
@@ -318,7 +343,7 @@ describe("migration catalog and planning", () => {
   it("adds durable archive-import leases and manifest-pinned featured replay readiness in v6", () => {
     const migration = db.migrationCatalog?.[5];
 
-    expect(db.migrationCatalog).toHaveLength(9);
+    expect(db.migrationCatalog).toHaveLength(10);
     expect(migration).toMatchObject({
       description:
         "create durable archive import jobs and featured replay readiness",

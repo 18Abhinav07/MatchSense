@@ -1018,6 +1018,88 @@ ALTER TABLE matchsense.archive_import_jobs
       OR jsonb_typeof(source_context) = 'object'
     );`.trim(),
   ),
+  defineMigration(
+    10,
+    "restore isolated experience match persistence",
+    `-- Experience runs are deliberately synthetic and private. This migration
+-- restores only the durable truth surfaces they require; public live follows,
+-- archive imports and generated commentary jobs remain live/recorded-only.
+INSERT INTO matchsense.rights_grants (
+  id, reference, scopes, active
+)
+VALUES (
+  'matchsense-experience-v2',
+  'MatchSense five-minute Experience using labelled synthetic TxLINE-shaped facts',
+  ARRAY['normalised_retention'],
+  true
+)
+ON CONFLICT (id) DO UPDATE
+SET reference = EXCLUDED.reference,
+    scopes = EXCLUDED.scopes,
+    active = true,
+    revoked_at = NULL,
+    updated_at = clock_timestamp();
+
+ALTER TABLE matchsense.fixtures
+  DROP CONSTRAINT IF EXISTS fixtures_mode_check,
+  DROP CONSTRAINT IF EXISTS fixtures_provenance_check;
+ALTER TABLE matchsense.fixtures
+  ADD CONSTRAINT fixtures_mode_check CHECK (mode IN ('live', 'recorded', 'demo')),
+  ADD CONSTRAINT fixtures_provenance_check CHECK (
+    (mode = 'live' AND provenance = 'live_txline')
+    OR (mode = 'recorded' AND provenance = 'recorded_txline_authorised')
+    OR (mode = 'demo' AND provenance = 'synthetic_txline_shaped')
+  );
+
+ALTER TABLE matchsense.raw_source_records
+  DROP CONSTRAINT IF EXISTS raw_source_records_mode_check,
+  DROP CONSTRAINT IF EXISTS raw_source_records_provenance_check;
+ALTER TABLE matchsense.raw_source_records
+  ADD CONSTRAINT raw_source_records_mode_check
+    CHECK (mode IN ('live', 'recorded', 'demo')),
+  ADD CONSTRAINT raw_source_records_provenance_check CHECK (
+    (mode = 'live' AND provenance = 'live_txline')
+    OR (mode = 'recorded' AND provenance = 'recorded_txline_authorised')
+    OR (mode = 'demo' AND provenance = 'synthetic_txline_shaped')
+  );
+
+DO $$
+DECLARE
+  table_name text;
+BEGIN
+  FOREACH table_name IN ARRAY ARRAY[
+    'fixture_projections',
+    'canonical_moments',
+    'moment_revisions',
+    'fixture_events',
+    'outbox',
+    'consumer_receipts',
+    'outbox_dead_letters',
+    'push_deliveries',
+    'rooms',
+    'match_memories'
+  ]
+  LOOP
+    EXECUTE format(
+      'ALTER TABLE matchsense.%I DROP CONSTRAINT IF EXISTS %I',
+      table_name,
+      table_name || '_mode_check'
+    );
+    EXECUTE format(
+      'ALTER TABLE matchsense.%I ADD CONSTRAINT %I CHECK (mode IN (''live'', ''recorded'', ''demo''))',
+      table_name,
+      table_name || '_mode_check'
+    );
+  END LOOP;
+END;
+$$;
+
+ALTER TABLE matchsense.experience_runs
+  DROP CONSTRAINT IF EXISTS experience_runs_fixture_mode_check,
+  ALTER COLUMN fixture_mode SET DEFAULT 'demo';
+ALTER TABLE matchsense.experience_runs
+  ADD CONSTRAINT experience_runs_fixture_mode_check CHECK (fixture_mode = 'demo');`.trim(),
+  ),
 ]);
 
 export function planMigrations(

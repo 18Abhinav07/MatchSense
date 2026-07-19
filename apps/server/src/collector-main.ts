@@ -50,6 +50,7 @@ import {
   type DurableRoomAggregate,
   type DurableRoomService,
 } from "./durable-room-service.js";
+import { createExperienceDelivery } from "./experience-delivery.js";
 import { type Mp3Contract } from "./mp3.js";
 import {
   createOutboxWorker,
@@ -70,6 +71,7 @@ export type CollectorDatabaseRuntime = Pick<
   | "archiveImportJobs"
   | "close"
   | "commentaryJobs"
+  | "experiences"
   | "fans"
   | "fixtureTruth"
   | "migrate"
@@ -174,6 +176,7 @@ async function fetchTournamentSchedule(client: TxlineAuthenticatedClient) {
 
 export interface CollectorOutboxEffects {
   commentary?: Pick<CommentaryJobWorker, "handleOutbox">;
+  experience?: { deliver(payload: unknown): Promise<unknown> };
   push?: Pick<DurablePushService, "deliverToFixture">;
   rooms?: Pick<DurableRoomService, "projectFixture">;
 }
@@ -240,12 +243,17 @@ export function createCollectorOutboxHandlers(
       await effects.commentary?.handleOutbox(message);
     };
   }
-  if (effects.push) {
+  if (effects.push || effects.experience) {
     handlers["push.candidate"] = async (message) => {
-      if (message.mode !== "live") return;
-      const candidate = pushInputFromRealtimeMoment(message.payload);
-      if (!candidate) return;
-      await effects.push?.deliverToFixture(candidate, "live");
+      if (message.mode === "demo") {
+        await effects.experience?.deliver(message.payload);
+        return;
+      }
+      if (message.mode === "live") {
+        const candidate = pushInputFromRealtimeMoment(message.payload);
+        if (!candidate) return;
+        await effects.push?.deliverToFixture(candidate, "live");
+      }
     };
   }
   if (effects.rooms) {
@@ -638,6 +646,7 @@ export async function startCollector(
   let closed = false;
   let unregisterSignals: () => void = () => undefined;
   let outboxWorker: OutboxWorker | null = null;
+  let experienceOutboxWorker: OutboxWorker | null = null;
   let commentaryWorker: CommentaryJobWorker | null = null;
   let archiveImportPoller: ArchiveImportPoller | null = null;
   let sourceLifecycle: CollectorSourceLifecycle | null = null;
@@ -651,6 +660,7 @@ export async function startCollector(
     if (archiveImportPollerStarted) await archiveImportPoller?.stop();
     if (sourceStarted) await sourceLifecycle?.stop();
     await outboxWorker?.stop();
+    await experienceOutboxWorker?.stop();
     await commentaryWorker?.stop();
     await databaseRuntime.close();
   };
@@ -748,12 +758,27 @@ export async function startCollector(
             outbox,
           }))
       )(databaseRuntime.outbox);
+    experienceOutboxWorker =
+      durablePush && databaseRuntime.experiences
+        ? createOutboxWorker({
+            consumer: "collector-experience",
+            handlers: createCollectorOutboxHandlers({
+              experience: createExperienceDelivery({
+                experiences: databaseRuntime.experiences,
+                push: durablePush,
+              }),
+            }),
+            mode: "demo",
+            outbox: databaseRuntime.outbox,
+          })
+        : null;
     await sourceLifecycle.start();
     sourceStarted = true;
     archiveImportPoller.start();
     archiveImportPollerStarted = true;
     commentaryWorker?.start();
     outboxWorker.start();
+    experienceOutboxWorker?.start();
     unregisterSignals = registerShutdownSignals(
       options.signalSource ?? process,
       close,

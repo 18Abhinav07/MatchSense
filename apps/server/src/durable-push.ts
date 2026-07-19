@@ -292,6 +292,26 @@ export function createDurablePushService(options: DurablePushServiceOptions) {
 
   return {
     ...registration,
+    deliverExperienceToFans: async (
+      input: MomentPushInput,
+      fanIds: readonly string[],
+    ) => {
+      const uniqueFanIds = [...new Set(fanIds.filter(Boolean))];
+      const devices = (
+        await Promise.all(
+          uniqueFanIds.map((fanId) => options.devices.listActiveForFan(fanId)),
+        )
+      )
+        .flat()
+        .filter((device) => preferenceFor(device.preferences, input.eventKind));
+      const results = await Promise.all(
+        devices.map((device) => sendDevice(device, input, "demo")),
+      );
+      return {
+        accepted: results.filter(Boolean).length,
+        attempted: results.length,
+      };
+    },
     deliverToFixture: async (input: MomentPushInput, mode: PersistenceMode) => {
       // Recorded archives, reconciliation, and legacy demo state are never
       // allowed to create a user-visible live notification.

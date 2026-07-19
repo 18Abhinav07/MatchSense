@@ -210,7 +210,7 @@ describe("server-owned Experience Match", () => {
       phase: "scheduled",
       revision: 0,
     });
-    expect(repository.beats.size).toBe(11);
+    expect(repository.beats.size).toBe(20);
     await experience.close();
     await product.close();
   });
@@ -439,14 +439,14 @@ describe("server-owned Experience Match", () => {
       ownerFanId: null,
     });
 
-    now = "2026-07-17T12:00:46.000Z";
+    now = "2026-07-17T12:00:36.000Z";
     await experience.tick();
     expect(product.fixture(run.fixtureId)).toMatchObject({
       score: { away: 0, home: 0 },
       lastEvent: { kind: "var.started", status: "under_review" },
     });
 
-    now = "2026-07-17T12:01:01.000Z";
+    now = "2026-07-17T12:00:51.000Z";
     await experience.tick();
     expect(product.fixture(run.fixtureId)).toMatchObject({
       score: { away: 0, home: 1 },
@@ -493,19 +493,232 @@ describe("server-owned Experience Match", () => {
 
     await experience.tick();
 
-    expect(persisted).toHaveLength(11);
+    expect(persisted).toHaveLength(20);
     expect(product.fixture(run.fixtureId)).toMatchObject({
       phase: "full_time",
-      score: { away: 0, home: 1 },
+      score: { away: 1, home: 2 },
       stats: {
-        away: { redCards: 1, yellowCards: 1 },
-        home: { corners: 1 },
+        away: { redCards: 1, yellowCards: 2 },
+        home: { corners: 1, yellowCards: 2 },
       },
     });
+    const final = product.fixture(run.fixtureId)!;
+    const stats = final.stats!;
+    expect(final.score.home + final.score.away).toBe(3);
+    expect(
+      stats.home.yellowCards +
+        stats.home.redCards +
+        stats.away.yellowCards +
+        stats.away.redCards,
+    ).toBe(5);
     expect(await experience.getRun(run.id)).toMatchObject({
-      nextBeatIndex: 11,
+      nextBeatIndex: 20,
       status: "final",
     });
+    await experience.close();
+    await product.close();
+  });
+
+  it("authors the exact five-minute Experience sequence and VAR targets", async () => {
+    const repository = memoryExperiences();
+    const product = productRuntime();
+    const experience = createExperienceRuntime({
+      id: () => "sequence-run",
+      now: () => "2026-07-17T12:00:00.000Z",
+      processor: {
+        process: async () => ({
+          eventSequence: 1,
+          kind: "committed" as const,
+          revision: 1,
+        }),
+      },
+      productRuntime: product,
+      repository,
+    });
+
+    const run = await experience.startRun({
+      awayTeam: "FRA",
+      homeTeam: "ARG",
+      ownerFanId: null,
+    });
+    const authored = [...repository.beats.values()]
+      .sort((left, right) => left.beatIndex - right.beatIndex)
+      .map((beat) => {
+        const envelope = beat.envelope as { fact: CanonicalEventFact };
+        return {
+          dueAt: beat.dueAt,
+          key: beat.beatKey,
+          kind: envelope.fact.kind,
+          status: envelope.fact.status,
+          targetFamilyId: envelope.fact.targetFamilyId ?? null,
+          team: envelope.fact.team,
+        };
+      });
+
+    expect(run.templateVersion).toBe(2);
+    expect(authored).toEqual([
+      {
+        dueAt: "2026-07-17T12:00:00.000Z",
+        key: "kickoff",
+        kind: "phase.kickoff",
+        status: "confirmed",
+        targetFamilyId: null,
+        team: null,
+      },
+      {
+        dueAt: "2026-07-17T12:00:25.000Z",
+        key: "opening-goal",
+        kind: "goal",
+        status: "provisional",
+        targetFamilyId: null,
+        team: "ARG",
+      },
+      {
+        dueAt: "2026-07-17T12:00:35.000Z",
+        key: "opening-goal-var-review",
+        kind: "var.started",
+        status: "under_review",
+        targetFamilyId: "sequence-run:event:opening-goal",
+        team: null,
+      },
+      {
+        dueAt: "2026-07-17T12:00:50.000Z",
+        key: "opening-goal-var-stands",
+        kind: "var.stands",
+        status: "confirmed",
+        targetFamilyId: "sequence-run:event:opening-goal",
+        team: null,
+      },
+      {
+        dueAt: "2026-07-17T12:01:10.000Z",
+        key: "home-yellow",
+        kind: "card.yellow",
+        status: "confirmed",
+        targetFamilyId: null,
+        team: "ARG",
+      },
+      {
+        dueAt: "2026-07-17T12:01:25.000Z",
+        key: "away-yellow-first-half",
+        kind: "card.yellow",
+        status: "confirmed",
+        targetFamilyId: null,
+        team: "FRA",
+      },
+      {
+        dueAt: "2026-07-17T12:01:40.000Z",
+        key: "away-penalty-awarded",
+        kind: "penalty.awarded",
+        status: "confirmed",
+        targetFamilyId: null,
+        team: "FRA",
+      },
+      {
+        dueAt: "2026-07-17T12:01:55.000Z",
+        key: "away-penalty-scored",
+        kind: "penalty.scored",
+        status: "confirmed",
+        targetFamilyId: null,
+        team: "FRA",
+      },
+      {
+        dueAt: "2026-07-17T12:02:15.000Z",
+        key: "half-time",
+        kind: "phase.half_time",
+        status: "confirmed",
+        targetFamilyId: null,
+        team: null,
+      },
+      {
+        dueAt: "2026-07-17T12:02:30.000Z",
+        key: "second-half",
+        kind: "phase.second_half_start",
+        status: "confirmed",
+        targetFamilyId: null,
+        team: null,
+      },
+      {
+        dueAt: "2026-07-17T12:03:00.000Z",
+        key: "away-red",
+        kind: "card.red",
+        status: "confirmed",
+        targetFamilyId: null,
+        team: "FRA",
+      },
+      {
+        dueAt: "2026-07-17T12:03:20.000Z",
+        key: "home-yellow-second-half",
+        kind: "card.yellow",
+        status: "confirmed",
+        targetFamilyId: null,
+        team: "ARG",
+      },
+      {
+        dueAt: "2026-07-17T12:03:21.000Z",
+        key: "away-yellow-second-half",
+        kind: "card.yellow",
+        status: "confirmed",
+        targetFamilyId: null,
+        team: "FRA",
+      },
+      {
+        dueAt: "2026-07-17T12:03:45.000Z",
+        key: "winning-goal",
+        kind: "goal",
+        status: "confirmed",
+        targetFamilyId: null,
+        team: "ARG",
+      },
+      {
+        dueAt: "2026-07-17T12:04:10.000Z",
+        key: "apparent-equalizer",
+        kind: "goal",
+        status: "provisional",
+        targetFamilyId: null,
+        team: "FRA",
+      },
+      {
+        dueAt: "2026-07-17T12:04:20.000Z",
+        key: "equalizer-var-review",
+        kind: "var.started",
+        status: "under_review",
+        targetFamilyId: "sequence-run:event:apparent-equalizer",
+        team: null,
+      },
+      {
+        dueAt: "2026-07-17T12:04:35.000Z",
+        key: "equalizer-var-overturned",
+        kind: "var.overturned",
+        status: "confirmed",
+        targetFamilyId: "sequence-run:event:apparent-equalizer",
+        team: null,
+      },
+      {
+        dueAt: "2026-07-17T12:04:45.000Z",
+        key: "late-corner",
+        kind: "corner",
+        status: "confirmed",
+        targetFamilyId: null,
+        team: "ARG",
+      },
+      {
+        dueAt: "2026-07-17T12:04:55.000Z",
+        key: "regulation-end",
+        kind: "phase.regulation_end",
+        status: "confirmed",
+        targetFamilyId: null,
+        team: null,
+      },
+      {
+        dueAt: "2026-07-17T12:05:00.000Z",
+        key: "full-time",
+        kind: "phase.full_time",
+        status: "confirmed",
+        targetFamilyId: null,
+        team: null,
+      },
+    ]);
+
     await experience.close();
     await product.close();
   });

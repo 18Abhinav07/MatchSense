@@ -145,8 +145,10 @@ export function createAudioHub(options: {
     bytes = options.cueBytes,
   ) => {
     if (acceptedEventIds.has(eventId)) return false;
+    const attached = sessionIds.filter((sessionId) => clients.has(sessionId));
+    if (attached.length === 0) return false;
     acceptedEventIds.add(eventId);
-    for (const sessionId of sessionIds) write(sessionId, bytes);
+    for (const sessionId of attached) write(sessionId, bytes);
     return true;
   };
 

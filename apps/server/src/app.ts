@@ -73,6 +73,7 @@ export interface BuildAppOptions {
   durablePush?: DurablePushRouteDependencies;
   durableRooms?: DurableRoomRouteDependencies;
   experience?: ExperienceRuntime;
+  experienceRuntime?: ProductRuntime;
   fan?: FanRouteDependencies;
   fixtureRead?: FixtureReadRouteDependencies;
   manageRuntimeLifecycle?: boolean;
@@ -224,6 +225,10 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   if (options.experience) {
     registerExperienceRoutes(app, options.experience, options.fan?.sessions);
     app.addHook("preClose", () => options.experience?.close());
+  }
+  if (options.experienceRuntime) {
+    registerExperienceProductRoutes(app, options.experienceRuntime);
+    app.addHook("preClose", () => options.experienceRuntime?.close());
   }
   if (options.fan) {
     registerFanRoutes(app, options.fan);
@@ -387,6 +392,138 @@ function registerExperienceRoutes(
     async (request, reply) => {
       const run = await experience.getRun(request.params.runId);
       return run ? reply.send({ run }) : notFound(reply);
+    },
+  );
+}
+
+function experienceFixtureId(runId: string) {
+  return /^[A-Za-z0-9_.:-]{1,120}$/u.test(runId) ? `experience:${runId}` : null;
+}
+
+function registerExperienceProductRoutes(
+  app: FastifyInstance,
+  runtime: ProductRuntime,
+) {
+  app.get<{ Params: { runId: string } }>(
+    "/api/v1/experience/runs/:runId/fixture",
+    async (request, reply) => {
+      const fixtureId = experienceFixtureId(request.params.runId);
+      const fixture = fixtureId ? runtime.fixture(fixtureId) : null;
+      return fixture
+        ? reply.header("Cache-Control", "no-store").send(fixture)
+        : notFound(reply);
+    },
+  );
+  app.get<{ Params: { runId: string; identity: string } }>(
+    "/api/v1/experience/runs/:runId/moments/:identity",
+    async (request, reply) => {
+      const fixtureId = experienceFixtureId(request.params.runId);
+      const resolved = fixtureId
+        ? runtime.resolveMoment(fixtureId, request.params.identity)
+        : null;
+      return resolved
+        ? reply.header("Cache-Control", "no-store").send(resolved)
+        : notFound(reply);
+    },
+  );
+  app.get<{ Params: { runId: string } }>(
+    "/api/v1/experience/runs/:runId/stream",
+    (request, reply) => {
+      const fixtureId = experienceFixtureId(request.params.runId);
+      const fixture = fixtureId ? runtime.fixture(fixtureId) : null;
+      if (!fixtureId || !fixture) return notFound(reply);
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "X-Accel-Buffering": "no",
+        "X-Content-Type-Options": "nosniff",
+      });
+      const lastEventHeader = request.headers["last-event-id"];
+      const lastEventId = Array.isArray(lastEventHeader)
+        ? lastEventHeader[0]
+        : lastEventHeader;
+      if (lastEventId) {
+        const history = runtime.fixtureEvents(fixtureId);
+        const cursor = history.findIndex((event) => event.id === lastEventId);
+        const moments = (cursor >= 0 ? history.slice(cursor + 1) : [])
+          .map((event) => event.moment)
+          .filter((moment) => moment !== undefined);
+        if (moments.length) {
+          reply.raw.write(
+            formatSse({
+              catchup: { fromEventId: lastEventId, moments },
+              event: "catchup.ready",
+              id: `catchup:${moments.at(-1)?.identity ?? lastEventId}`,
+              snapshot: fixture,
+            }),
+          );
+        }
+      }
+      const unsubscribe = runtime.subscribeFixture(fixtureId, (event) => {
+        reply.raw.write(formatSse(event));
+      });
+      if (!unsubscribe) {
+        reply.raw.end();
+        return reply;
+      }
+      request.raw.once("close", unsubscribe);
+      return reply;
+    },
+  );
+  app.post<{ Params: { fixtureId: string } }>(
+    "/api/v1/fixtures/:fixtureId/listening-sessions",
+    async (request, reply) => {
+      if (!request.params.fixtureId.startsWith("experience:")) {
+        return notFound(reply);
+      }
+      const body = listeningSessionBody.safeParse(request.body);
+      if (!body.success) return invalidRequest(reply);
+      const session = runtime.createListeningSession(
+        request.params.fixtureId,
+        body.data.perspectiveTeam as TeamCode,
+      );
+      return session ? reply.code(201).send(session) : notFound(reply);
+    },
+  );
+  app.get<{ Params: { id: string } }>(
+    "/api/v1/listening-sessions/:id",
+    async (request, reply) => {
+      const session = runtime.listeningSession(request.params.id);
+      return session ? reply.send(session) : notFound(reply);
+    },
+  );
+  app.delete<{ Params: { id: string } }>(
+    "/api/v1/listening-sessions/:id",
+    async (request, reply) =>
+      runtime.deleteListeningSession(request.params.id)
+        ? reply.code(204).send()
+        : notFound(reply),
+  );
+  app.get<{ Params: { id: string } }>(
+    "/api/v1/listening-sessions/:id/stream.mp3",
+    (request, reply) => {
+      if (!runtime.listeningSession(request.params.id)) return notFound(reply);
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        "Cache-Control": "no-store",
+        Connection: "keep-alive",
+        "Content-Type": "audio/mpeg",
+        "X-Content-Type-Options": "nosniff",
+      });
+      if (
+        !runtime.attachListeningClient(
+          request.params.id,
+          reply.raw as AudioWritable,
+        )
+      ) {
+        reply.raw.end();
+      }
+      request.raw.once("close", () => {
+        reply.raw.destroy();
+      });
+      return reply;
     },
   );
 }

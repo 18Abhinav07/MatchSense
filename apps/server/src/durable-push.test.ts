@@ -291,6 +291,36 @@ describe("durable targeted push delivery", () => {
     expect(sender.send).not.toHaveBeenCalled();
   });
 
+  it("delivers an explicitly labelled Experience alert directly to its participant", async () => {
+    const { sender, service } = harness();
+    await service.register({
+      fanId: "fan-1",
+      preferences: { goals: true },
+      subscription,
+    });
+
+    await expect(
+      service.deliverExperienceToFans(
+        {
+          body: "SIMULATED TXLINE-SHAPED DATA · Argentina lead.",
+          eventKind: "goal",
+          fixtureId: "experience:run-1",
+          momentId: "run-1:goal",
+          occurredAt: "2026-07-17T12:12:00.000Z",
+          revision: 3,
+          title: "EXPERIENCE · GOAL — Argentina",
+        },
+        ["fan-1"],
+      ),
+    ).resolves.toEqual({ accepted: 1, attempted: 1 });
+    const envelope = JSON.parse(sender.send.mock.calls[0]?.[1] ?? "{}") as {
+      route?: string;
+      title?: string;
+    };
+    expect(envelope.title).toContain("EXPERIENCE");
+    expect(envelope.route).toContain("experience%3Arun-1");
+  });
+
   it("marks a user-requested test alert with its own non-live tag namespace", async () => {
     const { sender, service } = harness();
     const device = await service.register({
