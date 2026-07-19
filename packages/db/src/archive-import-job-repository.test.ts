@@ -303,6 +303,8 @@ describe("archive import job repository", () => {
       query.includes("INSERT INTO matchsense.archive_import_jobs"),
     );
     const conflictUpdate = insert?.query.split("DO UPDATE")[1] ?? "";
+    expect(insert?.parameters[6]).toEqual(jobInput.sourceContext);
+    expect(typeof insert?.parameters[6]).toBe("object");
     expect(conflictUpdate).toContain("SET reason = 'live_correction'");
     expect(conflictUpdate).toContain("EXCLUDED.reason = 'live_terminal'");
     expect(conflictUpdate).toContain(
