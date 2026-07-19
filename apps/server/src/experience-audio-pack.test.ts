@@ -137,6 +137,18 @@ function load(): ExperienceAudioPack {
 }
 
 describe("loadExperienceAudioPack", () => {
+  it("records the authored source of the committed Experience commentary", async () => {
+    const manifest = JSON.parse(
+      await readFile(path.join(COMMITTED_PACK, "manifest.json"), "utf8"),
+    ) as Record<string, unknown>;
+
+    expect(manifest.audioSource).toEqual({
+      format: "aac",
+      provider: "google-ai-studio",
+      revision: "expressive-commentary-v1",
+    });
+  });
+
   it("loads and validates the real committed ARG-FRA v3 English pack", () => {
     const pack = load();
 
