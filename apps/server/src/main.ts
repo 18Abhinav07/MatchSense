@@ -686,7 +686,7 @@ export async function startServer(options: StartServerOptions = {}) {
                 id: fixture.fixtureId,
                 metadata: {
                   journey: "experience_match",
-                  template: "five-minute-match",
+                  template: "five-minute-match-v3",
                 },
                 mode: "demo",
                 provenance: "synthetic_txline_shaped",

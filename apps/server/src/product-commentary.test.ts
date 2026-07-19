@@ -278,6 +278,51 @@ describe("canonical Moment to shared commentary", () => {
     await runtime.close();
   });
 
+  it("fails closed when a fixed Experience beat is absent from the authored pack", async () => {
+    const fixtureId = "experience:missing-authored-beat";
+    const generate = vi.fn(() => {
+      throw new Error("Missing authored beats must not reach runtime AI");
+    });
+    const synthesize = vi.fn(() => {
+      throw new Error("Missing authored beats must not reach runtime TTS");
+    });
+    const transcodeCommentary = vi.fn(() => {
+      throw new Error("Missing authored beats must not reach runtime ffmpeg");
+    });
+    const runtime = createProductRuntime({
+      commentaryPipeline: { generate, synthesize },
+      cueBytes: Buffer.from("connection-cue"),
+      experienceAudioPack: authoredPack(),
+      fixture: {
+        awayTeam: "FRA",
+        fixtureId,
+        homeTeam: "ARG",
+        kickoffAt: "2026-07-16T18:00:00.000Z",
+        provenance: "synthetic_txline_shaped",
+      },
+      silenceBytes: Buffer.from("silence"),
+      transcodeCommentary,
+      writeIntervalMs: 60_000,
+    });
+    runtime.subscribeFixture(fixtureId, () => undefined);
+
+    runtime.acceptSourceFact(
+      canonicalFact(fixtureId, "unknown-beat", {
+        provenance: "synthetic_txline_shaped",
+        sourceEnvelopeId: `${fixtureId}:run:beat:unknown-beat`,
+      }),
+    );
+    await runtime.waitForCommentary();
+
+    expect(
+      await runtime.commentaryAudio(fixtureId, "unknown-beat:1"),
+    ).toBeNull();
+    expect(generate).not.toHaveBeenCalled();
+    expect(synthesize).not.toHaveBeenCalled();
+    expect(transcodeCommentary).not.toHaveBeenCalled();
+    await runtime.close();
+  });
+
   it("never resolves the Experience pack for a live TxLINE moment", async () => {
     const fixtureId = "live:provider-boundary";
     const pipeline = createCommentaryPipeline({ env: {}, fetchImpl: vi.fn() });

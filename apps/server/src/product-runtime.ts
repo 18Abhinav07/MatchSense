@@ -276,15 +276,23 @@ function createSingleFixtureRuntime(
 
   const commentaryPreparationKey = (moment: CanonicalMoment) =>
     `${moment.identity}:en-IN:${moment.provenance}:${
+      fixtureDefinition.fixtureId.startsWith("experience:") &&
+      fixtureDefinition.provenance === "synthetic_txline_shaped" &&
       moment.provenance === "synthetic_txline_shaped" &&
       options.experienceAudioPack
         ? "authored-v3"
         : "gemini-kore-v1"
     }`;
 
-  const authoredAssetForMoment = (moment: CanonicalMoment) =>
+  const isFixedAuthoredExperienceMoment = (moment: CanonicalMoment) =>
+    fixtureDefinition.fixtureId.startsWith("experience:") &&
+    fixtureDefinition.provenance === "synthetic_txline_shaped" &&
     projection.provenance === "synthetic_txline_shaped" &&
-    moment.provenance === "synthetic_txline_shaped"
+    moment.provenance === "synthetic_txline_shaped" &&
+    options.experienceAudioPack !== undefined;
+
+  const authoredAssetForMoment = (moment: CanonicalMoment) =>
+    isFixedAuthoredExperienceMoment(moment)
       ? (options.experienceAudioPack?.forMoment(moment) ?? null)
       : null;
 
@@ -315,6 +323,8 @@ function createSingleFixtureRuntime(
       commentaryPreparations.set(key, prepared);
       return prepared;
     }
+
+    if (isFixedAuthoredExperienceMoment(moment)) return null;
 
     if (!options.commentaryPipeline) return null;
     const generate = () =>
