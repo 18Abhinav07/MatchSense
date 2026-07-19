@@ -154,7 +154,7 @@ export function MatchHub({
         revision: lastEvent.revision,
         text:
           lastEvent.detail ??
-          `${lastEvent.title ?? eventLabel(lastEvent)} confirmed at ${lastEvent.minute}.`,
+          `${eventLabel(lastEvent)} confirmed at ${lastEvent.minute}.`,
       }
     : null;
 
@@ -254,7 +254,7 @@ export function MatchHub({
               <article key={event.identity}>
                 <time>{event.minute}</time>
                 <div>
-                  <b>{event.title ?? eventLabel(event)}</b>
+                  <b>{eventLabel(event)}</b>
                   <span>
                     {event.detail ??
                       `${eventLabel(event)} confirmed at ${event.minute}.`}

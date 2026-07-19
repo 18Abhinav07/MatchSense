@@ -136,8 +136,14 @@ class MemoryCommentaryArtifactStore implements CommentaryArtifactStore {
       if (artifact.cacheKey !== cacheKey) {
         throw new Error("commentary artifact cache key does not match claim");
       }
-      this.#byCacheKey.set(cacheKey, artifact);
-      this.#byId.set(artifact.commentaryId, artifact);
+      // A deterministic cue keeps the live stream audible, but it is not a
+      // successful narration artifact. Do not let a transient provider
+      // failure poison this cache key; the next request must be able to retry
+      // real speech generation.
+      if (artifact.provenance.speechProvider === "gemini") {
+        this.#byCacheKey.set(cacheKey, artifact);
+        this.#byId.set(artifact.commentaryId, artifact);
+      }
       return artifact;
     })();
     this.#inflight.set(cacheKey, work);

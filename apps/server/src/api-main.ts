@@ -34,7 +34,7 @@ import {
   createFixtureProcessor,
   restoreFixtureProjection,
 } from "./fixture-processor.js";
-import { inspectMp3 } from "./mp3.js";
+import { inspectMp3, resolveMp3WriteIntervalMs } from "./mp3.js";
 import { createProductRuntime, DEFAULT_TEAMS } from "./product-runtime.js";
 import { createPushSubscriptionCipher } from "./push-crypto.js";
 import {
@@ -199,7 +199,9 @@ export async function startApi(
           transcodeWavToStreamMp3(wavBytes, {
             expected: inspectMp3(experienceAssets[0]),
           }),
-        writeIntervalMs: 940,
+        writeIntervalMs: resolveMp3WriteIntervalMs(
+          inspectMp3(experienceAssets[1]),
+        ),
       })
     : null;
   const experience =

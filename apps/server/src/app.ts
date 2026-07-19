@@ -562,7 +562,7 @@ function registerExperienceProductRoutes(
       }
       const fixtureId = experienceFixtureId(request.params.runId);
       const bytes = fixtureId
-        ? runtime.commentaryAudio(fixtureId, request.params.identity)
+        ? await runtime.commentaryAudio(fixtureId, request.params.identity)
         : null;
       return bytes
         ? reply

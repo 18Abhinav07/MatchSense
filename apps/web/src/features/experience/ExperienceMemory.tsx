@@ -170,7 +170,7 @@ export function ExperienceMemory({
       ? null
       : (replayMoments[replay.index] ?? null);
   const replayTitle = replayMoment
-    ? (replayMoment.title ?? eventLabel(replayMoment))
+    ? eventLabel(replayMoment)
     : "Saved match Moment";
   const home =
     catalog.teams.find((team) => team.code === fixture.homeTeam) ??
@@ -368,7 +368,7 @@ export function ExperienceMemory({
             <article key={moment.identity} data-status={moment.status}>
               <time>{moment.minute}</time>
               <span>
-                <b>{moment.title ?? eventLabel(moment)}</b>
+                <b>{eventLabel(moment)}</b>
                 <small>
                   {moment.status} · revision {moment.revision}
                 </small>

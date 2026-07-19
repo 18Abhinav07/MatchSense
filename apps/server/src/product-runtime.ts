@@ -116,6 +116,7 @@ export interface ProductSourceHealth {
 export interface ProductRuntimeOptions {
   commentaryPipeline?: Pick<CommentaryPipeline, "generate"> &
     Partial<Pick<CommentaryPipeline, "synthesize">>;
+  createMediaChunks?: (bytes: Buffer) => readonly Buffer[];
   silenceBytes: Buffer;
   cueBytes: Buffer;
   fixture?: ProductFixture;
@@ -264,21 +265,25 @@ function createSingleFixtureRuntime(
     };
   };
 
+  const commentaryPreparationKey = (moment: CanonicalMoment) =>
+    `${moment.identity}:en-IN:${moment.provenance}:gemini-kore-v1`;
+
   const prepareCommentary = (moment: CanonicalMoment) => {
     if (!options.commentaryPipeline || !isNarratableMoment(moment)) {
       return null;
     }
-    const key = `${moment.identity}:en-IN:${moment.provenance}:gemini-kore-v1`;
+    const key = commentaryPreparationKey(moment);
     const existing = commentaryPreparations.get(key);
     if (existing) return existing;
     const work = options.commentaryPipeline
       .generate(commentaryInput(moment))
       .then(async ({ artifact }) => {
+        const realSpeech = artifact.provenance.speechProvider === "gemini";
         let mp3Bytes = commentaryMp3.get(artifact.cacheKey) ?? null;
         if (!mp3Bytes && options.transcodeCommentary) {
           try {
             mp3Bytes = await options.transcodeCommentary(artifact.audio.bytes);
-            commentaryMp3.set(artifact.cacheKey, mp3Bytes);
+            if (realSpeech) commentaryMp3.set(artifact.cacheKey, mp3Bytes);
           } catch {
             mp3Bytes = null;
           }
@@ -286,12 +291,10 @@ function createSingleFixtureRuntime(
         if (mp3Bytes) {
           commentaryAudioByMomentIdentity.set(moment.identity, {
             bytes: mp3Bytes,
-            provider:
-              artifact.provenance.speechProvider === "gemini"
-                ? "gemini"
-                : "deterministic",
+            provider: realSpeech ? "gemini" : "deterministic",
           });
         }
+        if (!realSpeech) commentaryPreparations.delete(key);
         return { artifact, mp3Bytes };
       });
     commentaryPreparations.set(key, work);
@@ -385,17 +388,22 @@ function createSingleFixtureRuntime(
       !options.commentaryPipeline?.synthesize ||
       !options.transcodeCommentary
     ) {
-      memoryIntroPreparation = Promise.resolve(null);
-      return memoryIntroPreparation;
+      return Promise.resolve(null);
     }
-    memoryIntroPreparation = options.commentaryPipeline
+    const preparation = options.commentaryPipeline
       .synthesize("Here is your MatchSense match summary.", "Kore")
       .then(async (speech) => {
         if (speech.provider !== "gemini") return null;
         return options.transcodeCommentary!(speech.bytes);
       })
       .catch(() => null);
-    return memoryIntroPreparation;
+    memoryIntroPreparation = preparation;
+    void preparation.then((bytes) => {
+      if (!bytes && memoryIntroPreparation === preparation) {
+        memoryIntroPreparation = null;
+      }
+    });
+    return preparation;
   };
 
   const isMemoryReplayMoment = (moment: CanonicalMoment) =>
@@ -959,9 +967,16 @@ function createSingleFixtureRuntime(
       closed = true;
       return audioHub.stop();
     },
-    commentaryAudio: (fixtureId: string, identity: string) => {
+    commentaryAudio: async (fixtureId: string, identity: string) => {
       if (fixtureId !== projection.fixtureId) return null;
-      const audio = commentaryAudioByMomentIdentity.get(identity);
+      let audio = commentaryAudioByMomentIdentity.get(identity);
+      if (audio?.provider === "gemini") return Buffer.from(audio.bytes);
+      const moment = (eventLog.get(fixtureId) ?? [])
+        .map((event) => event.moment)
+        .find((candidate) => candidate?.identity === identity);
+      const preparation = moment ? prepareCommentary(moment) : null;
+      if (preparation) await preparation.catch(() => undefined);
+      audio = commentaryAudioByMomentIdentity.get(identity);
       return audio?.provider === "gemini" ? Buffer.from(audio.bytes) : null;
     },
     commandReplay,
@@ -1164,7 +1179,7 @@ export function createProductRuntime(options: ProductRuntimeOptions) {
     },
     commentaryAudio: (fixtureId: string, identity: string) =>
       runtimeForFixture(fixtureId)?.commentaryAudio(fixtureId, identity) ??
-      null,
+      Promise.resolve(null),
     commandReplay: (sessionId: string, command: ReplayCommand) =>
       replayOwners.get(sessionId)?.commandReplay(sessionId, command) ?? {
         kind: "missing" as const,

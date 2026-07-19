@@ -163,7 +163,7 @@ export function ExperienceMatch({
               <article data-kind={event.kind} key={event.identity}>
                 <time>{event.minute}</time>
                 <span>
-                  <b>{event.title ?? eventLabel(event)}</b>
+                  <b>{eventLabel(event)}</b>
                   <small>
                     {event.status} · revision {event.revision}
                   </small>

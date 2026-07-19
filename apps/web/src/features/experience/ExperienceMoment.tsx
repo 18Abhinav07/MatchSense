@@ -59,7 +59,7 @@ function momentCopy(moment: LiveMoment) {
   }
   return {
     body: moment.detail ?? "The canonical match state has changed.",
-    title: moment.title ?? eventLabel(moment),
+    title: eventLabel(moment),
   };
 }
 

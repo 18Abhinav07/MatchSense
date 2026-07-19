@@ -114,6 +114,18 @@ export function inspectMp3(bytes: Buffer): Mp3Contract {
   };
 }
 
+export function splitMp3Frames(bytes: Buffer) {
+  inspectMp3(bytes);
+  const frames: Buffer[] = [];
+  let offset = 0;
+  while (offset < bytes.length) {
+    const { frameLength } = parseFrameHeader(bytes, offset);
+    frames.push(Buffer.from(bytes.subarray(offset, offset + frameLength)));
+    offset += frameLength;
+  }
+  return frames;
+}
+
 export function assertCompatibleMp3Streams(
   silence: Mp3Contract,
   cue: Mp3Contract,
@@ -130,4 +142,40 @@ export function assertCompatibleMp3Streams(
       throw new Error(`MP3 ${key} differs`);
     }
   }
+}
+
+export function createPacedMp3Chunks(
+  commentaryBytes: Buffer,
+  silenceBytes: Buffer,
+) {
+  const silence = inspectMp3(silenceBytes);
+  const commentary = inspectMp3(commentaryBytes);
+  assertCompatibleMp3Streams(silence, commentary);
+  const silenceFrames = splitMp3Frames(silenceBytes);
+  const commentaryFrames = splitMp3Frames(commentaryBytes);
+  const chunks: Buffer[] = [];
+
+  for (
+    let offset = 0;
+    offset < commentaryFrames.length;
+    offset += silence.frameCount
+  ) {
+    const frames = commentaryFrames.slice(offset, offset + silence.frameCount);
+    const missingFrames = silence.frameCount - frames.length;
+    chunks.push(
+      Buffer.concat([
+        ...frames,
+        ...(missingFrames > 0 ? silenceFrames.slice(0, missingFrames) : []),
+      ]),
+    );
+  }
+  return chunks;
+}
+
+export function resolveMp3WriteIntervalMs(silence: Mp3Contract) {
+  const interval = Math.round(silence.durationMs);
+  if (!Number.isSafeInteger(interval) || interval < 20) {
+    throw new Error("MP3 silence duration cannot drive a real-time stream");
+  }
+  return interval;
 }

@@ -50,7 +50,7 @@ import {
   restoreFixtureProjection,
 } from "./fixture-processor.js";
 import { createFanSessionService } from "./fan-session.js";
-import { inspectMp3 } from "./mp3.js";
+import { inspectMp3, resolveMp3WriteIntervalMs } from "./mp3.js";
 import {
   createMatchMemoryService,
   type MatchMemoryPayload,
@@ -466,6 +466,9 @@ export async function startServer(options: StartServerOptions = {}) {
         path.resolve(import.meta.dirname, "../assets/goal-cue.mp3"),
       );
       const streamContract = inspectMp3(cueBytes);
+      const silenceBytes = await readFile(
+        path.resolve(import.meta.dirname, "../assets/silence.mp3"),
+      );
       let liveFixtures: ReturnType<typeof productFixtureFromTxline>[] = [];
       let currentLiveFixtureIds = new Set<string>();
       let liveTeamCatalog: readonly TeamSummary[] | undefined;
@@ -609,12 +612,10 @@ export async function startServer(options: StartServerOptions = {}) {
               ...(liveTeamCatalog ? { teamCatalog: liveTeamCatalog } : {}),
             }
           : {}),
-        silenceBytes: await readFile(
-          path.resolve(import.meta.dirname, "../assets/silence.mp3"),
-        ),
+        silenceBytes,
         transcodeCommentary: (wavBytes) =>
           transcodeWavToStreamMp3(wavBytes, { expected: streamContract }),
-        writeIntervalMs: 940,
+        writeIntervalMs: resolveMp3WriteIntervalMs(inspectMp3(silenceBytes)),
       });
       const hydrationRepository = databaseRuntime.fixtureTruth as unknown as
         | Partial<

@@ -117,6 +117,7 @@ describe("canonical Moment to shared commentary", () => {
     );
     const runtime = createProductRuntime({
       commentaryPipeline: pipeline,
+      createMediaChunks: (bytes) => [bytes],
       cueBytes: Buffer.from("goal-cue"),
       fixture: {
         awayTeam: "FRA",
@@ -141,7 +142,7 @@ describe("canonical Moment to shared commentary", () => {
     await runtime.waitForCommentary();
 
     expect(
-      runtime.commentaryAudio(fixtureId, "memory-goal:1")?.toString(),
+      (await runtime.commentaryAudio(fixtureId, "memory-goal:1"))?.toString(),
     ).toMatch(/^mp3:/u);
     expect((await runtime.memoryIntroAudio(fixtureId))?.toString()).toBe(
       "mp3:intro-wav",
@@ -201,9 +202,109 @@ describe("canonical Moment to shared commentary", () => {
     await recovered.waitForCommentary();
 
     expect(
-      recovered.commentaryAudio(fixtureId, "restored-goal:1")?.toString(),
+      (
+        await recovered.commentaryAudio(fixtureId, "restored-goal:1")
+      )?.toString(),
     ).toMatch(/^mp3:/u);
     await recovered.close();
+  });
+
+  it("retries the Match Memory intro after a transient TTS fallback", async () => {
+    const fixtureId = "experience:memory-retry";
+    const pipeline = createCommentaryPipeline({ env: {}, fetchImpl: vi.fn() });
+    vi.spyOn(pipeline, "synthesize")
+      .mockResolvedValueOnce({
+        bytes: Buffer.from("fallback-wav"),
+        fallbackReason: "gemini_http_429",
+        mimeType: "audio/wav",
+        model: "deterministic-two-tone-v1",
+        provider: "deterministic-cue",
+      })
+      .mockResolvedValueOnce({
+        bytes: Buffer.from("recovered-wav"),
+        fallbackReason: null,
+        mimeType: "audio/wav",
+        model: "gemini-3.1-flash-tts-preview",
+        provider: "gemini",
+      });
+    const runtime = createProductRuntime({
+      commentaryPipeline: pipeline,
+      createMediaChunks: (bytes) => [bytes],
+      cueBytes: Buffer.from("goal-cue"),
+      fixture: {
+        awayTeam: "FRA",
+        fixtureId,
+        homeTeam: "ARG",
+        kickoffAt: "2026-07-16T18:00:00.000Z",
+        provenance: "synthetic_txline_shaped",
+      },
+      silenceBytes: Buffer.from("silence"),
+      transcodeCommentary: async (bytes) =>
+        Buffer.from(`mp3:${bytes.toString()}`),
+      writeIntervalMs: 60_000,
+    });
+
+    expect(await runtime.memoryIntroAudio(fixtureId)).toBeNull();
+    expect((await runtime.memoryIntroAudio(fixtureId))?.toString()).toBe(
+      "mp3:recovered-wav",
+    );
+    expect(pipeline.synthesize).toHaveBeenCalledTimes(2);
+    await runtime.close();
+  });
+
+  it("retries a saved Moment when its first speech generation falls back", async () => {
+    const fixtureId = "experience:moment-retry";
+    const pipeline = createCommentaryPipeline({ env: {}, fetchImpl: vi.fn() });
+    const generateArtifact = pipeline.generate.bind(pipeline);
+    let attempts = 0;
+    const generate = vi
+      .spyOn(pipeline, "generate")
+      .mockImplementation(async (input) => {
+        const generated = await generateArtifact(input);
+        attempts += 1;
+        return attempts === 1
+          ? generated
+          : {
+              ...generated,
+              artifact: {
+                ...generated.artifact,
+                provenance: {
+                  ...generated.artifact.provenance,
+                  speechFallbackReason: null,
+                  speechProvider: "gemini" as const,
+                },
+              },
+            };
+      });
+    const runtime = createProductRuntime({
+      commentaryPipeline: pipeline,
+      createMediaChunks: (bytes) => [bytes],
+      cueBytes: Buffer.from("goal-cue"),
+      fixture: {
+        awayTeam: "FRA",
+        fixtureId,
+        homeTeam: "ARG",
+        kickoffAt: "2026-07-16T18:00:00.000Z",
+        provenance: "synthetic_txline_shaped",
+      },
+      silenceBytes: Buffer.from("silence"),
+      transcodeCommentary: async (bytes) =>
+        Buffer.from(`mp3:${bytes.toString("hex")}`),
+      writeIntervalMs: 60_000,
+    });
+    runtime.subscribeFixture(fixtureId, () => undefined);
+    runtime.acceptSourceFact(
+      canonicalFact(fixtureId, "retry-goal", {
+        provenance: "synthetic_txline_shaped",
+      }),
+    );
+    await runtime.waitForCommentary();
+
+    expect(
+      (await runtime.commentaryAudio(fixtureId, "retry-goal:1"))?.toString(),
+    ).toMatch(/^mp3:/u);
+    expect(generate).toHaveBeenCalledTimes(2);
+    await runtime.close();
   });
 
   it("prepares once, fans one generated call to every listener, and publishes its transcript", async () => {
@@ -212,17 +313,34 @@ describe("canonical Moment to shared commentary", () => {
       fetchImpl: vi.fn(),
       now: () => new Date("2026-07-16T12:00:03.000Z"),
     });
-    const generate = vi.spyOn(pipeline, "generate");
+    const generateArtifact = pipeline.generate.bind(pipeline);
+    const generate = vi
+      .spyOn(pipeline, "generate")
+      .mockImplementation(async (input) => {
+        const generated = await generateArtifact(input);
+        return {
+          ...generated,
+          artifact: {
+            ...generated.artifact,
+            provenance: {
+              ...generated.artifact.provenance,
+              speechFallbackReason: null,
+              speechProvider: "gemini" as const,
+            },
+          },
+        };
+      });
     const transcodeCommentary = vi
       .fn<(wav: Buffer) => Promise<Buffer>>()
       .mockResolvedValue(Buffer.from("shared-voice"));
     const runtime = createProductRuntime({
       commentaryPipeline: pipeline,
+      createMediaChunks: (bytes) => [bytes],
       cueBytes: Buffer.from("goal-cue"),
       now: () => "2026-07-16T12:00:00.000Z",
       silenceBytes: Buffer.from("silence"),
       transcodeCommentary,
-      writeIntervalMs: 60_000,
+      writeIntervalMs: 1,
     });
     const argListener = runtime.createListeningSession("arg-fra-demo", "ARG");
     const fraListener = runtime.createListeningSession("arg-fra-demo", "FRA");
@@ -248,13 +366,15 @@ describe("canonical Moment to shared commentary", () => {
     await runtime.waitForCommentary();
 
     expect(generate).toHaveBeenCalledOnce();
-    expect(Buffer.concat(first.chunks).toString()).toContain("shared-voice");
+    await vi.waitFor(() =>
+      expect(Buffer.concat(first.chunks).toString()).toContain("shared-voice"),
+    );
     expect(Buffer.concat(second.chunks).toString()).toContain("shared-voice");
     expect(events.at(-1)).toMatchObject({
       commentary: {
         language: "en",
         momentIdentity: "arg-fra-demo:event:synthetic-goal-arg-fra-1:1",
-        provider: "deterministic",
+        provider: "gemini",
         text: expect.stringContaining("Argentina lead France 1–0"),
       },
       event: "commentary.ready",
@@ -272,6 +392,7 @@ describe("canonical Moment to shared commentary", () => {
     const notifyMoment = vi.fn();
     const runtime = createProductRuntime({
       commentaryPipeline: pipeline,
+      createMediaChunks: (bytes) => [bytes],
       cueBytes: Buffer.from("goal-cue"),
       fixture: {
         awayTeam: "FRA",
@@ -283,7 +404,7 @@ describe("canonical Moment to shared commentary", () => {
       notifyMoment,
       silenceBytes: Buffer.from("silence"),
       transcodeCommentary,
-      writeIntervalMs: 60_000,
+      writeIntervalMs: 1,
     });
     const session = runtime.createListeningSession(fixtureId, "ARG");
     expect(session).not.toBeNull();
@@ -351,7 +472,11 @@ describe("canonical Moment to shared commentary", () => {
       "phase.full_time",
     ]);
     expect(transcodeCommentary).toHaveBeenCalledTimes(narratedKinds.length);
-    expect(Buffer.concat(listener.chunks).toString()).toContain("radio-voice");
+    await vi.waitFor(() =>
+      expect(Buffer.concat(listener.chunks).toString()).toContain(
+        "radio-voice",
+      ),
+    );
     expect(
       stream
         .filter((event) => event.event === "commentary.ready")
@@ -394,6 +519,7 @@ describe("canonical Moment to shared commentary", () => {
     const transcodeCommentary = vi.fn(async (bytes: Buffer) => bytes);
     const runtime = createProductRuntime({
       commentaryPipeline: pipeline,
+      createMediaChunks: (bytes) => [bytes],
       cueBytes: Buffer.from("goal-cue"),
       fixture: {
         awayTeam: "FRA",
@@ -404,7 +530,7 @@ describe("canonical Moment to shared commentary", () => {
       },
       silenceBytes: Buffer.from("silence"),
       transcodeCommentary,
-      writeIntervalMs: 60_000,
+      writeIntervalMs: 1,
     });
     const session = runtime.createListeningSession(fixtureId, "ARG")!;
     const listener = new ListeningClient();
@@ -427,6 +553,9 @@ describe("canonical Moment to shared commentary", () => {
     releaseRedCard?.();
     await runtime.waitForCommentary();
 
+    await vi.waitFor(() =>
+      expect(Buffer.concat(listener.chunks).toString()).toContain("[corner]"),
+    );
     const delivered = Buffer.concat(listener.chunks).toString();
     expect(delivered.indexOf("[card.red]")).toBeGreaterThanOrEqual(0);
     expect(delivered.indexOf("[corner]")).toBeGreaterThan(

@@ -1,5 +1,7 @@
 import type { EventEmitter } from "node:events";
 
+import { createPacedMp3Chunks } from "./mp3.js";
+
 export interface AudioWritable {
   write(bytes: Buffer): boolean;
   end?(): void;
@@ -10,6 +12,8 @@ export interface AudioWritable {
 
 interface ClientState {
   blocked: boolean;
+  media: Buffer[];
+  mediaBytes: number;
   queued: Buffer[];
   queuedBytes: number;
   drain: (() => void) | null;
@@ -20,6 +24,7 @@ export function createAudioHub(options: {
   silenceBytes: Buffer;
   cueBytes: Buffer;
   writeIntervalMs: number;
+  createMediaChunks?: (bytes: Buffer) => readonly Buffer[];
   maxClientBacklogBytes?: number;
 }) {
   const clients = new Map<
@@ -28,6 +33,9 @@ export function createAudioHub(options: {
   >();
   const acceptedEventIds = new Set<string>();
   const maxBacklog = options.maxClientBacklogBytes ?? 512 * 1024;
+  const createMediaChunks =
+    options.createMediaChunks ??
+    ((bytes: Buffer) => createPacedMp3Chunks(bytes, options.silenceBytes));
   let timer: ReturnType<typeof setInterval> | null = null;
 
   const detachClient = (sessionId: string) => {
@@ -42,6 +50,8 @@ export function createAudioHub(options: {
     if (state.drain) client.removeListener?.("drain", state.drain);
     state.queued.length = 0;
     state.queuedBytes = 0;
+    state.media.length = 0;
+    state.mediaBytes = 0;
     return true;
   };
 
@@ -129,6 +139,8 @@ export function createAudioHub(options: {
         blocked: false,
         disconnect,
         drain: null,
+        media: [],
+        mediaBytes: 0,
         queued: [],
         queuedBytes: 0,
       },
@@ -154,13 +166,27 @@ export function createAudioHub(options: {
     const attached = sessionIds.filter((sessionId) => clients.has(sessionId));
     if (attached.length === 0) return false;
     acceptedEventIds.add(eventId);
-    for (const sessionId of attached) write(sessionId, bytes);
+    const chunks = createMediaChunks(bytes);
+    for (const sessionId of attached) {
+      const entry = clients.get(sessionId);
+      if (!entry) continue;
+      for (const chunk of chunks) {
+        if (entry.state.mediaBytes + chunk.length > maxBacklog) {
+          dropClient(sessionId);
+          break;
+        }
+        entry.state.media.push(Buffer.from(chunk));
+        entry.state.mediaBytes += chunk.length;
+      }
+    }
     return true;
   };
 
   const writeSilence = () => {
-    for (const sessionId of clients.keys()) {
-      write(sessionId, options.silenceBytes);
+    for (const [sessionId, entry] of clients) {
+      const media = entry.state.media.shift();
+      if (media) entry.state.mediaBytes -= media.length;
+      write(sessionId, media ?? options.silenceBytes);
     }
   };
 

@@ -590,21 +590,53 @@ export function todayFixtureBucket(
 
 export function eventLabel(moment: LiveMoment) {
   const labels: Record<string, string> = {
+    "card.red": "Red card",
+    "card.yellow": "Yellow card",
     corner: "Corner",
+    correction: "Match correction",
     full_time: "Full time",
     goal: "Goal",
     half_time: "Half time",
     penalty: "Penalty",
+    "penalty.awarded": "Penalty awarded",
+    "penalty.missed": "Penalty missed",
+    "penalty.scored": "Penalty scored",
+    "phase.extra_time_half": "Extra-time half time",
+    "phase.extra_time_second_half_start": "Second half of extra time",
+    "phase.extra_time_start": "Extra time",
+    "phase.full_time": "Full time",
+    "phase.half_time": "Half time",
+    "phase.kickoff": "Kickoff",
+    "phase.penalty": "Penalty awarded",
+    "phase.regulation_end": "End of regulation",
+    "phase.second_half_start": "Second half",
+    "phase.shootout_start": "Penalty shootout",
+    "phase.var": "VAR review",
     red_card: "Red card",
+    "shootout.kick_missed": "Shootout kick missed",
+    "shootout.kick_scored": "Shootout kick scored",
     substitution: "Substitution",
     var: "VAR review",
-    "var.overturned": "VAR overturned",
-    "var.stands": "VAR stands",
+    "var.overturned": "VAR decision overturned",
+    "var.stands": "VAR decision stands",
+    "var.started": "VAR review",
     var_overturned: "VAR overturned",
     var_stands: "VAR stands",
     yellow_card: "Yellow card",
   };
-  return (
-    moment.title || labels[moment.kind] || moment.kind.replaceAll("_", " ")
-  );
+  const kind = moment.kind.trim().toLowerCase();
+  const title = moment.title?.trim();
+  const technicalTitle =
+    title &&
+    (title.toLowerCase() === kind ||
+      /^(?:card|penalty|phase|shootout|var)[._]/iu.test(title));
+  if (title && !technicalTitle) return title;
+
+  const mapped = labels[kind];
+  if (mapped) return mapped;
+
+  const words = kind.replaceAll(/[._]+/gu, " ").trim();
+  return words
+    ? `${words[0]?.toUpperCase() ?? ""}${words.slice(1)}`
+    : "Match update";
 }

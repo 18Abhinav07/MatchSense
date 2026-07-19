@@ -217,6 +217,57 @@ describe("live product API normalization", () => {
     expect(eventLabel(payload!.moment)).toBe("Goal");
   });
 
+  it.each([
+    ["phase.kickoff", "phase.kickoff", "Kickoff"],
+    ["phase.var", "phase.var", "VAR review"],
+    ["var.started", "VAR.STARTED", "VAR review"],
+    ["var.stands", undefined, "VAR decision stands"],
+    ["var.overturned", undefined, "VAR decision overturned"],
+    ["phase.penalty", "phase.penalty", "Penalty awarded"],
+    ["penalty.awarded", undefined, "Penalty awarded"],
+    ["penalty.scored", undefined, "Penalty scored"],
+    ["card.yellow", undefined, "Yellow card"],
+    ["card.red", undefined, "Red card"],
+    ["phase.half_time", undefined, "Half time"],
+    ["phase.second_half_start", undefined, "Second half"],
+    ["phase.full_time", undefined, "Full time"],
+  ])(
+    "renders %s as a plain-English action even when the feed title is technical",
+    (kind, title, expected) => {
+      expect(
+        eventLabel({
+          celebratesGoal: false,
+          eventTeam: "ARG",
+          id: `event-${kind}`,
+          identity: `event-${kind}:1`,
+          kind,
+          minute: "23'",
+          revision: 1,
+          score: { away: 0, home: 0 },
+          status: "confirmed",
+          ...(title ? { title } : {}),
+        }),
+      ).toBe(expected);
+    },
+  );
+
+  it("keeps a useful fan-facing event title", () => {
+    expect(
+      eventLabel({
+        celebratesGoal: true,
+        eventTeam: "ARG",
+        id: "goal-one",
+        identity: "goal-one:1",
+        kind: "goal",
+        minute: "23'",
+        revision: 1,
+        score: { away: 0, home: 1 },
+        status: "confirmed",
+        title: "Argentina take the lead",
+      }),
+    ).toBe("Argentina take the lead");
+  });
+
   it("requests the exact Moment identity and preserves current corrected truth", async () => {
     const fetch = vi.fn(
       async () =>

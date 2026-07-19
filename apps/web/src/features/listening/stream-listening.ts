@@ -18,7 +18,7 @@ export interface StreamListeningSnapshot {
   state: StreamListeningState;
 }
 
-type AudioEvent = "error" | "pause" | "playing";
+type AudioEvent = "ended" | "error" | "pause" | "playing" | "waiting";
 
 export interface StreamAudioElement {
   addEventListener(event: AudioEvent, listener: () => void): void;
@@ -119,6 +119,8 @@ export function createStreamListeningController(dependencies: {
   dependencies.audio.addEventListener("playing", onPlaying);
   dependencies.audio.addEventListener("pause", onPause);
   dependencies.audio.addEventListener("error", onError);
+  dependencies.audio.addEventListener("ended", reconnect);
+  dependencies.audio.addEventListener("waiting", reconnect);
 
   const play = async (reload: boolean, automatic = false) => {
     if (!prepared || !sessionId || !dependencies.audio.getAttribute("src")) {

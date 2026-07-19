@@ -85,7 +85,7 @@ function presentationFor(
   }
   return {
     body: moment.detail ?? "A canonical match event was confirmed.",
-    eyebrow: moment.title ?? eventLabel(moment),
+    eyebrow: eventLabel(moment),
     tone: "neutral",
   };
 }

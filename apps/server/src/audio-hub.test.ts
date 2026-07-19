@@ -21,9 +21,40 @@ class WritableClient extends EventEmitter {
   }
 }
 
+function createTextAudioHub(options: Parameters<typeof createAudioHub>[0]) {
+  return createAudioHub({
+    ...options,
+    createMediaChunks: (bytes) => {
+      const chunks: Buffer[] = [];
+      for (
+        let offset = 0;
+        offset < bytes.length;
+        offset += options.silenceBytes.length
+      ) {
+        const source = bytes.subarray(
+          offset,
+          offset + options.silenceBytes.length,
+        );
+        chunks.push(
+          source.length === options.silenceBytes.length
+            ? Buffer.from(source)
+            : Buffer.concat([
+                source,
+                options.silenceBytes.subarray(
+                  0,
+                  options.silenceBytes.length - source.length,
+                ),
+              ]),
+        );
+      }
+      return chunks;
+    },
+  });
+}
+
 describe("continuous listening audio hub", () => {
   it("fans one idempotent event injection to active clients without replacing streams", () => {
-    const hub = createAudioHub({
+    const hub = createTextAudioHub({
       cueBytes: Buffer.from("cue"),
       maxClientBacklogBytes: 12,
       silenceBytes: Buffer.from("silence"),
@@ -38,24 +69,40 @@ describe("continuous listening audio hub", () => {
     expect(hub.status()).toMatchObject({ eventCount: 1, listenerCount: 1 });
   });
 
-  it("injects generated commentary bytes into the existing listener stream", () => {
-    const hub = createAudioHub({
+  it("paces generated commentary in silence-sized real-time chunks", () => {
+    const hub = createTextAudioHub({
       cueBytes: Buffer.from("cue"),
-      silenceBytes: Buffer.from("silence"),
+      silenceBytes: Buffer.from("1234"),
       writeIntervalMs: 1_000,
     });
     const client = new WritableClient();
     hub.addClient("session-1", client);
+    client.chunks.length = 0;
 
     expect(
-      hub.inject("moment-1:commentary", ["session-1"], Buffer.from("voice")),
+      hub.inject(
+        "moment-1:commentary",
+        ["session-1"],
+        Buffer.from("abcdefghij"),
+      ),
     ).toBe(true);
 
-    expect(Buffer.concat(client.chunks).toString()).toBe("silencecuevoice");
+    expect(client.chunks).toEqual([]);
+    hub.writeSilence();
+    hub.writeSilence();
+    hub.writeSilence();
+    hub.writeSilence();
+
+    expect(client.chunks.map((chunk) => chunk.toString())).toEqual([
+      "abcd",
+      "efgh",
+      "ij12",
+      "1234",
+    ]);
   });
 
   it("starts every attached stream with an audible connection cue", () => {
-    const hub = createAudioHub({
+    const hub = createTextAudioHub({
       cueBytes: Buffer.from("cue"),
       silenceBytes: Buffer.from("silence"),
       writeIntervalMs: 1_000,
@@ -68,7 +115,7 @@ describe("continuous listening audio hub", () => {
   });
 
   it("does not consume an event identity before its stream is attached", () => {
-    const hub = createAudioHub({
+    const hub = createTextAudioHub({
       cueBytes: Buffer.from("cue"),
       silenceBytes: Buffer.from("silence"),
       writeIntervalMs: 1_000,
@@ -79,11 +126,16 @@ describe("continuous listening audio hub", () => {
     expect(hub.status().eventCount).toBe(0);
     hub.addClient("session-1", client);
     expect(hub.inject("moment-1:commentary", ["session-1"])).toBe(true);
-    expect(Buffer.concat(client.chunks).toString()).toBe("silencecuecue");
+    hub.writeSilence();
+    expect(client.chunks.map((chunk) => chunk.toString())).toEqual([
+      "silence",
+      "cue",
+      "cuesile",
+    ]);
   });
 
   it("drops a blocked client before backlog can grow without bound", () => {
-    const hub = createAudioHub({
+    const hub = createTextAudioHub({
       cueBytes: Buffer.from("12345678"),
       maxClientBacklogBytes: 8,
       silenceBytes: Buffer.from("silence"),
@@ -101,7 +153,7 @@ describe("continuous listening audio hub", () => {
   });
 
   it("closes an explicitly removed client exactly once", () => {
-    const hub = createAudioHub({
+    const hub = createTextAudioHub({
       cueBytes: Buffer.from("cue"),
       silenceBytes: Buffer.from("silence"),
       writeIntervalMs: 1_000,
@@ -118,7 +170,7 @@ describe("continuous listening audio hub", () => {
   });
 
   it("closes every active client when the hub stops", () => {
-    const hub = createAudioHub({
+    const hub = createTextAudioHub({
       cueBytes: Buffer.from("cue"),
       silenceBytes: Buffer.from("silence"),
       writeIntervalMs: 1_000,
@@ -137,7 +189,7 @@ describe("continuous listening audio hub", () => {
   });
 
   it("detaches a naturally closed client without closing it again", () => {
-    const hub = createAudioHub({
+    const hub = createTextAudioHub({
       cueBytes: Buffer.from("cue"),
       silenceBytes: Buffer.from("silence"),
       writeIntervalMs: 1_000,

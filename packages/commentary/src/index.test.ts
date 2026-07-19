@@ -405,6 +405,31 @@ describe("shared commentary pipeline", () => {
     });
   });
 
+  it("does not cache a transient TTS fallback as successful commentary", async () => {
+    const success = successfulProviderFetch();
+    let attempts = 0;
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      if (
+        String(input).includes("generativelanguage.googleapis.com") &&
+        attempts++ === 0
+      ) {
+        return new Response("quota", { status: 429 });
+      }
+      return success(input);
+    });
+    const pipeline = createCommentaryPipeline({
+      env: { GEMINI_API_KEY: "fixture-gemini-key" },
+      fetchImpl,
+    });
+
+    const first = await pipeline.generate(baseInput);
+    const second = await pipeline.generate(baseInput);
+
+    expect(first.artifact.provenance.speechProvider).toBe("deterministic-cue");
+    expect(second.cache).toBe("generated");
+    expect(second.artifact.provenance.speechProvider).toBe("gemini");
+  });
+
   it("fails closed on provider quota without losing the factual call", async () => {
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       if (String(input).includes("api.groq.com")) {
