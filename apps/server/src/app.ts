@@ -732,9 +732,6 @@ function registerExperienceProductRoutes(
       ) {
         reply.raw.end();
       }
-      request.raw.once("close", () => {
-        reply.raw.destroy();
-      });
       return reply;
     },
   );
