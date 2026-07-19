@@ -1065,6 +1065,21 @@ async function updateFixtureStatusFromProjection(
 ) {
   const status = fixtureStatusForProjection(input.payload);
   if (!status) return;
+  await updateFixtureStatus(transaction, {
+    fixtureId: input.fixtureId,
+    mode: input.mode,
+    status,
+  });
+}
+
+async function updateFixtureStatus(
+  transaction: SqlExecutor,
+  input: {
+    fixtureId: string;
+    mode: PersistenceMode;
+    status: CanonicalFixtureStatus;
+  },
+) {
   await transaction.unsafe(
     `UPDATE matchsense.fixtures
 SET status = CASE
@@ -1073,7 +1088,7 @@ SET status = CASE
     END,
     updated_at = clock_timestamp()
 WHERE mode = $1 AND id = $2;`,
-    [input.mode, input.fixtureId, status],
+    [input.mode, input.fixtureId, input.status],
   );
 }
 
@@ -1440,6 +1455,11 @@ export function createFixtureTruthRepository(
                 transaction,
                 delivery.archiveImportJob,
               );
+              await updateFixtureStatus(transaction, {
+                fixtureId: delivery.fixtureId,
+                mode: input.mode,
+                status: "final",
+              });
             }
             deliveries.push({ kind: "duplicate" });
             continue;

@@ -2045,16 +2045,109 @@ describe("fixture truth repository", () => {
         query.includes("FROM matchsense.archive_import_jobs"),
       ),
     ).toBe(true);
+    const archiveJobIndex = fake.queries.findIndex(({ query }) =>
+      query.includes("INSERT INTO matchsense.archive_import_jobs"),
+    );
+    const lifecycleIndex = fake.queries.findIndex(({ query }) =>
+      query.includes("UPDATE matchsense.fixtures"),
+    );
+    expect(lifecycleIndex).toBeGreaterThan(archiveJobIndex);
+    expect(fake.queries[lifecycleIndex]?.parameters).toEqual([
+      "live",
+      "fx-1",
+      "final",
+    ]);
+    expect(fake.queries[lifecycleIndex]?.query).toContain(
+      "WHEN status = 'final_revised' THEN status",
+    );
     expect(
       fake.queries.some(
         ({ query }) =>
           query.includes("INSERT INTO matchsense.fixture_projections") ||
           query.includes("INSERT INTO matchsense.fixture_events") ||
-          query.includes("INSERT INTO matchsense.moments") ||
+          query.includes("INSERT INTO matchsense.canonical_moments") ||
+          query.includes("INSERT INTO matchsense.moment_revisions") ||
           query.includes("INSERT INTO matchsense.outbox"),
       ),
     ).toBe(false);
   });
+
+  it.each([
+    {
+      label: "nonterminal",
+      raw: {
+        ...liveTerminalRaw(
+          "provider-goal-duplicate",
+          "raw-duplicate-nonterminal",
+        ),
+        payload: {
+          Action: "goal",
+          FixtureId: "fx-1",
+          Id: "provider-goal-duplicate",
+        },
+      },
+    },
+    {
+      label: "source-only",
+      raw: {
+        ...liveTerminalRaw(
+          "provider-source-only-duplicate",
+          "raw-duplicate-source-only",
+        ),
+        canonicalEligible: false,
+        deliveryIntent: "source_only" as const,
+        payload: {
+          Action: "game_finalised",
+          FixtureId: "fx-1",
+          Id: "provider-source-only-duplicate",
+          StatusId: 100,
+        },
+      },
+    },
+  ])(
+    "does not advance lifecycle for a duplicate $label delivery without archive recovery",
+    async ({ raw }) => {
+      const fake = testClient((query) => {
+        if (query.includes("FROM matchsense.source_leases")) {
+          return [sourceLeaseRow];
+        }
+        if (query.includes("INSERT INTO matchsense.raw_source_records")) {
+          return [];
+        }
+        return [];
+      });
+      const repository = db.createFixtureTruthRepository?.(fake.client);
+
+      await expect(
+        repository?.commitCollectorFrame({
+          deliveries: [
+            {
+              derive:
+                raw.canonicalEligible === false
+                  ? undefined
+                  : () => {
+                      throw new Error(
+                        "Duplicate raw must not derive a projection",
+                      );
+                    },
+              fixtureId: "fx-1",
+              raw,
+            },
+          ],
+          mode: "live",
+          sourceFence: liveSourceFence,
+        }),
+      ).resolves.toEqual({
+        deliveries: [{ kind: "duplicate" }],
+        kind: "committed",
+      });
+      expect(
+        fake.queries.some(({ query }) =>
+          query.includes("UPDATE matchsense.fixtures"),
+        ),
+      ).toBe(false);
+    },
+  );
 
   it("does not enqueue an archive job when the live source fence is stale", async () => {
     const fake = testClient((query) => {
