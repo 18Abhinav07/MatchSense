@@ -24,6 +24,8 @@ const runtimeImageProbe = String.raw`
   assert.equal(fs.existsSync('/app/server/node_modules/@matchsense/db/dist/cli.js'), true);
   assert.equal(fs.existsSync('/app/server/assets/silence.mp3'), true);
   assert.equal(fs.existsSync('/app/server/assets/goal-cue.mp3'), true);
+  assert.equal(fs.existsSync('/app/server/assets/experience/v3/en/manifest.json'), true);
+  assert.equal(fs.existsSync('/app/server/assets/experience/v3/en/winning-goal.mp3'), true);
   for (const forbiddenPath of ['/app/server/src', '/app/server/test', '/app/server/tests', '/app/web/src']) {
     assert.equal(fs.existsSync(forbiddenPath), false);
   }
@@ -147,7 +149,7 @@ async function main() {
     );
     assert.match(
       migrationOutput,
-      /^Database migrations applied: \d+; current version: \d+$/u,
+      /(?:^|\n)Database migrations applied: \d+; current version: \d+$/u,
       "deployed migration CLI must execute and report the applied state",
     );
     const checkOutput = await docker(

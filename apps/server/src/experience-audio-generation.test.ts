@@ -137,7 +137,7 @@ describe("Experience audio pack generator", () => {
     const run: ByteCommandRunner = vi.fn(async () => mp3);
 
     const result = await generateExperienceAudioPack({
-      apiKey: "test-only-key",
+      apiKey: "fixture-test-only-key",
       expectedMp3Bytes: mp3,
       fetchTts,
       outputDirectory,
@@ -151,7 +151,7 @@ describe("Experience audio pack generator", () => {
     expect(url).toBe("https://api.groq.com/openai/v1/audio/speech");
     expect(init).toMatchObject({
       headers: {
-        authorization: "Bearer test-only-key",
+        authorization: "Bearer fixture-test-only-key",
         "content-type": "application/json",
       },
       method: "POST",
@@ -222,7 +222,7 @@ describe("Experience audio pack generator", () => {
 
       await expect(
         generateExperienceAudioPack({
-          apiKey: "test-only-key",
+          apiKey: "fixture-test-only-key",
           expectedMp3Bytes: mp3,
           fetchTts,
           outputDirectory,
@@ -242,7 +242,7 @@ describe("Experience audio pack generator", () => {
 
     await expect(
       generateExperienceAudioPack({
-        apiKey: "test-only-key",
+        apiKey: "fixture-test-only-key",
         expectedMp3Bytes: mp3,
         fetchTts: async () => new Response(Buffer.alloc(0), { status: 200 }),
         outputDirectory,
@@ -265,7 +265,7 @@ describe("Experience audio pack generator", () => {
 
     await expect(
       generateExperienceAudioPack({
-        apiKey: "test-only-key",
+        apiKey: "fixture-test-only-key",
         expectedMp3Bytes: mp3,
         fetchTts,
         outputDirectory,
@@ -282,7 +282,7 @@ describe("Experience audio pack generator", () => {
 
     await expect(
       generateExperienceAudioPack({
-        apiKey: "test-only-key",
+        apiKey: "fixture-test-only-key",
         expectedMp3Bytes: mp3,
         fetchTts: successfulFetch(),
         outputDirectory: await temporaryOutputDirectory(),
@@ -294,7 +294,7 @@ describe("Experience audio pack generator", () => {
 
     await expect(
       generateExperienceAudioPack({
-        apiKey: "test-only-key",
+        apiKey: "fixture-test-only-key",
         expectedMp3Bytes: mp3,
         fetchTts: successfulFetch(),
         outputDirectory: await temporaryOutputDirectory(),
