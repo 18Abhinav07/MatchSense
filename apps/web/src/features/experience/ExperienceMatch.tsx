@@ -22,7 +22,6 @@ function secondsUntil(value: string) {
 export function ExperienceMatch({
   catalog,
   catchupCount,
-  commentary,
   favoriteTeam,
   fixture,
   moment,
@@ -37,7 +36,6 @@ export function ExperienceMatch({
 }: {
   catalog: ProductCatalog;
   catchupCount: number;
-  commentary: string | null;
   favoriteTeam: string | null;
   fixture: LiveSnapshot;
   moment: LiveMoment | null;
@@ -67,14 +65,20 @@ export function ExperienceMatch({
     catalog.teams.find((team) => team.code === fixture.awayTeam) ??
     fallbackTeam(fixture.awayTeam);
   const lastMoment = timeline.at(-1) ?? fixture.lastEvent ?? null;
-  const listeningMoment = lastMoment
-    ? {
-        familyId: lastMoment.id,
-        fixtureId: fixture.fixtureId,
-        revision: lastMoment.revision,
-        text: commentary ?? lastMoment.detail ?? eventLabel(lastMoment),
-      }
+  const lastTranscript = lastMoment
+    ? (transcripts.find(
+        (entry) => entry.momentIdentity === lastMoment.identity,
+      ) ?? null)
     : null;
+  const listeningMoment =
+    lastMoment && lastTranscript
+      ? {
+          familyId: lastMoment.id,
+          fixtureId: fixture.fixtureId,
+          revision: lastMoment.revision,
+          text: lastTranscript.text,
+        }
+      : null;
   const perspective =
     favoriteTeam === home.code || favoriteTeam === away.code
       ? favoriteTeam
@@ -141,7 +145,11 @@ export function ExperienceMatch({
           </div>
         </div>
         <p>
-          {commentary ?? "The server is holding the next canonical match beat."}
+          {lastTranscript?.text ??
+            lastMoment?.detail ??
+            (lastMoment
+              ? eventLabel(lastMoment)
+              : "The server is holding the next canonical match beat.")}
         </p>
       </section>
       <div className="ms-experience-match-grid">
@@ -195,6 +203,11 @@ export function ExperienceMatch({
       ) : null}
       {moment ? (
         <ExperienceMoment
+          authoredCaption={
+            transcripts.find(
+              (entry) => entry.momentIdentity === moment.identity,
+            )?.text ?? null
+          }
           catalog={catalog}
           moment={moment}
           onClose={onCloseMoment}

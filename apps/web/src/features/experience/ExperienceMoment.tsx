@@ -64,11 +64,13 @@ function momentCopy(moment: LiveMoment) {
 }
 
 export function ExperienceMoment({
+  authoredCaption,
   catalog,
   moment,
   onClose,
   snapshot,
 }: {
+  authoredCaption?: string | null | undefined;
   catalog: ProductCatalog;
   moment: LiveMoment;
   onClose(): void;
@@ -120,7 +122,7 @@ export function ExperienceMoment({
               : "TRUTH GATE ACTIVE"}
           </p>
           <h1>{copy.title}</h1>
-          <span>{copy.body}</span>
+          <span>{authoredCaption?.trim() || copy.body}</span>
         </div>
         {team ? (
           <TeamFlag

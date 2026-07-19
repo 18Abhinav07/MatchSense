@@ -129,9 +129,10 @@ export function experienceMemoryArtifactPath(
   return `/api/v1/experience/runs/${encodeURIComponent(experienceRunId(fixtureId))}/moments/${encodeURIComponent(identity)}/audio`;
 }
 
-function isReplayMoment(moment: LiveMoment) {
+export function isExperienceReplayMoment(moment: LiveMoment) {
   return (
     moment.celebratesGoal ||
+    moment.kind === "penalty.scored" ||
     moment.kind.startsWith("var.") ||
     moment.kind === "card.red" ||
     moment.kind === "phase.full_time"
@@ -155,7 +156,7 @@ export function ExperienceMemory({
 }) {
   const [notice, setNotice] = useState<string | null>(null);
   const replayMoments = useMemo(
-    () => timeline.filter(isReplayMoment),
+    () => timeline.filter(isExperienceReplayMoment),
     [timeline],
   );
   const [replay, dispatchReplay] = useReducer(
@@ -426,6 +427,11 @@ export function ExperienceMemory({
       />
       {replayMoment ? (
         <ExperienceMoment
+          authoredCaption={
+            transcripts.find(
+              (entry) => entry.momentIdentity === replayMoment.identity,
+            )?.text ?? null
+          }
           catalog={catalog}
           moment={replayMoment}
           onClose={closeReplay}

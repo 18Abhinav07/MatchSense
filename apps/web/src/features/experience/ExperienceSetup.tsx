@@ -1,5 +1,26 @@
 import { TeamFlag } from "../../components/TeamFlag.js";
-import type { ProductCatalog } from "../../live-api.js";
+import type { ProductCatalog, ProductTeam } from "../../live-api.js";
+
+const ARGENTINA: ProductTeam = {
+  code: "ARG",
+  foreground: "#071d34",
+  name: "Argentina",
+  primary: "#74acdf",
+  secondary: "#ffffff",
+};
+
+const FRANCE: ProductTeam = {
+  code: "FRA",
+  foreground: "#ffffff",
+  name: "France",
+  primary: "#002395",
+  secondary: "#ed2939",
+};
+
+/** The authored five-minute audio pack is permanently bound to this fixture. */
+export function fixedExperienceTeams(_catalog: ProductCatalog) {
+  return { away: FRANCE, home: ARGENTINA } as const;
+}
 
 export function ExperienceSetup({
   catalog,
@@ -22,14 +43,8 @@ export function ExperienceSetup({
   pushState: "idle" | "enabling" | "enabled" | "unavailable";
   starting: boolean;
 }) {
-  const home =
-    catalog.teams.find((team) => team.code === favoriteTeam) ??
-    catalog.teams.find((team) => team.code === "ARG") ??
-    catalog.teams[0];
-  const away =
-    catalog.teams.find(
-      (team) => team.code !== home?.code && team.code === "FRA",
-    ) ?? catalog.teams.find((team) => team.code !== home?.code);
+  void favoriteTeam;
+  const { away, home } = fixedExperienceTeams(catalog);
 
   return (
     <main className="ms-experience ms-experience--setup" id="main-content">
@@ -44,7 +59,7 @@ export function ExperienceSetup({
           <p>THE COMPLETE MATCHSENSE LOOP</p>
           <h1>Five minutes. Every match-day feeling.</h1>
           <span>
-            A permanently available match for your chosen team that exercises
+            A permanently available Argentina versus France match that exercises
             factual Moments, VAR restraint, Pocket Listening, Web Push and a
             verified final record using the same contracts as the live product.
           </span>
@@ -53,14 +68,14 @@ export function ExperienceSetup({
           className="ms-experience-setup__fixture"
           aria-label="Experience fixture"
         >
-          {home ? <TeamFlag size="hero" team={home} /> : null}
+          <TeamFlag size="hero" team={home} />
           <div>
             <small>KICKOFF AFTER START</small>
-            <strong>{home?.code ?? "ARG"}</strong>
+            <strong>{home.name}</strong>
             <i>versus</i>
-            <strong>{away?.code ?? "FRA"}</strong>
+            <strong>{away.name}</strong>
           </div>
-          {away ? <TeamFlag size="hero" team={away} /> : null}
+          <TeamFlag size="hero" team={away} />
         </div>
       </section>
       <section
@@ -111,10 +126,8 @@ export function ExperienceSetup({
       ) : null}
       <button
         className="ms-experience-launch"
-        disabled={!home || !away || starting}
-        onClick={() =>
-          home && away && onStart({ homeTeam: home.code, awayTeam: away.code })
-        }
+        disabled={starting}
+        onClick={() => onStart({ homeTeam: home.code, awayTeam: away.code })}
         type="button"
       >
         <span>
@@ -124,10 +137,8 @@ export function ExperienceSetup({
       </button>
       <button
         className="ms-experience-launch ms-experience-launch--room"
-        disabled={!home || !away || starting}
+        disabled={starting}
         onClick={() =>
-          home &&
-          away &&
           onCreateRoom({ homeTeam: home.code, awayTeam: away.code })
         }
         type="button"

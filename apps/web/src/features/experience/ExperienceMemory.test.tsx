@@ -9,9 +9,26 @@ import {
   experienceMemoryReplayIsActive,
   experienceMemoryReplayReducer,
   ExperienceMemory,
+  isExperienceReplayMoment,
 } from "./ExperienceMemory.js";
 
 describe("Experience Match Memory audio replay", () => {
+  it("includes the confirmed penalty so the replay contains all three goals", () => {
+    expect(
+      isExperienceReplayMoment({
+        celebratesGoal: false,
+        eventTeam: "FRA",
+        id: "penalty",
+        identity: "penalty:1",
+        kind: "penalty.scored",
+        minute: "41'",
+        revision: 1,
+        score: { away: 1, home: 1 },
+        status: "confirmed",
+      }),
+    ).toBe(true);
+  });
+
   it("advances cards only after the current commentary artifact ends", () => {
     const ready = createExperienceMemoryReplayState(2);
     const introLoading = experienceMemoryReplayReducer(ready, {
@@ -76,6 +93,26 @@ describe("Experience Match Memory audio replay", () => {
     expect(
       experienceMemoryReplayReducer(unavailable, { type: "skip" }),
     ).toMatchObject({ index: 1, phase: "loading", segment: "moment" });
+  });
+
+  it("holds the introduction card when intro audio errors", () => {
+    const loading = experienceMemoryReplayReducer(
+      createExperienceMemoryReplayState(3),
+      { type: "start" },
+    );
+    const unavailable = experienceMemoryReplayReducer(loading, {
+      type: "audio_unavailable",
+    });
+
+    expect(unavailable).toEqual({
+      index: null,
+      phase: "unavailable",
+      segment: "intro",
+      total: 3,
+    });
+    expect(
+      experienceMemoryReplayReducer(unavailable, { type: "retry" }),
+    ).toMatchObject({ index: null, phase: "loading", segment: "intro" });
   });
 
   it("finishes only after the final artifact ends and can replay from the start", () => {

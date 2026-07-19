@@ -91,7 +91,6 @@ export function ExperienceJourney({
     [],
   );
   const [openMoment, setOpenMoment] = useState<LiveMoment | null>(null);
-  const [commentary, setCommentary] = useState<string | null>(null);
   const [transcripts, setTranscripts] = useState<
     readonly ExperienceTranscript[]
   >([]);
@@ -122,7 +121,6 @@ export function ExperienceJourney({
         setTimeline(history.timeline);
         setRevisionHistory(history.revisionHistory);
         setTranscripts(history.transcripts);
-        setCommentary(history.transcripts.at(-1)?.text ?? null);
       })
       .catch((reason: unknown) => {
         if ((reason as { name?: string }).name !== "AbortError") {
@@ -157,7 +155,6 @@ export function ExperienceJourney({
         }
         if (event.event === "commentary.ready") {
           lastEventId.current = event.id;
-          setCommentary(event.commentary.text);
           setTranscripts((current) =>
             current.some(
               (entry) =>
@@ -317,7 +314,6 @@ export function ExperienceJourney({
     <ExperienceMatch
       catalog={catalog}
       catchupCount={catchupCount}
-      commentary={commentary}
       favoriteTeam={favoriteTeam}
       fixture={fixture}
       moment={openMoment}
