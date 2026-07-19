@@ -201,6 +201,7 @@ function createSingleFixtureRuntime(
   >();
   let memoryIntroPreparation: Promise<Buffer | null> | null = null;
   const pendingCommentary = new Set<Promise<void>>();
+  let commentaryGenerationTail: Promise<void> = Promise.resolve();
   let commentaryDeliveryTail: Promise<void> = Promise.resolve();
   let closed = false;
   audioHub.start();
@@ -275,28 +276,33 @@ function createSingleFixtureRuntime(
     const key = commentaryPreparationKey(moment);
     const existing = commentaryPreparations.get(key);
     if (existing) return existing;
-    const work = options.commentaryPipeline
-      .generate(commentaryInput(moment))
-      .then(async ({ artifact }) => {
-        const realSpeech = artifact.provenance.speechProvider === "gemini";
-        let mp3Bytes = commentaryMp3.get(artifact.cacheKey) ?? null;
-        if (!mp3Bytes && options.transcodeCommentary) {
-          try {
-            mp3Bytes = await options.transcodeCommentary(artifact.audio.bytes);
-            if (realSpeech) commentaryMp3.set(artifact.cacheKey, mp3Bytes);
-          } catch {
-            mp3Bytes = null;
-          }
+    const generate = () =>
+      options.commentaryPipeline!.generate(commentaryInput(moment));
+    const generated = commentaryGenerationTail.then(generate, generate);
+    commentaryGenerationTail = generated.then(
+      () => undefined,
+      () => undefined,
+    );
+    const work = generated.then(async ({ artifact }) => {
+      const realSpeech = artifact.provenance.speechProvider === "gemini";
+      let mp3Bytes = commentaryMp3.get(artifact.cacheKey) ?? null;
+      if (!mp3Bytes && options.transcodeCommentary) {
+        try {
+          mp3Bytes = await options.transcodeCommentary(artifact.audio.bytes);
+          if (realSpeech) commentaryMp3.set(artifact.cacheKey, mp3Bytes);
+        } catch {
+          mp3Bytes = null;
         }
-        if (mp3Bytes) {
-          commentaryAudioByMomentIdentity.set(moment.identity, {
-            bytes: mp3Bytes,
-            provider: realSpeech ? "gemini" : "deterministic",
-          });
-        }
-        if (!realSpeech) commentaryPreparations.delete(key);
-        return { artifact, mp3Bytes };
-      });
+      }
+      if (mp3Bytes) {
+        commentaryAudioByMomentIdentity.set(moment.identity, {
+          bytes: mp3Bytes,
+          provider: realSpeech ? "gemini" : "deterministic",
+        });
+      }
+      if (!realSpeech) commentaryPreparations.delete(key);
+      return { artifact, mp3Bytes };
+    });
     commentaryPreparations.set(key, work);
     void work.catch(() => commentaryPreparations.delete(key));
     return work;
@@ -405,35 +411,6 @@ function createSingleFixtureRuntime(
     });
     return preparation;
   };
-
-  const isMemoryReplayMoment = (moment: CanonicalMoment) =>
-    moment.celebratesGoal ||
-    moment.kind.startsWith("var.") ||
-    moment.kind === "card.red" ||
-    moment.kind === "phase.full_time";
-
-  const rehydrateMemoryAudio = (events: readonly FixtureStreamEvent[]) => {
-    const seen = new Set<string>();
-    for (const event of events) {
-      const moment = event.moment;
-      if (
-        !moment ||
-        seen.has(moment.identity) ||
-        !isMemoryReplayMoment(moment)
-      ) {
-        continue;
-      }
-      seen.add(moment.identity);
-      const preparation = prepareCommentary(moment);
-      if (!preparation) continue;
-      trackCommentary(preparation.then(() => undefined).catch(() => undefined));
-    }
-    if (seen.size > 0) void prepareMemoryIntro();
-  };
-
-  if (options.initialEvents?.length) {
-    rehydrateMemoryAudio(options.initialEvents);
-  }
 
   const fixture = (fixtureId: string): FixtureSnapshot | null =>
     fixtureId === projection.fixtureId ? snapshot() : null;
@@ -1048,7 +1025,6 @@ function createSingleFixtureRuntime(
         projection.fixtureId,
         events.map((event) => structuredClone(event)),
       );
-      rehydrateMemoryAudio(events);
     },
     resolveMoment,
     waitForCommentary: async () => {

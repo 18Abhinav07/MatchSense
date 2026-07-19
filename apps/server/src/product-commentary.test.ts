@@ -492,7 +492,7 @@ describe("canonical Moment to shared commentary", () => {
     runtime.close();
   });
 
-  it("delivers generated speech in canonical order even when a later synthesis finishes first", async () => {
+  it("serializes speech generation and delivery in canonical order", async () => {
     const fixtureId = "ordered-radio";
     const pipeline = createCommentaryPipeline({ env: {}, fetchImpl: vi.fn() });
     const generateArtifact = pipeline.generate.bind(pipeline);
@@ -548,9 +548,11 @@ describe("canonical Moment to shared commentary", () => {
         minute: "24'",
       }),
     );
-    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
-    await vi.waitFor(() => expect(transcodeCommentary).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    expect(generate.mock.calls[0]?.[0].event.kind).toBe("card.red");
+    expect(transcodeCommentary).not.toHaveBeenCalled();
     releaseRedCard?.();
+    await vi.waitFor(() => expect(generate).toHaveBeenCalledTimes(2));
     await runtime.waitForCommentary();
 
     await vi.waitFor(() =>
