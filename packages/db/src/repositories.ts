@@ -1029,6 +1029,54 @@ RETURNING fixture_id;`,
   return rows[0] !== undefined;
 }
 
+type CanonicalFixtureStatus = "scheduled" | "live" | "final";
+
+function fixtureStatusForProjection(
+  payload: unknown,
+): CanonicalFixtureStatus | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+  const phase = (payload as Record<string, unknown>).phase;
+  if (phase === "scheduled") return "scheduled";
+  if (phase === "full_time") return "final";
+  switch (phase) {
+    case "first_half":
+    case "half_time":
+    case "second_half":
+    case "regulation_end":
+    case "extra_time_first_half":
+    case "extra_time_half":
+    case "extra_time_second_half":
+    case "shootout":
+      return "live";
+    default:
+      return null;
+  }
+}
+
+async function updateFixtureStatusFromProjection(
+  transaction: SqlExecutor,
+  input: {
+    fixtureId: string;
+    mode: PersistenceMode;
+    payload: unknown;
+  },
+) {
+  const status = fixtureStatusForProjection(input.payload);
+  if (!status) return;
+  await transaction.unsafe(
+    `UPDATE matchsense.fixtures
+SET status = CASE
+      WHEN status = 'final_revised' THEN status
+      ELSE $3
+    END,
+    updated_at = clock_timestamp()
+WHERE mode = $1 AND id = $2;`,
+    [input.mode, input.fixtureId, status],
+  );
+}
+
 async function applyCollectorPlans(
   transaction: SqlExecutor,
   input: {
@@ -1098,6 +1146,11 @@ ON CONFLICT (mode, fixture_id) DO UPDATE SET
         json(plan.projection.payload),
       ],
     );
+    await updateFixtureStatusFromProjection(transaction, {
+      fixtureId: input.fixtureId,
+      mode: input.mode,
+      payload: plan.projection.payload,
+    });
 
     if (plan.moment) {
       await transaction.unsafe(

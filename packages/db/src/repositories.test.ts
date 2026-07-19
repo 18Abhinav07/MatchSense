@@ -773,6 +773,126 @@ describe("fixture truth repository", () => {
     expect(fake.queries[0]?.query).toContain("ORDER BY sequence ASC");
   });
 
+  it("advances fixture lifecycle from scheduled to live to final with committed projection phases", async () => {
+    let eventSequence = 0;
+    let projection: QueryRow | null = null;
+    const fake = testClient((query, parameters) => {
+      if (query.includes("FROM matchsense.source_leases")) {
+        return [sourceLeaseRow];
+      }
+      if (query.includes("INSERT INTO matchsense.raw_source_records")) {
+        return [{ id: parameters[1] }];
+      }
+      if (query.includes("SELECT id") && query.includes("FOR UPDATE")) {
+        return [{ id: "fx-1" }];
+      }
+      if (query.includes("FROM matchsense.fixture_projections")) {
+        return projection ? [projection] : [];
+      }
+      if (query.includes("INSERT INTO matchsense.fixture_projections")) {
+        projection = {
+          fixture_id: "fx-1",
+          mode: "live",
+          payload: parameters[4],
+          revision: String(parameters[2]),
+          source_sequence: parameters[3],
+          updated_at: "2026-07-18T18:21:00.000Z",
+        };
+        return [];
+      }
+      if (query.includes("INSERT INTO matchsense.fixture_events")) {
+        eventSequence += 1;
+        return [{ sequence: String(eventSequence) }];
+      }
+      return [];
+    });
+    const repository = db.createFixtureTruthRepository?.(fake.client);
+    const phases = [
+      "scheduled",
+      "first_half",
+      "half_time",
+      "second_half",
+      "regulation_end",
+      "extra_time_first_half",
+      "extra_time_half",
+      "extra_time_second_half",
+      "shootout",
+      "full_time",
+    ] as const;
+
+    await expect(
+      repository?.commitCollectorFrame({
+        deliveries: phases.map((phase, index) => {
+          const revision = index + 1;
+          const sourceRecordId = `lifecycle-${revision}`;
+          return {
+            derive: () => [
+              {
+                event: {
+                  id: `event-${sourceRecordId}`,
+                  payload: { phase, revision },
+                  type: "snapshot",
+                },
+                outbox: [],
+                projection: {
+                  payload: { fixtureId: "fx-1", phase, revision },
+                  revision,
+                },
+              },
+            ],
+            fixtureId: "fx-1",
+            raw: {
+              ...liveRaw,
+              canonicalEligible: true,
+              dedupeKey: sourceRecordId,
+              deliveryIntent:
+                phase === "full_time" ? ("reconcile" as const) : "realtime",
+              id: `raw-${sourceRecordId}`,
+              sourceRecordId,
+              sourceSequence: String(revision),
+            },
+          };
+        }),
+        mode: "live",
+        sourceFence: liveSourceFence,
+      }),
+    ).resolves.toEqual({
+      deliveries: phases.map((_, index) => ({
+        eventSequences: [index + 1],
+        kind: "committed",
+        revisions: [index + 1],
+      })),
+      kind: "committed",
+    });
+
+    const lifecycleUpdates = fake.queries.filter(({ query }) =>
+      query.includes("UPDATE matchsense.fixtures"),
+    );
+    expect(fake.queries.every(({ transaction }) => transaction)).toBe(true);
+    expect(lifecycleUpdates.map(({ parameters }) => parameters)).toEqual(
+      phases.map((phase) => [
+        "live",
+        "fx-1",
+        phase === "scheduled"
+          ? "scheduled"
+          : phase === "full_time"
+            ? "final"
+            : "live",
+      ]),
+    );
+    expect(lifecycleUpdates.at(-1)?.query).toContain(
+      "WHEN status = 'final_revised' THEN status",
+    );
+    expect(
+      fake.queries.some(
+        ({ query }) =>
+          query.includes("INSERT INTO matchsense.canonical_moments") ||
+          query.includes("INSERT INTO matchsense.moment_revisions") ||
+          query.includes("INSERT INTO matchsense.outbox"),
+      ),
+    ).toBe(false);
+  });
+
   it("commits a wrapped live terminal's raw truth, projection, archive-import job, and fenced cursor in one transaction", async () => {
     const fake = testClient((query) => {
       if (query.includes("FROM matchsense.source_leases")) {
