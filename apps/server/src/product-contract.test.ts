@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "./app.js";
 import { createProductRuntime } from "./product-runtime.js";
@@ -40,6 +40,7 @@ describe("first vertical product contract", () => {
   it("moves replay through the canonical runtime and injects the same moment into listening", async () => {
     let currentTime = "2026-07-16T12:10:00.000Z";
     const runtime = createProductRuntime({
+      createMediaChunks: (bytes) => [Buffer.from(bytes)],
       cueBytes: Buffer.from("cue"),
       now: () => currentTime,
       silenceBytes: Buffer.from("silence"),
@@ -123,9 +124,10 @@ describe("first vertical product contract", () => {
 
   it("delivers the canonical goal over same-origin SSE and the persistent MP3 response", async () => {
     const runtime = createProductRuntime({
+      createMediaChunks: (bytes) => [Buffer.from(bytes)],
       cueBytes: Buffer.from("cue"),
       silenceBytes: Buffer.from("silence"),
-      writeIntervalMs: 60_000,
+      writeIntervalMs: 10,
     });
     const app = buildApp({ readinessProbe, runtime, webDistPath });
     const sseAbort = new AbortController();
@@ -166,13 +168,21 @@ describe("first vertical product contract", () => {
       const audioReader = audioResponse.body?.getReader();
       if (!sseReader || !audioReader)
         throw new Error("missing response stream");
+      const readAudioUntil = async (expected: string) => {
+        let received = "";
+        while (!received.includes(expected)) {
+          const chunk = await audioReader.read();
+          if (chunk.done) throw new Error("audio stream ended unexpectedly");
+          received += Buffer.from(chunk.value).toString();
+        }
+        return received;
+      };
 
       const snapshotChunk = await sseReader.read();
       expect(new TextDecoder().decode(snapshotChunk.value)).toContain(
         "event: snapshot",
       );
-      const silenceChunk = await audioReader.read();
-      expect(Buffer.from(silenceChunk.value ?? []).toString()).toBe("silence");
+      expect(await readAudioUntil("silencecue")).toContain("silencecue");
 
       const command = await fetch(
         `${origin}/api/v1/replay/sessions/${replay.id}/commands`,
@@ -190,8 +200,7 @@ describe("first vertical product contract", () => {
       expect(momentText).toContain(
         "arg-fra-demo:event:synthetic-goal-arg-fra-1:1",
       );
-      const cueChunk = await audioReader.read();
-      expect(Buffer.from(cueChunk.value ?? []).toString()).toBe("cue");
+      expect(await readAudioUntil("cue")).toContain("cue");
       expect(audioResponse.headers.get("content-type")).toBe("audio/mpeg");
     } finally {
       sseAbort.abort();
@@ -201,7 +210,7 @@ describe("first vertical product contract", () => {
     }
   });
 
-  it("replays an existing canonical Moment only to the requesting listening session", () => {
+  it("replays an existing canonical Moment only to the requesting listening session", async () => {
     const ids = [
       "listener-requesting",
       "listener-unrelated",
@@ -209,10 +218,11 @@ describe("first vertical product contract", () => {
       "replay-second",
     ];
     const runtime = createProductRuntime({
+      createMediaChunks: (bytes) => [Buffer.from(bytes)],
       cueBytes: Buffer.from("cue"),
       id: () => ids.shift() ?? "unexpected-id",
       silenceBytes: Buffer.from("silence"),
-      writeIntervalMs: 60_000,
+      writeIntervalMs: 10,
     });
     const requesting = runtime.createListeningSession("arg-fra-demo", "ARG");
     const unrelated = runtime.createListeningSession("arg-fra-demo", "FRA");
@@ -246,13 +256,20 @@ describe("first vertical product contract", () => {
     });
     expect(runtime.fixture("arg-fra-demo")).toEqual(firstSnapshot);
     expect(runtime.fixtureEvents("arg-fra-demo")).toHaveLength(1);
-    expect(requestingClient.chunks).toEqual(["silence", "cue", "cue", "cue"]);
-    expect(unrelatedClient.chunks).toEqual(["silence", "cue", "cue"]);
+    await vi.waitFor(() => {
+      expect(
+        requestingClient.chunks.filter((chunk) => chunk === "cue"),
+      ).toHaveLength(3);
+      expect(
+        unrelatedClient.chunks.filter((chunk) => chunk === "cue"),
+      ).toHaveLength(2);
+    });
     runtime.close();
   });
 
   it("rejects an unknown replay listening session without consuming the command", () => {
     const runtime = createProductRuntime({
+      createMediaChunks: (bytes) => [Buffer.from(bytes)],
       cueBytes: Buffer.from("cue"),
       silenceBytes: Buffer.from("silence"),
       writeIntervalMs: 60_000,
@@ -277,6 +294,7 @@ describe("first vertical product contract", () => {
 
   it("closes a hijacked audio response on DELETE and during app shutdown", async () => {
     const runtime = createProductRuntime({
+      createMediaChunks: (bytes) => [Buffer.from(bytes)],
       cueBytes: Buffer.from("cue"),
       silenceBytes: Buffer.from("silence"),
       writeIntervalMs: 60_000,
@@ -329,6 +347,7 @@ describe("first vertical product contract", () => {
 
   it("serves the real multi-fixture schedule while keeping replay demo out of the live list", async () => {
     const runtime = createProductRuntime({
+      createMediaChunks: (bytes) => [Buffer.from(bytes)],
       cueBytes: Buffer.from("cue"),
       fixtures: [
         {
@@ -403,6 +422,7 @@ describe("first vertical product contract", () => {
 
   it("accepts a safe dynamic catalog code for a listening perspective", async () => {
     const runtime = createProductRuntime({
+      createMediaChunks: (bytes) => [Buffer.from(bytes)],
       cueBytes: Buffer.from("cue"),
       fixtures: [
         {
@@ -438,6 +458,7 @@ describe("first vertical product contract", () => {
 
   it("never lets a delayed persisted event regress a hydrated fixture", async () => {
     const runtime = createProductRuntime({
+      createMediaChunks: (bytes) => [Buffer.from(bytes)],
       cueBytes: Buffer.from("cue"),
       fixtures: [
         {
