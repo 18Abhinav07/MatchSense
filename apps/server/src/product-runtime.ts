@@ -1,10 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type {
-  CommentaryArtifact,
-  CommentaryInput,
-  CommentaryPipeline,
-} from "@matchsense/commentary";
+import type { CommentaryInput, CommentaryPipeline } from "@matchsense/commentary";
 import type {
   CanonicalMoment,
   FixtureProjection,
@@ -37,6 +33,7 @@ import {
   type AudioHub,
   type AudioWritable,
 } from "./audio-hub.js";
+import type { ExperienceAudioPack } from "./experience-audio-pack.js";
 
 export const DEFAULT_TEAMS: readonly TeamSummary[] = [
   {
@@ -119,6 +116,7 @@ export interface ProductRuntimeOptions {
   createMediaChunks?: (bytes: Buffer) => readonly Buffer[];
   silenceBytes: Buffer;
   cueBytes: Buffer;
+  experienceAudioPack?: ExperienceAudioPack;
   fixture?: ProductFixture;
   fixtures?: readonly ProductFixture[];
   teamCatalog?: readonly TeamSummary[];
@@ -132,6 +130,16 @@ export interface ProductRuntimeOptions {
   writeIntervalMs: number;
   now?: () => string;
   id?: () => string;
+}
+
+interface PreparedCommentary {
+  readonly commentaryId: string;
+  readonly generatedAt: string;
+  readonly language: "en";
+  readonly mp3Bytes: Buffer | null;
+  readonly provider: "authored" | "gemini" | "deterministic";
+  readonly text: string;
+  readonly usedFallback: boolean;
 }
 
 export function isConfirmedGoalMoment(
@@ -192,12 +200,12 @@ function createSingleFixtureRuntime(
   const audioHub: AudioHub = createAudioHub(options);
   const commentaryPreparations = new Map<
     string,
-    Promise<{ artifact: CommentaryArtifact; mp3Bytes: Buffer | null }>
+    Promise<PreparedCommentary>
   >();
   const commentaryMp3 = new Map<string, Buffer>();
   const commentaryAudioByMomentIdentity = new Map<
     string,
-    { bytes: Buffer; provider: "gemini" | "deterministic" }
+    { bytes: Buffer; provider: "authored" | "gemini" | "deterministic" }
   >();
   let memoryIntroPreparation: Promise<Buffer | null> | null = null;
   const pendingCommentary = new Set<Promise<void>>();
@@ -267,15 +275,48 @@ function createSingleFixtureRuntime(
   };
 
   const commentaryPreparationKey = (moment: CanonicalMoment) =>
-    `${moment.identity}:en-IN:${moment.provenance}:gemini-kore-v1`;
+    `${moment.identity}:en-IN:${moment.provenance}:${
+      moment.provenance === "synthetic_txline_shaped" &&
+      options.experienceAudioPack
+        ? "authored-v3"
+        : "gemini-kore-v1"
+    }`;
+
+  const authoredAssetForMoment = (moment: CanonicalMoment) =>
+    projection.provenance === "synthetic_txline_shaped" &&
+    moment.provenance === "synthetic_txline_shaped"
+      ? (options.experienceAudioPack?.forMoment(moment) ?? null)
+      : null;
 
   const prepareCommentary = (moment: CanonicalMoment) => {
-    if (!options.commentaryPipeline || !isNarratableMoment(moment)) {
+    if (!isNarratableMoment(moment)) {
       return null;
     }
     const key = commentaryPreparationKey(moment);
     const existing = commentaryPreparations.get(key);
     if (existing) return existing;
+
+    const authoredAsset = authoredAssetForMoment(moment);
+    if (authoredAsset) {
+      const bytes = Buffer.from(authoredAsset.bytes);
+      commentaryAudioByMomentIdentity.set(moment.identity, {
+        bytes: Buffer.from(bytes),
+        provider: "authored",
+      });
+      const prepared = Promise.resolve({
+        commentaryId: `${moment.identity}:authored-v3`,
+        generatedAt: now(),
+        language: "en" as const,
+        mp3Bytes: bytes,
+        provider: "authored" as const,
+        text: authoredAsset.transcript,
+        usedFallback: false,
+      });
+      commentaryPreparations.set(key, prepared);
+      return prepared;
+    }
+
+    if (!options.commentaryPipeline) return null;
     const generate = () =>
       options.commentaryPipeline!.generate(commentaryInput(moment));
     const generated = commentaryGenerationTail.then(generate, generate);
@@ -301,7 +342,18 @@ function createSingleFixtureRuntime(
         });
       }
       if (!realSpeech) commentaryPreparations.delete(key);
-      return { artifact, mp3Bytes };
+      return {
+        commentaryId: artifact.commentaryId,
+        generatedAt: artifact.createdAt,
+        language: "en" as const,
+        mp3Bytes,
+        provider: realSpeech ? ("gemini" as const) : ("deterministic" as const),
+        text: artifact.transcript,
+        usedFallback: Boolean(
+          artifact.provenance.atmosphereFallbackReason ||
+            artifact.provenance.speechFallbackReason,
+        ),
+      };
     });
     commentaryPreparations.set(key, work);
     void work.catch(() => commentaryPreparations.delete(key));
@@ -328,28 +380,22 @@ function createSingleFixtureRuntime(
           .map((session) => session.id);
       if (prepared.mp3Bytes) {
         audioHub.inject(
-          `${deliveryIdentity}:commentary:${prepared.artifact.language}`,
+          `${deliveryIdentity}:commentary:${prepared.language}`,
           sessionIds,
           prepared.mp3Bytes,
         );
       }
       publish({
         commentary: {
-          generatedAt: prepared.artifact.createdAt,
+          generatedAt: prepared.generatedAt,
           language: "en",
           momentIdentity: moment.identity,
-          provider:
-            prepared.artifact.provenance.speechProvider === "gemini"
-              ? "gemini"
-              : "deterministic",
-          text: prepared.artifact.transcript,
-          usedFallback: Boolean(
-            prepared.artifact.provenance.atmosphereFallbackReason ||
-            prepared.artifact.provenance.speechFallbackReason,
-          ),
+          provider: prepared.provider,
+          text: prepared.text,
+          usedFallback: prepared.usedFallback,
         },
         event: "commentary.ready",
-        id: `commentary:${prepared.artifact.commentaryId}`,
+        id: `commentary:${prepared.commentaryId}`,
         snapshot: snapshot(),
       });
     };
@@ -362,6 +408,7 @@ function createSingleFixtureRuntime(
 
   const prewarmReplayCommentary = () => {
     if (projection.provenance !== "synthetic_txline_shaped") return;
+    if (options.experienceAudioPack) return;
     const revision = Math.max(1, projection.revision + 1);
     const prewarmFamilyId = `${projection.fixtureId}:event:synthetic-goal-arg-fra-1`;
     const moment =
@@ -389,6 +436,14 @@ function createSingleFixtureRuntime(
   };
 
   const prepareMemoryIntro = () => {
+    if (
+      projection.provenance === "synthetic_txline_shaped" &&
+      options.experienceAudioPack
+    ) {
+      return Promise.resolve(
+        Buffer.from(options.experienceAudioPack.memoryIntro.bytes),
+      );
+    }
     if (memoryIntroPreparation) return memoryIntroPreparation;
     if (
       !options.commentaryPipeline?.synthesize ||
@@ -947,14 +1002,18 @@ function createSingleFixtureRuntime(
     commentaryAudio: async (fixtureId: string, identity: string) => {
       if (fixtureId !== projection.fixtureId) return null;
       let audio = commentaryAudioByMomentIdentity.get(identity);
-      if (audio?.provider === "gemini") return Buffer.from(audio.bytes);
+      if (audio && audio.provider !== "deterministic") {
+        return Buffer.from(audio.bytes);
+      }
       const moment = (eventLog.get(fixtureId) ?? [])
         .map((event) => event.moment)
         .find((candidate) => candidate?.identity === identity);
       const preparation = moment ? prepareCommentary(moment) : null;
       if (preparation) await preparation.catch(() => undefined);
       audio = commentaryAudioByMomentIdentity.get(identity);
-      return audio?.provider === "gemini" ? Buffer.from(audio.bytes) : null;
+      return audio && audio.provider !== "deterministic"
+        ? Buffer.from(audio.bytes)
+        : null;
     },
     commandReplay,
     createListeningSession,

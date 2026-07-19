@@ -510,7 +510,12 @@ export function parseCommentaryEvent(
     generatedAt: text(raw.generatedAt, new Date().toISOString()),
     language: "en",
     momentIdentity,
-    provider: raw.provider === "gemini" ? "gemini" : "deterministic",
+    provider:
+      raw.provider === "authored"
+        ? "authored"
+        : raw.provider === "gemini"
+          ? "gemini"
+          : "deterministic",
     text: text(raw.text, "Commentary unavailable."),
     usedFallback: Boolean(raw.usedFallback),
   };

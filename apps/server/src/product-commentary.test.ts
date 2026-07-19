@@ -18,6 +18,10 @@ import {
   isConfirmedGoalMoment,
   isNarratableMoment,
 } from "./product-runtime.js";
+import type {
+  ExperienceAudioAsset,
+  ExperienceAudioPack,
+} from "./experience-audio-pack.js";
 
 class ListeningClient extends EventEmitter {
   readonly chunks: Buffer[] = [];
@@ -53,6 +57,48 @@ function canonicalFact(
   };
 }
 
+function authoredAsset(
+  beatKey: string,
+  transcript: string,
+  bytes: string,
+): ExperienceAudioAsset {
+  return {
+    beatKey,
+    bytes: Buffer.from(bytes),
+    durationMs: 1_000,
+    kind: beatKey === "memory-intro" ? "memory.intro" : "goal",
+    minute: beatKey === "memory-intro" ? "MEMORY" : "81'",
+    sha256: "a".repeat(64),
+    transcript,
+  };
+}
+
+function authoredPack(): ExperienceAudioPack {
+  const winningGoal = authoredAsset(
+    "winning-goal",
+    "Goal for Argentina! They strike late and lead France two goals to one.",
+    "authored-winning-goal",
+  );
+  const intro = authoredAsset(
+    "memory-intro",
+    "Here is your MatchSense match summary.",
+    "authored-memory-intro",
+  );
+  return {
+    awayTeam: "FRA",
+    forMoment: (moment) =>
+      moment.provenance === "synthetic_txline_shaped" &&
+      moment.sourceEnvelopeId.endsWith(":beat:winning-goal")
+        ? { ...winningGoal, bytes: Buffer.from(winningGoal.bytes) }
+        : null,
+    homeTeam: "ARG",
+    locale: "en",
+    memoryIntro: intro,
+    templateId: "five-minute-match",
+    templateVersion: 3,
+  };
+}
+
 describe("canonical Moment to shared commentary", () => {
   it("allows goal delivery only for confirmed goal moments", () => {
     const goal: CanonicalMoment = {
@@ -85,6 +131,184 @@ describe("canonical Moment to shared commentary", () => {
         kind: "phase.full_time",
       }),
     ).toBe(true);
+  });
+
+  it("delivers one authored Experience asset to every listener without invoking runtime AI", async () => {
+    const fixtureId = "experience:authored-runtime";
+    const generate = vi.fn(() => {
+      throw new Error("Experience must not generate commentary at runtime");
+    });
+    const synthesize = vi.fn(() => {
+      throw new Error("Experience must not synthesize speech at runtime");
+    });
+    const transcodeCommentary = vi.fn(() => {
+      throw new Error("Experience must not transcode speech at runtime");
+    });
+    const runtime = createProductRuntime({
+      commentaryPipeline: { generate, synthesize },
+      createMediaChunks: (bytes) => [bytes],
+      cueBytes: Buffer.from("connection-cue"),
+      experienceAudioPack: authoredPack(),
+      fixture: {
+        awayTeam: "FRA",
+        fixtureId,
+        homeTeam: "ARG",
+        kickoffAt: "2026-07-16T18:00:00.000Z",
+        provenance: "synthetic_txline_shaped",
+      },
+      now: () => "2026-07-19T10:00:00.000Z",
+      silenceBytes: Buffer.from("silence"),
+      transcodeCommentary,
+      writeIntervalMs: 1,
+    });
+    const firstSession = runtime.createListeningSession(fixtureId, "ARG")!;
+    const secondSession = runtime.createListeningSession(fixtureId, "FRA")!;
+    const first = new ListeningClient();
+    const second = new ListeningClient();
+    runtime.attachListeningClient(firstSession.id, first);
+    runtime.attachListeningClient(secondSession.id, second);
+    const events: FixtureStreamEvent[] = [];
+    runtime.subscribeFixture(fixtureId, (event) => events.push(event));
+
+    const result = runtime.acceptSourceFact(
+      canonicalFact(fixtureId, "winning-goal", {
+        provenance: "synthetic_txline_shaped",
+        sourceEnvelopeId: `${fixtureId}:run:beat:winning-goal`,
+      }),
+    );
+    expect(result.kind).toBe("accepted");
+    await runtime.waitForCommentary();
+
+    await vi.waitFor(() => {
+      expect(Buffer.concat(first.chunks).toString()).toContain(
+        "authored-winning-goal",
+      );
+      expect(Buffer.concat(second.chunks).toString()).toContain(
+        "authored-winning-goal",
+      );
+    });
+    expect(events.at(-1)).toMatchObject({
+      commentary: {
+        momentIdentity: "winning-goal:1",
+        provider: "authored",
+        text: "Goal for Argentina! They strike late and lead France two goals to one.",
+        usedFallback: false,
+      },
+      event: "commentary.ready",
+    });
+    expect(generate).not.toHaveBeenCalled();
+    expect(synthesize).not.toHaveBeenCalled();
+    expect(transcodeCommentary).not.toHaveBeenCalled();
+
+    const firstCopy = await runtime.commentaryAudio(
+      fixtureId,
+      "winning-goal:1",
+    );
+    expect(firstCopy?.toString()).toBe("authored-winning-goal");
+    firstCopy![0] = 0;
+    expect(
+      (await runtime.commentaryAudio(fixtureId, "winning-goal:1"))?.toString(),
+    ).toBe("authored-winning-goal");
+    expect((await runtime.memoryIntroAudio(fixtureId))?.toString()).toBe(
+      "authored-memory-intro",
+    );
+    await runtime.close();
+  });
+
+  it("resolves restored Experience audio directly from the authored pack", async () => {
+    const fixtureId = "experience:authored-restored";
+    const fact = canonicalFact(fixtureId, "restored-winning-goal", {
+      provenance: "synthetic_txline_shaped",
+      sourceEnvelopeId: `${fixtureId}:run:beat:winning-goal`,
+    });
+    const restored = reduceSourceFact(
+      createFixtureProjection({
+        awayTeam: "FRA",
+        fixtureId,
+        homeTeam: "ARG",
+        kickoffAt: "2026-07-16T18:00:00.000Z",
+        observedAt: fact.receivedAt,
+        provenance: "synthetic_txline_shaped",
+      }),
+      fact,
+    );
+    const event: FixtureStreamEvent = {
+      event: "moment.created",
+      id: `${fixtureId}:revision:1`,
+      moment: restored.moment!,
+      snapshot: toFixtureSnapshot(restored.projection),
+    };
+    const generate = vi.fn(() => {
+      throw new Error("Restored Experience must not invoke runtime AI");
+    });
+    const runtime = createProductRuntime({
+      commentaryPipeline: { generate },
+      cueBytes: Buffer.from("connection-cue"),
+      experienceAudioPack: authoredPack(),
+      fixture: {
+        awayTeam: "FRA",
+        fixtureId,
+        homeTeam: "ARG",
+        kickoffAt: "2026-07-16T18:00:00.000Z",
+        provenance: "synthetic_txline_shaped",
+      },
+      silenceBytes: Buffer.from("silence"),
+      writeIntervalMs: 60_000,
+    });
+    runtime.registerFixture(
+      {
+        awayTeam: "FRA",
+        fixtureId,
+        homeTeam: "ARG",
+        kickoffAt: "2026-07-16T18:00:00.000Z",
+        provenance: "synthetic_txline_shaped",
+      },
+      { events: [event], projection: restored.projection },
+    );
+
+    expect(
+      (
+        await runtime.commentaryAudio(
+          fixtureId,
+          "restored-winning-goal:1",
+        )
+      )?.toString(),
+    ).toBe("authored-winning-goal");
+    expect(generate).not.toHaveBeenCalled();
+    await runtime.close();
+  });
+
+  it("never resolves the Experience pack for a live TxLINE moment", async () => {
+    const fixtureId = "live:provider-boundary";
+    const pipeline = createCommentaryPipeline({ env: {}, fetchImpl: vi.fn() });
+    const generate = vi.spyOn(pipeline, "generate");
+    const pack = authoredPack();
+    const forMoment = vi.spyOn(pack, "forMoment").mockReturnValue(
+      authoredAsset("winning-goal", "wrong source", "wrong-source"),
+    );
+    const runtime = createProductRuntime({
+      commentaryPipeline: pipeline,
+      cueBytes: Buffer.from("connection-cue"),
+      experienceAudioPack: pack,
+      fixture: {
+        awayTeam: "FRA",
+        fixtureId,
+        homeTeam: "ARG",
+        kickoffAt: "2026-07-19T18:00:00.000Z",
+        provenance: "live_txline",
+      },
+      silenceBytes: Buffer.from("silence"),
+      transcodeCommentary: async (bytes) => bytes,
+      writeIntervalMs: 60_000,
+    });
+    runtime.subscribeFixture(fixtureId, () => undefined);
+
+    runtime.acceptSourceFact(canonicalFact(fixtureId, "live-goal", {}));
+    await runtime.waitForCommentary();
+
+    expect(generate).toHaveBeenCalledOnce();
+    expect(forMoment).not.toHaveBeenCalled();
+    await runtime.close();
   });
 
   it("retains real Experience speech for Match Memory and prepares its spoken intro", async () => {

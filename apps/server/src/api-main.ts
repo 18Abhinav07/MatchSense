@@ -1,8 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-import { createCommentaryPipeline } from "@matchsense/commentary";
-
 import {
   createPostgresDatabase,
   type ApplicationDatabase,
@@ -17,7 +15,6 @@ import {
 import type { FastifyInstance } from "fastify";
 
 import { buildApp } from "./app.js";
-import { transcodeWavToStreamMp3 } from "./audio-transcoder.js";
 import type { ServerConfig } from "./config.js";
 import {
   createDurableRoomService,
@@ -25,6 +22,7 @@ import {
 } from "./durable-room-service.js";
 import { createDurablePushRegistrationService } from "./durable-push.js";
 import { createExperienceRuntime } from "./experience-runtime.js";
+import { loadExperienceAudioPack } from "./experience-audio-pack.js";
 import {
   createExperienceRoomService,
   type ExperienceRoomAggregate,
@@ -189,16 +187,18 @@ export async function startApi(
   const experienceTeams = experienceAssets
     ? experienceTeamCatalog(await databaseRuntime.teamCatalog.list())
     : null;
+  const experienceAudioPack = experienceAssets
+    ? loadExperienceAudioPack(
+        path.resolve(import.meta.dirname, "../assets/experience/v3/en"),
+        { referenceSilenceBytes: experienceAssets[1] },
+      )
+    : null;
   const experienceProduct = experienceAssets
     ? createProductRuntime({
-        commentaryPipeline: createCommentaryPipeline({ env: process.env }),
         cueBytes: experienceAssets[0],
+        experienceAudioPack: experienceAudioPack!,
         silenceBytes: experienceAssets[1],
         ...(experienceTeams?.length ? { teamCatalog: experienceTeams } : {}),
-        transcodeCommentary: (wavBytes) =>
-          transcodeWavToStreamMp3(wavBytes, {
-            expected: inspectMp3(experienceAssets[0]),
-          }),
         writeIntervalMs: resolveMp3WriteIntervalMs(
           inspectMp3(experienceAssets[1]),
         ),
@@ -218,7 +218,7 @@ export async function startApi(
               metadata: {
                 journey: "experience_match",
                 label: "EXPERIENCE · SIMULATED TXLINE-SHAPED DATA",
-                template: "five-minute-match-v2",
+                template: "five-minute-match-v3",
               },
               mode: "demo",
               provenance: "synthetic_txline_shaped",

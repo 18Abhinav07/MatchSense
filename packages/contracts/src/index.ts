@@ -228,7 +228,7 @@ export interface CommentaryReady {
   generatedAt: string;
   language: "en";
   momentIdentity: string;
-  provider: "gemini" | "deterministic";
+  provider: "authored" | "gemini" | "deterministic";
   text: string;
   usedFallback: boolean;
 }

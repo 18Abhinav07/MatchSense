@@ -45,6 +45,7 @@ import {
   createExperienceRuntime,
   type ExperienceRuntime,
 } from "./experience-runtime.js";
+import { loadExperienceAudioPack } from "./experience-audio-pack.js";
 import {
   createFixtureProcessor,
   restoreFixtureProjection,
@@ -469,6 +470,10 @@ export async function startServer(options: StartServerOptions = {}) {
       const silenceBytes = await readFile(
         path.resolve(import.meta.dirname, "../assets/silence.mp3"),
       );
+      const experienceAudioPack = loadExperienceAudioPack(
+        path.resolve(import.meta.dirname, "../assets/experience/v3/en"),
+        { referenceSilenceBytes: silenceBytes },
+      );
       let liveFixtures: ReturnType<typeof productFixtureFromTxline>[] = [];
       let currentLiveFixtureIds = new Set<string>();
       let liveTeamCatalog: readonly TeamSummary[] | undefined;
@@ -583,6 +588,7 @@ export async function startServer(options: StartServerOptions = {}) {
           env: options.environment ?? process.env,
         }),
         cueBytes,
+        experienceAudioPack,
         ...(push
           ? {
               notifyMoment: async (moment, fixtureSnapshot) => {

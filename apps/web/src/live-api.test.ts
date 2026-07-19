@@ -7,6 +7,7 @@ import {
   normalizeCatalog,
   normalizeFixture,
   parseCanonicalEvent,
+  parseCommentaryEvent,
   todayFixtureBucket,
 } from "./live-api.js";
 
@@ -215,6 +216,33 @@ describe("live product API normalization", () => {
       identity: "fixture:goal:42:3",
     });
     expect(eventLabel(payload!.moment)).toBe("Goal");
+  });
+
+  it("preserves the authored provider on stored Experience commentary", () => {
+    const payload = parseCommentaryEvent(
+      JSON.stringify({
+        commentary: {
+          generatedAt: "2026-07-19T10:00:00.000Z",
+          language: "en",
+          momentIdentity: "experience:goal:1",
+          provider: "authored",
+          text: "Argentina lead France two goals to one.",
+          usedFallback: false,
+        },
+        event: "commentary.ready",
+        id: "commentary:experience:goal:1",
+        snapshot: {
+          awayTeam: "FRA",
+          fixtureId: "experience",
+          homeTeam: "ARG",
+          minute: "81'",
+          phase: "second_half",
+          score: { away: 1, home: 2 },
+        },
+      }),
+    );
+
+    expect(payload?.commentary.provider).toBe("authored");
   });
 
   it.each([
