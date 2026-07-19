@@ -156,6 +156,12 @@ export interface SendRoomReactionInput {
   readonly revision: number;
 }
 
+export interface CreatedCallThreeRoom {
+  readonly inviteCode: string;
+  readonly invitePath: string;
+  readonly room: CallThreeRoomView;
+}
+
 export interface RoomEventSource {
   onerror: ((event: Event) => void) | null;
   addEventListener(type: string, listener: (event: MessageEvent) => void): void;
@@ -167,11 +173,7 @@ export interface RoomEventSource {
 }
 
 export interface CallThreeRoomApi {
-  create(input: CreateCallThreeRoomInput): Promise<{
-    readonly inviteCode: string;
-    readonly invitePath: string;
-    readonly room: CallThreeRoomView;
-  }>;
+  create(input: CreateCallThreeRoomInput): Promise<CreatedCallThreeRoom>;
   get(roomId: string): Promise<CallThreeRoomView>;
   join(input: JoinCallThreeRoomInput): Promise<CallThreeRoomView>;
   list(): Promise<readonly CallThreeRoomView[]>;
@@ -218,7 +220,11 @@ export type RoomExperienceRoute =
       readonly initialRooms?: readonly CallThreeRoomView[];
       readonly mode: "list";
     }
-  | { readonly fixture: RoomCreationFixture; readonly mode: "create" }
+  | {
+      readonly fixture: RoomCreationFixture;
+      readonly initialCreated?: CreatedCallThreeRoom | undefined;
+      readonly mode: "create";
+    }
   | { readonly inviteCode: string; readonly mode: "invite" }
   | {
       readonly initialRoom?: CallThreeRoomView;

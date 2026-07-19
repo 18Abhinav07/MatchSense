@@ -1004,6 +1004,9 @@ export function AppRouter({
         followed={Boolean(follow)}
         followState={currentFollowState}
         onBack={() => navigate("/")}
+        onCreateRoom={() =>
+          navigate(`/rooms/new/${encodeURIComponent(selectedFixtureId)}`)
+        }
         onEnableAlerts={() => void activatePushAlerts()}
         onFollow={() => void followFixture()}
         onOpenMoment={(identity) => {

@@ -26,6 +26,7 @@ export interface MatchHubProps {
   followed?: boolean | undefined;
   followState?: MatchHubFollowState | undefined;
   onBack?: (() => void) | undefined;
+  onCreateRoom?: (() => void) | undefined;
   onEnableAlerts?: (() => void) | undefined;
   onFollow?: (() => void) | undefined;
   onOpenMoment?: ((identity: string) => void) | undefined;
@@ -103,6 +104,7 @@ export function MatchHub({
   followed = false,
   followState = "idle",
   onBack,
+  onCreateRoom,
   onEnableAlerts,
   onFollow,
   onOpenMoment,
@@ -162,6 +164,11 @@ export function MatchHub({
     fixture.mode !== "recorded" &&
     !fixture.fixtureId.startsWith("experience:") &&
     (scheduled || fixture.lifecycle === "LIVE");
+  const roomEligible =
+    fixture.lifecycle === "SCHEDULED" &&
+    fixture.provenance === "live_txline" &&
+    fixture.mode !== "recorded" &&
+    !fixture.fixtureId.startsWith("experience:");
   const perspectiveTeam =
     favoriteTeam === home.code || favoriteTeam === away.code
       ? favoriteTeam
@@ -251,6 +258,26 @@ export function MatchHub({
           <b>{fixture.sourceLabel ?? "TXLINE MATCH DATA"}</b>
         </article>
       </section>
+      {roomEligible && onCreateRoom ? (
+        <section
+          className="ms-match-hub-room"
+          aria-labelledby="match-room-title"
+        >
+          <div>
+            <span>PRIVATE MATCH NIGHT</span>
+            <h2 id="match-room-title">
+              Make three calls with friends before kickoff.
+            </h2>
+            <p>
+              Open a private Room for this match, share one invite, and lock
+              exactly three points-only calls before kickoff.
+            </p>
+          </div>
+          <button onClick={onCreateRoom} type="button">
+            Create Call Three Room
+          </button>
+        </section>
+      ) : null}
       {followable && onFollow && onUnfollow && onEnableAlerts ? (
         <section
           className="ms-match-hub-follow"

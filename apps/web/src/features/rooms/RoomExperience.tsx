@@ -16,6 +16,7 @@ import {
 import type {
   CallThreeRoomApi,
   CallThreeRoomView,
+  CreatedCallThreeRoom,
   RoomCreationFixture,
   RoomExperienceRoute,
   RoomInvitePreview,
@@ -115,6 +116,63 @@ function isEligibleFixture(fixture: RoomCreationFixture) {
     Number.isFinite(kickoffAt) &&
     kickoffAt > Date.now()
   );
+}
+
+interface CallThreeInviteInput {
+  readonly invitePath: string;
+  readonly roomName: string;
+}
+
+interface CallThreeInvitePort {
+  readonly origin: string;
+  readonly share?: ((data: ShareData) => Promise<void>) | undefined;
+  readonly writeText: (text: string) => Promise<void>;
+}
+
+function absoluteInviteUrl(invitePath: string, origin: string) {
+  return new URL(invitePath, origin).toString();
+}
+
+export async function copyCallThreeInvite(
+  invite: CallThreeInviteInput,
+  port: CallThreeInvitePort,
+) {
+  await port.writeText(absoluteInviteUrl(invite.invitePath, port.origin));
+}
+
+export async function shareCallThreeInvite(
+  invite: CallThreeInviteInput,
+  port: CallThreeInvitePort,
+) {
+  const url = absoluteInviteUrl(invite.invitePath, port.origin);
+  if (port.share) {
+    await port.share({
+      text: "Join my private Call Three Room before kickoff.",
+      title: `${invite.roomName} · MatchSense`,
+      url,
+    });
+    return;
+  }
+  await port.writeText(url);
+}
+
+function browserInvitePort(): CallThreeInvitePort {
+  const capabilities = navigator as unknown as {
+    readonly clipboard?: Pick<Clipboard, "writeText"> | undefined;
+    readonly share?: ((data: ShareData) => Promise<void>) | undefined;
+  };
+  const clipboard = capabilities.clipboard;
+  const writeText = clipboard?.writeText.bind(clipboard);
+  const share = capabilities.share?.bind(navigator);
+  return {
+    origin: window.location.origin,
+    ...(share ? { share } : {}),
+    writeText: writeText
+      ? (text) => writeText(text)
+      : async () => {
+          throw new Error("Clipboard sharing is unavailable");
+        },
+  };
 }
 
 function callsToDraft(room: CallThreeRoomView): CallThreeDraft {
@@ -669,6 +727,7 @@ function CreateRoom({
   defaultNickname,
   favoriteTeam,
   fixture,
+  initialCreated,
   onExit,
   onOpenRoom,
   teams,
@@ -677,6 +736,7 @@ function CreateRoom({
   readonly defaultNickname: string;
   readonly favoriteTeam: string | null;
   readonly fixture: RoomCreationFixture;
+  readonly initialCreated: CreatedCallThreeRoom | undefined;
   readonly onExit: (() => void) | undefined;
   readonly onOpenRoom: ((roomId: string) => void) | undefined;
   readonly teams: readonly ProductTeam[];
@@ -685,6 +745,12 @@ function CreateRoom({
   const [nickname, setNickname] = useState(defaultNickname);
   const [busy, setBusy] = useState(false);
   const [fault, setFault] = useState<string | null>(null);
+  const [created, setCreated] = useState<CreatedCallThreeRoom | null>(
+    initialCreated ?? null,
+  );
+  const [inviteState, setInviteState] = useState<
+    "idle" | "copied" | "shared" | "error"
+  >("idle");
   const eligible = isEligibleFixture(fixture);
   const displayFixture = {
     awayTeam: fixture.awayTeam,
@@ -703,13 +769,93 @@ function CreateRoom({
         nickname,
         teamCode: favoriteTeam,
       });
-      onOpenRoom?.(created.room.id);
+      setCreated(created);
     } catch (error) {
       setFault(errorMessage(error));
     } finally {
       setBusy(false);
     }
   };
+
+  const invite = created
+    ? { invitePath: created.invitePath, roomName: created.room.name }
+    : null;
+
+  const copyInvite = async () => {
+    if (!invite) return;
+    try {
+      await copyCallThreeInvite(invite, browserInvitePort());
+      setInviteState("copied");
+    } catch {
+      setInviteState("error");
+    }
+  };
+
+  const shareInvite = async () => {
+    if (!invite) return;
+    try {
+      const port = browserInvitePort();
+      const usedNativeShare = Boolean(port.share);
+      await shareCallThreeInvite(invite, port);
+      setInviteState(usedNativeShare ? "shared" : "copied");
+    } catch {
+      setInviteState("error");
+    }
+  };
+
+  if (created) {
+    return (
+      <main className="msr-stage" id="main-content">
+        <Header label="CALL THREE" onExit={onExit} />
+        <section className="msr-room-intro">
+          <p>ROOM CREATED · PRIVATE INVITE</p>
+          <h1>{created.room.name}</h1>
+          <span>
+            Your Room is ready. Share this invite before the official kickoff.
+          </span>
+        </section>
+        <FixtureStrip fixture={created.room.fixture} teams={teams} />
+        <section
+          className="msr-invite-panel"
+          aria-labelledby="room-invite-title"
+        >
+          <span>ONE PRIVATE INVITE</span>
+          <h2 id="room-invite-title">Bring your match-night people in.</h2>
+          <code>{created.invitePath}</code>
+          <small>INVITE CODE · {created.inviteCode}</small>
+          <div>
+            <button onClick={() => void copyInvite()} type="button">
+              Copy invite
+            </button>
+            <button onClick={() => void shareInvite()} type="button">
+              Share invite
+            </button>
+            <button
+              className="msr-primary-action"
+              onClick={() => onOpenRoom?.(created.room.id)}
+              type="button"
+            >
+              Open Room
+            </button>
+          </div>
+          {inviteState !== "idle" ? (
+            <p
+              className={
+                inviteState === "error" ? "msr-inline-error" : undefined
+              }
+              role="status"
+            >
+              {inviteState === "copied"
+                ? "Invite copied."
+                : inviteState === "shared"
+                  ? "Invite shared."
+                  : "This device could not copy or share the invite."}
+            </p>
+          ) : null}
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="msr-stage" id="main-content">
@@ -1036,6 +1182,7 @@ export function RoomExperience({
         defaultNickname={defaultNickname}
         favoriteTeam={favoriteTeam}
         fixture={route.fixture}
+        initialCreated={route.initialCreated}
         onExit={onExit}
         onOpenRoom={onOpenRoom}
         teams={teams}

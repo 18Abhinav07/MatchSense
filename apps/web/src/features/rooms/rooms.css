@@ -621,6 +621,71 @@
   line-height: 1.55;
 }
 
+.msr-invite-panel {
+  display: grid;
+  max-width: 760px;
+  gap: 13px;
+  margin-top: 32px;
+  padding: clamp(22px, 4vw, 34px);
+  border: 1px solid rgb(185 215 102 / 30%);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 88% 8%, rgb(185 215 102 / 10%), transparent 40%),
+    #101710;
+}
+
+.msr-invite-panel > span,
+.msr-invite-panel > small {
+  color: var(--msr-accent);
+  font-family: "SFMono-Regular", "Cascadia Code", ui-monospace, monospace;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+}
+
+.msr-invite-panel h2 {
+  max-width: 22ch;
+  margin: 0;
+  font-size: clamp(24px, 4vw, 40px);
+  letter-spacing: -0.05em;
+}
+
+.msr-invite-panel code {
+  padding: 14px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--msr-rule);
+  border-radius: 10px;
+  color: var(--msr-ink);
+  background: rgb(255 255 255 / 4%);
+}
+
+.msr-invite-panel > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 7px;
+}
+
+.msr-invite-panel > div > button {
+  min-height: 46px;
+  padding: 0 17px;
+  border: 1px solid var(--msr-rule);
+  border-radius: 999px;
+  color: var(--msr-ink);
+  background: transparent;
+  font-weight: 750;
+}
+
+.msr-invite-panel > div > .msr-primary-action {
+  color: #0f160f;
+  border-color: var(--msr-accent);
+  background: var(--msr-accent);
+}
+
+.msr-invite-panel > p {
+  margin: 0;
+  color: var(--msr-muted);
+}
+
 .msr-room-list {
   display: grid;
   gap: 14px;
@@ -657,6 +722,11 @@
   .msr-stage {
     padding-right: 18px;
     padding-left: 18px;
+  }
+
+  .msr-invite-panel > div,
+  .msr-invite-panel > div > button {
+    width: 100%;
   }
 
   .msr-header {

@@ -1,9 +1,11 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { RoomExperience } from "./RoomExperience.js";
+import * as roomExperienceModule from "./RoomExperience.js";
 import type { CallThreeRoomApi, CallThreeRoomView } from "./types.js";
+
+const { RoomExperience } = roomExperienceModule;
 
 const fixture = {
   awayTeam: "FRA",
@@ -233,5 +235,102 @@ describe("Call Three Room experience", () => {
     );
 
     expect(html).toContain("Create Call Three Room");
+  });
+
+  it("retains the created invite with room name and match context", () => {
+    const html = renderToStaticMarkup(
+      createElement(RoomExperience, {
+        api,
+        defaultNickname: "Abhinav",
+        favoriteTeam: "ARG",
+        route: {
+          fixture: {
+            awayTeam: "FRA",
+            fixtureId: "fixture-1",
+            homeTeam: "ARG",
+            kickoffAt: "2099-07-19T19:00:00.000Z",
+            lifecycle: "SCHEDULED",
+            mode: "live",
+            provenance: "live_txline",
+          },
+          initialCreated: {
+            inviteCode: "abcdefghijklmnopqrstuv",
+            invitePath: "/rooms/join/abcdefghijklmnopqrstuv",
+            room: room("PRE_KICKOFF"),
+          },
+          mode: "create",
+        },
+        teams: [
+          {
+            code: "ARG",
+            name: "Argentina",
+            primary: "#75aadb",
+            secondary: "#f4f1e8",
+          },
+          {
+            code: "FRA",
+            name: "France",
+            primary: "#203c7c",
+            secondary: "#f4f1e8",
+          },
+        ],
+      }),
+    );
+
+    expect(html).toContain("Final night");
+    expect(html).toContain("Argentina");
+    expect(html).toContain("France");
+    expect(html).toContain("abcdefghijklmnopqrstuv");
+    expect(html).toContain("/rooms/join/abcdefghijklmnopqrstuv");
+    expect(html).toContain("Copy invite");
+    expect(html).toContain("Share invite");
+    expect(html).toContain("Open Room");
+  });
+
+  it("copies an absolute invite and uses native share with clipboard fallback", async () => {
+    const copyInvite = (roomExperienceModule as Record<string, unknown>)
+      .copyCallThreeInvite;
+    const shareInvite = (roomExperienceModule as Record<string, unknown>)
+      .shareCallThreeInvite;
+    expect(copyInvite).toBeTypeOf("function");
+    expect(shareInvite).toBeTypeOf("function");
+    if (typeof copyInvite !== "function" || typeof shareInvite !== "function") {
+      return;
+    }
+
+    const writeText = vi.fn(async () => undefined);
+    const share = vi.fn(async () => undefined);
+    const invite = {
+      invitePath: "/rooms/join/abcdefghijklmnopqrstuv",
+      roomName: "Final night",
+    };
+
+    await copyInvite(invite, {
+      origin: "https://matchsense.example",
+      writeText,
+    });
+    await shareInvite(invite, {
+      origin: "https://matchsense.example",
+      share,
+      writeText,
+    });
+    await shareInvite(invite, {
+      origin: "https://matchsense.example",
+      writeText,
+    });
+
+    expect(writeText).toHaveBeenNthCalledWith(
+      1,
+      "https://matchsense.example/rooms/join/abcdefghijklmnopqrstuv",
+    );
+    expect(share).toHaveBeenCalledWith({
+      text: "Join my private Call Three Room before kickoff.",
+      title: "Final night · MatchSense",
+      url: "https://matchsense.example/rooms/join/abcdefghijklmnopqrstuv",
+    });
+    expect(writeText).toHaveBeenNthCalledWith(
+      2,
+      "https://matchsense.example/rooms/join/abcdefghijklmnopqrstuv",
+    );
   });
 });

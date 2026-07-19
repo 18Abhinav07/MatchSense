@@ -367,4 +367,16 @@ describe("truthful application router", () => {
     expect(markup).toContain("Create Call Three Room");
     expect(markup).not.toContain("Call Three unavailable");
   });
+
+  it("discovers Call Three from the scheduled fixture Match Hub only", () => {
+    const upcomingMarkup = render({
+      initialFixtures: [upcomingRoomFixture],
+      initialPath: "/matches/room-fixture",
+      ...({ roomApi } as Partial<AppRouterProps>),
+    });
+    const liveMarkup = render({ initialPath: "/matches/arg-fra" });
+
+    expect(upcomingMarkup).toContain("Create Call Three Room");
+    expect(liveMarkup).not.toContain("Create Call Three Room");
+  });
 });

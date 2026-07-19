@@ -340,4 +340,81 @@ describe("MatchHub", () => {
     expect(markup).not.toContain("Follow match");
     expect(markup).not.toContain("Enable OS alerts");
   });
+
+  it("offers Call Three creation for a scheduled real TxLINE fixture", () => {
+    const markup = renderToStaticMarkup(
+      createElement(MatchHub, {
+        catalog,
+        favoriteTeam: "ARG",
+        fixture: {
+          awayTeam: "FRA",
+          fixtureId: "scheduled-room-1",
+          homeTeam: "ARG",
+          kickoffAt: "2099-07-19T19:00:00.000Z",
+          lifecycle: "SCHEDULED",
+          minute: "—",
+          mode: "live",
+          provenance: "live_txline",
+          score: null,
+        },
+        onCreateRoom: () => undefined,
+        state: "ready",
+      }),
+    );
+
+    expect(markup).toContain("Create Call Three Room");
+    expect(markup).toContain("Make three calls with friends before kickoff");
+  });
+
+  it.each([
+    {
+      fixtureId: "live-room-1",
+      lifecycle: "LIVE" as const,
+      mode: "live" as const,
+      provenance: "live_txline" as const,
+    },
+    {
+      fixtureId: "tracking-room-1",
+      lifecycle: "TRACKING" as const,
+      mode: "live" as const,
+      provenance: "live_txline" as const,
+    },
+    {
+      fixtureId: "final-room-1",
+      lifecycle: "FINAL" as const,
+      mode: "live" as const,
+      provenance: "live_txline" as const,
+    },
+    {
+      fixtureId: "recorded-room-1",
+      lifecycle: "SCHEDULED" as const,
+      mode: "recorded" as const,
+      provenance: "live_txline" as const,
+    },
+    {
+      fixtureId: "experience:room-one",
+      lifecycle: "SCHEDULED" as const,
+      mode: "live" as const,
+      provenance: "simulated" as const,
+    },
+  ])("does not expose Call Three creation for $fixtureId", (fixturePolicy) => {
+    const markup = renderToStaticMarkup(
+      createElement(MatchHub, {
+        catalog,
+        favoriteTeam: "ARG",
+        fixture: {
+          awayTeam: "FRA",
+          homeTeam: "ARG",
+          minute: fixturePolicy.lifecycle === "FINAL" ? "FT" : "—",
+          score:
+            fixturePolicy.lifecycle === "FINAL" ? { away: 1, home: 2 } : null,
+          ...fixturePolicy,
+        },
+        onCreateRoom: () => undefined,
+        state: "ready",
+      }),
+    );
+
+    expect(markup).not.toContain("Create Call Three Room");
+  });
 });
