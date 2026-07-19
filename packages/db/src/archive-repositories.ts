@@ -696,10 +696,12 @@ FOR KEY SHARE;`,
             "Archive contains delivery without one authorised raw grant",
           );
         }
-        const terminal = deliveries.at(-1);
+        const terminal = [...deliveries]
+          .reverse()
+          .find((delivery) => delivery.canonicalEligible);
         if (!terminal || terminal.id !== input.terminalDeliveryId) {
           throw new Error(
-            "Archive terminal delivery must be the final ordered delivery",
+            "Archive terminal delivery must be the final canonical delivery",
           );
         }
         if (!isAuthoritativeTerminalDelivery(terminal)) {

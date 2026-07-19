@@ -146,6 +146,16 @@ function authoritativeTerminal(
   );
 }
 
+function finalCanonicalDelivery(
+  deliveries: readonly DurableSourceDelivery[],
+): DurableSourceDelivery | undefined {
+  for (let index = deliveries.length - 1; index >= 0; index -= 1) {
+    const delivery = deliveries[index];
+    if (delivery?.canonicalEligible) return delivery;
+  }
+  return undefined;
+}
+
 /**
  * Replays durable raw deliveries with no process-local canonicalizer state.
  * Only an exact provider terminal delivery makes an archive replay-ready.
@@ -224,7 +234,9 @@ export function createArchiveService(
         projection: toFixtureSnapshot(projection),
         reducerVersion: DURABLE_TXLINE_REDUCER_VERSION,
       });
-      const terminal = deliveries.at(-1);
+      // Coverage/transport records may legally follow game_finalised but cannot
+      // supersede canonical match truth. A later canonical correction still does.
+      const terminal = finalCanonicalDelivery(deliveries);
       if (!terminal || !authoritativeTerminal(terminal)) {
         return {
           manifest: null,

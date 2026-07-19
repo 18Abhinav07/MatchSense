@@ -421,7 +421,7 @@ describe("archive repository", () => {
     );
   });
 
-  it("rejects a terminal delivery that is not last in the ordered source stream", async () => {
+  it("accepts the final canonical terminal when a source-only delivery follows it", async () => {
     const laterDelivery = {
       ...sourceOnlyDelivery,
       deliveryKey: "9".repeat(64),
@@ -447,6 +447,9 @@ describe("archive repository", () => {
           sourceDeliveryRow(laterDelivery),
         ];
       }
+      if (query.includes("INSERT INTO matchsense.archive_manifests")) {
+        return [manifestRow("REPLAY_READY")];
+      }
       return [];
     });
     const archive = db.createArchiveRepository?.(fake.client);
@@ -462,14 +465,59 @@ describe("archive repository", () => {
         sourceFence: recordedFence,
         terminalDeliveryId: terminalDelivery.id,
       }),
+    ).resolves.toMatchObject({
+      kind: "verified",
+      manifest: { status: "REPLAY_READY" },
+    });
+  });
+
+  it("rejects a terminal delivery superseded by a later canonical delivery", async () => {
+    const laterCanonicalDelivery = {
+      ...terminalDelivery,
+      deliveryKey: "9".repeat(64),
+      id: "delivery-canonical-after-final",
+      orderingKey: "000000001027",
+      payload: { Action: "action_amend", FixtureId: fixtureId },
+      payloadHash: "8".repeat(64),
+      responseHash: "7".repeat(64),
+      sourceRecordId: "amend-1027",
+      sourceSequence: "1027",
+    };
+    const fake = testClient((query) => {
+      if (query.includes("FROM matchsense.rights_grants")) {
+        return [
+          {
+            active: true,
+            expires_at: null,
+            revoked_at: null,
+            scopes: ["raw_retention", "replay"],
+          },
+        ];
+      }
+      if (query.includes("FROM matchsense.raw_source_records")) {
+        return [
+          sourceDeliveryRow(terminalDelivery),
+          sourceDeliveryRow(laterCanonicalDelivery),
+        ];
+      }
+      return [];
+    });
+    const archive = db.createArchiveRepository?.(fake.client);
+
+    await expect(
+      archive?.verifyArchive({
+        fixtureId,
+        manifestId: "manifest-superseded-terminal",
+        mode: "recorded",
+        projectionHash: "2".repeat(64),
+        reducerVersion: "txline-reducer-v1",
+        rightsGrantId: "txodds-hackathon-2026",
+        sourceFence: recordedFence,
+        terminalDeliveryId: terminalDelivery.id,
+      }),
     ).rejects.toThrow(
-      "Archive terminal delivery must be the final ordered delivery",
+      "Archive terminal delivery must be the final canonical delivery",
     );
-    expect(
-      fake.queries.some(({ query }) =>
-        query.includes("INSERT INTO matchsense.archive_manifests"),
-      ),
-    ).toBe(false);
   });
 
   it.each([
