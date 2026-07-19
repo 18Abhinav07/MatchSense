@@ -33,10 +33,8 @@ import {
   type DurableRoomRouteDependencies,
   registerDurableRoomRoutes,
 } from "./durable-room-routes.js";
-import {
-  isFixedExperienceFixture,
-  type ExperienceRuntime,
-} from "./experience-runtime.js";
+import { isFixedExperienceFixture } from "./experience-fixture-contract.js";
+import type { ExperienceRuntime } from "./experience-runtime.js";
 import {
   type FanRouteDependencies,
   registerFanRoutes,

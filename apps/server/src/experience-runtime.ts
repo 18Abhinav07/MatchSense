@@ -12,9 +12,8 @@ import type {
 
 import type { FixtureProcessor } from "./fixture-processor.js";
 import type { ProductFixture, ProductRuntime } from "./product-runtime.js";
+import { isFixedExperienceFixture } from "./experience-fixture-contract.js";
 
-export const EXPERIENCE_HOME_TEAM: TeamCode = "ARG";
-export const EXPERIENCE_AWAY_TEAM: TeamCode = "FRA";
 export const EXPERIENCE_TEMPLATE_ID = "five-minute-match";
 export const EXPERIENCE_TEMPLATE_VERSION = 3;
 
@@ -198,20 +197,6 @@ const EXPERIENCE_BEATS = [
 ] as const satisfies readonly ExperienceBeatDefinition[];
 
 export type ExperienceBeatKey = (typeof EXPERIENCE_BEATS)[number]["key"];
-
-export const EXPERIENCE_BEAT_KEYS: readonly ExperienceBeatKey[] = Object.freeze(
-  EXPERIENCE_BEATS.map(({ key }) => key),
-);
-
-export function isFixedExperienceFixture(input: {
-  awayTeam: TeamCode;
-  homeTeam: TeamCode;
-}): boolean {
-  return (
-    input.homeTeam === EXPERIENCE_HOME_TEAM &&
-    input.awayTeam === EXPERIENCE_AWAY_TEAM
-  );
-}
 
 function requireFixedExperienceFixture(input: {
   awayTeam: TeamCode;

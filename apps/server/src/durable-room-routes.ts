@@ -14,7 +14,7 @@ import type {
   ExperienceRoomService,
   ExperienceRoomStreamEvent,
 } from "./experience-room-service.js";
-import { isFixedExperienceFixture } from "./experience-runtime.js";
+import { isFixedExperienceFixture } from "./experience-fixture-contract.js";
 import { RoomServiceError, type RoomServiceErrorCode } from "./room-service.js";
 
 const nickname = z.string().trim().min(1).max(30);

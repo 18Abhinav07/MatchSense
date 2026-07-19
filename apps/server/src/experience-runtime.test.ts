@@ -16,12 +16,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "./app.js";
 import {
-  EXPERIENCE_AWAY_TEAM,
-  EXPERIENCE_HOME_TEAM,
   EXPERIENCE_TEMPLATE_ID,
   EXPERIENCE_TEMPLATE_VERSION,
   createExperienceRuntime,
-  isFixedExperienceFixture,
   type ExperienceRuntime,
 } from "./experience-runtime.js";
 import type { FixtureProcessor } from "./fixture-processor.js";
@@ -210,17 +207,9 @@ function productRuntime() {
 }
 
 describe("server-owned Experience Match", () => {
-  it("exports the fixed authored fixture and version 3 template contract", () => {
-    expect(EXPERIENCE_HOME_TEAM).toBe("ARG");
-    expect(EXPERIENCE_AWAY_TEAM).toBe("FRA");
+  it("exports the version 3 template contract", () => {
     expect(EXPERIENCE_TEMPLATE_ID).toBe("five-minute-match");
     expect(EXPERIENCE_TEMPLATE_VERSION).toBe(3);
-    expect(isFixedExperienceFixture({ awayTeam: "FRA", homeTeam: "ARG" })).toBe(
-      true,
-    );
-    expect(isFixedExperienceFixture({ awayTeam: "ARG", homeTeam: "FRA" })).toBe(
-      false,
-    );
   });
 
   it("rejects non-authored fixtures before persistence or fixture registration", async () => {
@@ -229,6 +218,7 @@ describe("server-owned Experience Match", () => {
     const persistFixture = vi.fn(async () => undefined);
     const id = vi.fn(() => "wrong-fixture-run");
     const product = productRuntime();
+    const registerFixture = vi.spyOn(product, "registerFixture");
     const experience = createExperienceRuntime({
       id,
       persistFixture,
@@ -242,6 +232,7 @@ describe("server-owned Experience Match", () => {
       awayTeam: "ARG",
       homeTeam: "FRA",
       ownerFanId: "fan-1",
+      runId: "wrong-fixture-run",
     };
 
     await expect(experience.prepareFixture(wrongFixture)).rejects.toThrow();
@@ -250,8 +241,8 @@ describe("server-owned Experience Match", () => {
     expect(id).not.toHaveBeenCalled();
     expect(persistFixture).not.toHaveBeenCalled();
     expect(createRun).not.toHaveBeenCalled();
-    expect(repository.beats.size).toBe(0);
-    expect(product.fixture("experience:wrong-fixture-run")).toBeNull();
+    expect(registerFixture).not.toHaveBeenCalled();
+    expect(await experience.getRun("wrong-fixture-run")).toBeNull();
     await experience.close();
     await product.close();
   });
