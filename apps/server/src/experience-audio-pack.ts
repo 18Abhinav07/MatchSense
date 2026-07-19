@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import type { CanonicalMoment } from "@matchsense/contracts";
 
 import {
+  EXPERIENCE_AUDIO_BEAT_METADATA,
   EXPERIENCE_AUDIO_SCRIPT,
   EXPERIENCE_MEMORY_INTRO,
 } from "./experience-audio-script.js";
@@ -20,6 +21,8 @@ import {
 import { assertCompatibleMp3Streams, inspectMp3 } from "./mp3.js";
 
 const EXPERIENCE_BEAT_DELIMITER = ":beat:";
+const MAX_MANIFEST_BYTES = 256 * 1_024;
+const MAX_MP3_BYTES = 2 * 1_024 * 1_024;
 const EXPECTED_STREAM = Object.freeze({
   bitrateKbps: 64,
   channels: 1,
@@ -30,6 +33,12 @@ const EXPECTED_BEAT_KEYS = Object.freeze(
   Object.keys(EXPERIENCE_AUDIO_SCRIPT) as ExperienceBeatKey[],
 );
 const EXPECTED_BEAT_KEY_SET = new Set<string>(EXPECTED_BEAT_KEYS);
+const EXPECTED_BEAT_METADATA = new Map(
+  EXPERIENCE_AUDIO_BEAT_METADATA.map((metadata) => [
+    metadata.beatKey,
+    metadata,
+  ]),
+);
 const SAFE_MP3_BASENAME = /^[A-Za-z0-9][A-Za-z0-9-]*\.mp3$/u;
 const SHA_256 = /^[a-f0-9]{64}$/u;
 
@@ -160,6 +169,25 @@ function assertSafeMp3Basename(mp3Path: string) {
   }
 }
 
+function readBoundedRegularFile(input: {
+  filePath: string;
+  label: string;
+  maxBytes: number;
+}) {
+  const { filePath, label, maxBytes } = input;
+  const stat = lstatSync(filePath);
+  if (!stat.isFile()) {
+    throw new Error(`${label} must be a regular file, not a symlink or device`);
+  }
+  if (stat.size <= 0) {
+    throw new Error(`${label} must not be empty`);
+  }
+  if (stat.size > maxBytes) {
+    throw new Error(`${label} is too large (maximum ${maxBytes} bytes)`);
+  }
+  return readFileSync(filePath);
+}
+
 function readValidatedAsset(input: {
   entry: ManifestEntry;
   referenceContract: ReturnType<typeof inspectMp3>;
@@ -183,8 +211,26 @@ function readValidatedAsset(input: {
   ) {
     throw new Error("Experience Memory introduction metadata does not match");
   }
+  if (entry.beatKey !== "memory-intro") {
+    const metadata = EXPECTED_BEAT_METADATA.get(
+      entry.beatKey as ExperienceBeatKey,
+    );
+    if (
+      !metadata ||
+      metadata.kind !== entry.kind ||
+      metadata.minute !== entry.minute
+    ) {
+      throw new Error(
+        `Experience audio metadata kind or minute mismatch: ${entry.beatKey}`,
+      );
+    }
+  }
 
-  const bytes = readFileSync(path.join(rootDirectory, entry.mp3Path));
+  const bytes = readBoundedRegularFile({
+    filePath: path.join(rootDirectory, entry.mp3Path),
+    label: `Experience audio ${entry.beatKey} MP3`,
+    maxBytes: MAX_MP3_BYTES,
+  });
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   if (sha256 !== entry.sha256) {
     throw new Error(`Experience audio SHA-256 mismatch: ${entry.beatKey}`);
@@ -234,10 +280,13 @@ export function loadExperienceAudioPack(
     throw new Error("Experience audio reference silence stream does not match");
   }
 
+  const manifestBytes = readBoundedRegularFile({
+    filePath: path.join(rootDirectory, "manifest.json"),
+    label: "Experience audio manifest",
+    maxBytes: MAX_MANIFEST_BYTES,
+  });
   const manifest = requireRecord(
-    JSON.parse(
-      readFileSync(path.join(rootDirectory, "manifest.json"), "utf8"),
-    ) as unknown,
+    JSON.parse(manifestBytes.toString("utf8")) as unknown,
     "Experience audio manifest",
   );
   assertFixedManifestContract(manifest);

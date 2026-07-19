@@ -1,4 +1,40 @@
+import type { CanonicalEventKind } from "@matchsense/contracts";
+
 import type { ExperienceBeatKey } from "./experience-runtime.js";
+
+export interface ExperienceAudioBeatMetadata {
+  readonly beatKey: ExperienceBeatKey;
+  readonly kind: CanonicalEventKind;
+  readonly minute: string;
+}
+
+export const EXPERIENCE_AUDIO_BEAT_METADATA: readonly ExperienceAudioBeatMetadata[] =
+  Object.freeze(
+    [
+      ["kickoff", "phase.kickoff", "0'"],
+      ["opening-goal", "goal", "12'"],
+      ["opening-goal-var-review", "var.started", "13'"],
+      ["opening-goal-var-stands", "var.stands", "13'"],
+      ["home-yellow", "card.yellow", "24'"],
+      ["away-yellow-first-half", "card.yellow", "31'"],
+      ["away-penalty-awarded", "penalty.awarded", "40'"],
+      ["away-penalty-scored", "penalty.scored", "41'"],
+      ["half-time", "phase.half_time", "HT"],
+      ["second-half", "phase.second_half_start", "46'"],
+      ["away-red", "card.red", "58'"],
+      ["home-yellow-second-half", "card.yellow", "67'"],
+      ["away-yellow-second-half", "card.yellow", "67'"],
+      ["winning-goal", "goal", "78'"],
+      ["apparent-equalizer", "goal", "88'"],
+      ["equalizer-var-review", "var.started", "89'"],
+      ["equalizer-var-overturned", "var.overturned", "89'"],
+      ["late-corner", "corner", "90+2'"],
+      ["regulation-end", "phase.regulation_end", "90+4'"],
+      ["full-time", "phase.full_time", "FT"],
+    ].map(([beatKey, kind, minute]) =>
+      Object.freeze({ beatKey, kind, minute }),
+    ) as ExperienceAudioBeatMetadata[],
+  );
 
 export const EXPERIENCE_AUDIO_SCRIPT: Readonly<
   Record<ExperienceBeatKey, string>

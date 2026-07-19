@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  EXPERIENCE_AUDIO_BEAT_METADATA,
   EXPERIENCE_AUDIO_SCRIPT,
   EXPERIENCE_MEMORY_INTRO,
 } from "./experience-audio-script.js";
@@ -8,6 +9,20 @@ describe("authored Experience audio script", () => {
   it("exposes a runtime-frozen transcript registry", () => {
     expect(Object.isFrozen(EXPERIENCE_AUDIO_SCRIPT)).toBe(true);
     expect(Array.isArray(EXPERIENCE_AUDIO_SCRIPT)).toBe(false);
+  });
+
+  it("exposes frozen metadata for every authored beat exactly once", () => {
+    expect(Object.isFrozen(EXPERIENCE_AUDIO_BEAT_METADATA)).toBe(true);
+    expect(
+      EXPERIENCE_AUDIO_BEAT_METADATA.every((entry) => Object.isFrozen(entry)),
+    ).toBe(true);
+    expect(
+      EXPERIENCE_AUDIO_BEAT_METADATA.map(({ beatKey }) => beatKey).sort(),
+    ).toEqual(Object.keys(EXPERIENCE_AUDIO_SCRIPT).sort());
+    expect(
+      new Set(EXPERIENCE_AUDIO_BEAT_METADATA.map(({ beatKey }) => beatKey))
+        .size,
+    ).toBe(EXPERIENCE_AUDIO_BEAT_METADATA.length);
   });
 
   it("keeps every transcript nonempty and within 200 Unicode characters", () => {

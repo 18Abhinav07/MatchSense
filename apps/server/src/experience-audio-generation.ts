@@ -21,6 +21,7 @@ import {
   type ByteCommandRunner,
 } from "./audio-transcoder.js";
 import {
+  EXPERIENCE_AUDIO_BEAT_METADATA,
   EXPERIENCE_AUDIO_SCRIPT,
   EXPERIENCE_MEMORY_INTRO,
 } from "./experience-audio-script.js";
@@ -114,36 +115,9 @@ export type ExperienceFileCommandRunner = (
   command: ExperienceFileCommand,
 ) => Promise<void>;
 
-const BEAT_METADATA = [
-  ["kickoff", "phase.kickoff", "0'"],
-  ["opening-goal", "goal", "12'"],
-  ["opening-goal-var-review", "var.started", "13'"],
-  ["opening-goal-var-stands", "var.stands", "13'"],
-  ["home-yellow", "card.yellow", "24'"],
-  ["away-yellow-first-half", "card.yellow", "31'"],
-  ["away-penalty-awarded", "penalty.awarded", "40'"],
-  ["away-penalty-scored", "penalty.scored", "41'"],
-  ["half-time", "phase.half_time", "HT"],
-  ["second-half", "phase.second_half_start", "46'"],
-  ["away-red", "card.red", "58'"],
-  ["home-yellow-second-half", "card.yellow", "67'"],
-  ["away-yellow-second-half", "card.yellow", "67'"],
-  ["winning-goal", "goal", "78'"],
-  ["apparent-equalizer", "goal", "88'"],
-  ["equalizer-var-review", "var.started", "89'"],
-  ["equalizer-var-overturned", "var.overturned", "89'"],
-  ["late-corner", "corner", "90+2'"],
-  ["regulation-end", "phase.regulation_end", "90+4'"],
-  ["full-time", "phase.full_time", "FT"],
-] as const satisfies readonly (readonly [
-  ExperienceBeatKey,
-  CanonicalEventKind,
-  string,
-])[];
-
 export const EXPERIENCE_AUDIO_GENERATION_TARGETS: readonly ExperienceAudioGenerationTarget[] =
   Object.freeze([
-    ...BEAT_METADATA.map(([beatKey, kind, minute]) =>
+    ...EXPERIENCE_AUDIO_BEAT_METADATA.map(({ beatKey, kind, minute }) =>
       Object.freeze({
         beatKey,
         file: `${beatKey}.mp3`,

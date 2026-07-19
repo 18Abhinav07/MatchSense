@@ -1,5 +1,15 @@
 import { createHash } from "node:crypto";
-import { cp, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import {
+  cp,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  truncate,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -150,6 +160,35 @@ describe("loadExperienceAudioPack", () => {
     expect(load).toThrow(/winning-goal\.mp3|missing|ENOENT/i);
   });
 
+  it("rejects symlinked manifest and MP3 files before reading them", async () => {
+    const manifestPath = path.join(packRoot, "manifest.json");
+    const manifestTarget = path.join(packRoot, "manifest-target.json");
+    await rename(manifestPath, manifestTarget);
+    await symlink("manifest-target.json", manifestPath);
+    expect(load).toThrow(/manifest.*regular|symlink/i);
+
+    await unlink(manifestPath);
+    await rename(manifestTarget, manifestPath);
+    const mp3Path = path.join(packRoot, "winning-goal.mp3");
+    const mp3Target = path.join(packRoot, "winning-goal-target.mp3");
+    await rename(mp3Path, mp3Target);
+    await symlink("winning-goal-target.mp3", mp3Path);
+    expect(load).toThrow(/winning-goal.*regular|symlink/i);
+  });
+
+  it("rejects oversized manifests and MP3s before reading them", async () => {
+    const manifestPath = path.join(packRoot, "manifest.json");
+    await truncate(manifestPath, 256 * 1_024 + 1);
+    expect(load).toThrow(/manifest.*large|256/i);
+
+    await cp(COMMITTED_PACK, packRoot, { force: true, recursive: true });
+    await truncate(
+      path.join(packRoot, "winning-goal.mp3"),
+      2 * 1_024 * 1_024 + 1,
+    );
+    expect(load).toThrow(/winning-goal.*large|2 MiB/i);
+  });
+
   it("fails closed when an asset SHA-256 does not match", async () => {
     await mutateManifest((manifest) => {
       const entry = manifest.entries.find(
@@ -232,6 +271,19 @@ describe("loadExperienceAudioPack", () => {
       if (entry) entry.transcript = "Wrong words.";
     });
     expect(load).toThrow(/transcript/i);
+  });
+
+  it.each([
+    ["kind", "card.red"],
+    ["minute", "79'"],
+  ] as const)("rejects authored beat %s drift", async (field, value) => {
+    await mutateManifest((manifest) => {
+      const entry = manifest.entries.find(
+        ({ beatKey }) => beatKey === "winning-goal",
+      );
+      if (entry) entry[field] = value;
+    });
+    expect(load).toThrow(/metadata|kind|minute/i);
   });
 
   it("rejects unsafe asset paths", async () => {
